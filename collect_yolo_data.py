@@ -40,6 +40,7 @@ import time
 import tty
 
 import cv2
+import grpc
 import numpy as np
 from gz.msgs10.image_pb2 import Image
 from gz.transport13 import Node
@@ -47,7 +48,7 @@ from mavsdk import System
 from mavsdk.offboard import OffboardError, VelocityBodyYawspeed
 
 # ── Tunables ───────────────────────────────────────────────────────────────
-MAVSDK_ADDRESS    = "udp://:14540"
+MAVSDK_ADDRESS    = "udpin://0.0.0.0:14540"
 CAMERA_TOPIC      = "/world/roboverse/model/x500_vision_0/link/camera_link/sensor/IMX214/image"
 TAKEOFF_ALTITUDE  = 2.5
 
@@ -247,7 +248,15 @@ async def arm_and_takeoff(drone: System):
     print(f"\n[MAVSDK] Reached {alt:.2f} m – takeoff complete.")
 
 async def start_offboard(drone: System):
-    await drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
+    try:
+        await drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
+    except grpc.aio.AioRpcError as e:
+        print(f"[ERROR] gRPC link to mavsdk_server dead before offboard prime: "
+              f"{e.code()} – {e.details()}")
+        print("[HINT]  Check MAVSDK_ADDRESS scheme (must be udpin://) and that "
+              "PX4 SITL is publishing on UDP :14540.")
+        state.running = False
+        raise
     try:
         await drone.offboard.start()
         state.offboard_active = True
@@ -267,6 +276,9 @@ async def stream_pose(drone: System, stop: asyncio.Event):
             state.pos_d = pv.position.down_m
     except asyncio.CancelledError:
         pass
+    except grpc.aio.AioRpcError as e:
+        print(f"\n[STREAM] pose stream lost: {e.code()} – stopping control loop")
+        state.running = False
 
 async def stream_yaw(drone: System, stop: asyncio.Event):
     try:
@@ -276,6 +288,9 @@ async def stream_yaw(drone: System, stop: asyncio.Event):
             state.yaw_deg = att.yaw_deg
     except asyncio.CancelledError:
         pass
+    except grpc.aio.AioRpcError as e:
+        print(f"\n[STREAM] yaw stream lost: {e.code()} – stopping control loop")
+        state.running = False
 
 # ── Control loop (20 Hz body-velocity setpoints) ────────────────────────────
 async def control_loop(drone: System):
@@ -317,14 +332,20 @@ async def control_loop(drone: System):
                 print(f"\n[CTL] Released – hovering")
             prev_key = active
 
-        await drone.offboard.set_velocity_body(
-            VelocityBodyYawspeed(
-                forward_m_s    = fwd,
-                right_m_s      = rgt,
-                down_m_s       = dwn,
-                yawspeed_deg_s = yaw,
+        try:
+            await drone.offboard.set_velocity_body(
+                VelocityBodyYawspeed(
+                    forward_m_s    = fwd,
+                    right_m_s      = rgt,
+                    down_m_s       = dwn,
+                    yawspeed_deg_s = yaw,
+                )
             )
-        )
+        except grpc.aio.AioRpcError as e:
+            print(f"\n[CTL] gRPC drop in setpoint: {e.code()} – exiting loop. "
+                  f"PX4 failsafe will take over.")
+            state.running = False
+            break
 
         await asyncio.sleep(dt)
 

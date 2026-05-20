@@ -35,7 +35,7 @@ from mavsdk import System
 from mavsdk.offboard import OffboardError, VelocityBodyYawspeed
 
 # ── Tunable parameters ──────────────────────────────────────────────────────
-MAVSDK_ADDRESS   = "udp://:14540"
+MAVSDK_ADDRESS   = "udpin://0.0.0.0:14540"
 TAKEOFF_ALTITUDE = 2.5              # metres
 
 SPEED_XY      = 1.0    # m/s  horizontal body velocity

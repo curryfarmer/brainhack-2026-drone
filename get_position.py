@@ -24,9 +24,9 @@ async def run():
     # 1️⃣ Initialize & Connect
     drone = System()
     # Adjust system_address as needed:
-    #   SITL/QGC: "udp://:14540"
+    #   SITL/QGC: "udpin://0.0.0.0:14540"
     #   Hardware: "serial:///dev/ttyACM0:921600" or "tcp://192.168.1.2:5760"
-    await drone.connect(system_address="udp://:14540")
+    await drone.connect(system_address="udpin://0.0.0.0:14540")
 
     print("⏳ Waiting for PX4 connection...")
     async for state in drone.core.connection_state():
