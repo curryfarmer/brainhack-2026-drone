@@ -1,3 +1,4 @@
+# Edited by Claude — udpin:// scheme + comment update. See README §10.
 import asyncio
 from mavsdk import System
 from mavsdk.offboard import PositionNedYaw

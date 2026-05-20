@@ -1,3 +1,4 @@
+# Edited by Claude — udpin:// scheme. See README §10.
 """
 PX4 Keyboard Controller using MAVSDK – VelocityBodyYawspeed
 ============================================================

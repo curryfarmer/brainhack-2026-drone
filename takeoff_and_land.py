@@ -1,3 +1,4 @@
+# Edited by Claude — udpin:// scheme in connect-progress log. See README §10.
 import asyncio
 from mavsdk import System, telemetry
 from mavsdk.action import ActionError

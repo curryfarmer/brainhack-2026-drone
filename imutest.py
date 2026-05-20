@@ -1,3 +1,4 @@
+# Edited by Claude — udpin:// scheme. See README §10.
 import asyncio
 from mavsdk import System
 

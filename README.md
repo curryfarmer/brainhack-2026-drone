@@ -1,6 +1,10 @@
+<!-- Edited by Claude — see §10 for the list of files Claude has touched and why. -->
+
 # Qualifier MVP — User Manual
 
 User manual for the four new modules that wire the existing drone stack into an autonomous run for the **RoboVerse Qualifier 2026** challenge. For repo-wide context and the file-by-file inventory of the pre-existing code, see `CONTEXT.md`. For the design rationale and risks, see `APPROACH.md`.
+
+> **Working with AI?** Read **§10 — AI-assisted edits** before changing anything. It lists every file Claude has touched (and why), the rules the AI is told to follow, and the inventory of files that should be **reused** rather than rewritten.
 
 ```
 qualifier_run.py        ── main entry point (asyncio supervisor + mission/detection loops)
@@ -338,7 +342,7 @@ sleep 1
 ss -ulpn | grep 14540   # should now be empty or owned only by PX4
 ```
 
-`collect_yolo_data.py` now does an explicit gRPC sanity ping at the end of `connect()` and prints a `[FATAL] mavsdk_server died after health-handshake.` message instead of a deep traceback when it detects this failure mode.
+`collect_yolo_data.py` now delegates the full flight lifecycle (connect, arm, takeoff, offboard prime, land) to `drone_control.Drone` — the wrapper `qualifier_run.py` uses in production. That wrapper has a proven `arm_and_takeoff()` sequence (arm → takeoff → sleep 20 → NED-prime → offboard.start) and there is no longer any hand-rolled MAVSDK code in `collect_yolo_data.py`.
 
 ---
 
@@ -351,3 +355,109 @@ Things the code can't decide for you:
 3. **Verify RGB topic string** — the default in `MissionConfig.rgb_topic` is a guess from the camera-related files; confirm against your actual `gz topic -l`.
 4. **Red-barrel altitude** — judges' map will tell you; pick single- vs two-altitude pass.
 5. **Competition rig GPU** — verify YOLO runs at ≥10 FPS with chosen weights at `--device cuda`. If not, drop to `yolov10n.pt`-class architecture and 320 input resolution.
+
+---
+
+## 9. Image capture (Gazebo + screen fallback)
+
+`collect_yolo_data.py` records training data while you fly. The capture button keys come from `keyboardcontrol.py`'s key handler:
+
+| Key | Effect |
+|---|---|
+| `C` | Single shot now |
+| `P` | Burst — queue 10 frames |
+| `O` | Toggle continuous auto-save |
+| `[` `]` | Slow / speed the auto-save tick (0.25 / 0.5 / 1.0 / 2.0 s) |
+| `N` | Cycle filename prefix (`yellow` → `red` → `mixed`) |
+
+The frame source is automatic:
+
+1. **Primary — Gazebo camera.** `gz.transport13.Node().subscribe()` listens on `CAMERA_TOPIC` (default `/world/roboverse/model/x500_vision_0/link/camera_link/sensor/IMX214/image`). Every frame fills `_latest_frame_bgr`.
+2. **Fallback — screen grab via [`mss`](https://pypi.org/project/mss/).** If the Gazebo subscribe call returns `False`, or `_latest_frame_bgr` is still `None` when a capture is requested, `_grab_screen()` snapshots the primary monitor and returns it as BGR. Put the Gazebo viewport on the primary monitor and the recorded JPEGs will be the cropped Gazebo view; if Gazebo is offline, you get the desktop instead — same path through the rest of the pipeline.
+
+`mss` is now listed in `requirements.txt`. If it can't be imported the fallback prints a one-line warning and silently no-ops — the script still flies fine, you just can't capture.
+
+Output paths are unchanged: `data/train/images/<prefix>_<ts>.jpg` for the image, `session_meta/<prefix>_<ts>.json` for the pose sidecar.
+
+---
+
+## 10. AI-assisted edits
+
+This file and a handful of others have been touched by Claude (Anthropic's AI assistant) during debug sessions. Every Claude-edited file has a top-of-file marker:
+
+- Python: `# Edited by Claude — <one-line reason>. See README §10.`
+- Markdown: `<!-- Edited by Claude — ... -->`
+
+### 10.1 Files Claude has edited
+
+| File | What changed |
+|---|---|
+| `collect_yolo_data.py` | Round 1 udpin scheme; Round 2 sanity-ping + arm hardening; Round 3 ripped out hand-rolled MAVSDK and delegated to `drone_control.Drone`; screen-capture fallback added in `_grab_screen()` |
+| `keyboardcontrol.py` | `MAVSDK_ADDRESS` changed `udp://:14540` → `udpin://0.0.0.0:14540` |
+| `get_position.py` | Same `udpin://` fix + comment update |
+| `imutest.py` | Same `udpin://` fix |
+| `takeoff_and_land.py` | Stale log message updated to match `udpin://` |
+| `requirements.txt` | Added `mss` for the screen-capture fallback |
+| `README.md` | This document — install/troubleshooting/inventory sections |
+
+### 10.2 Files Claude has NOT touched (reuse these)
+
+When asking for new behaviour, **point the AI at these first** so it composes them instead of writing new code.
+
+**Flight wrappers (use these — do not re-implement):**
+- `drone_control.py` — `Drone` class with `connect`, `arm_and_takeoff`, `land`, `send_velocity` (NED), `rotate_to_yaw`. Proven, used by `qualifier_run.py`.
+- `drone_control_new.py` — alternative wrapper with `set_takeoff_altitude` and a more-forgiving health gate (`wait_until_ready`). Uses `goto_location` instead of offboard.
+- `basic_offboard.py` — minimum-correct offboard example.
+
+**Mission pieces:**
+- `qualifier_run.py` — production asyncio supervisor: mission loop + detection loop + watchdogs.
+- `coverage.py` — pure lawnmower waypoint generator (see §11).
+- `detection_to_world.py` — bbox + depth + pose → world-NED point.
+- `barrel_log.py` — thread-safe dedup + scoring + CSV.
+
+**Perception + planners (untouched, kept as-is):**
+- `Detector.py`, `UseDetectorExample.py` — YOLO inference wrapper.
+- `AvoidancePlanner.py`, `RRTStarPlanner.py`, `RRTExample.py`, `VelocityPlanner.py`, `PointCloudPlanner.py` — reactive + global path planning.
+- `GlobalMapper.py`, `GlobalMapper_new.py` — occupancy mapping.
+- `depthcloud.py`, `depth_receiver.py`, `depthtest.py`, `get_depth.py` — depth sensor handling.
+
+**Helpers/utilities (untouched):**
+- `get_battery.py`, `get_flightmode.py`, `get_position_with_task.py`, `get_video.py`, `is_arm_air.py`, `imu.py`, `drone_diagnostics.py`, `photo.py`, `save_photo.py`, `top_down.py`, `go_to.py` — small MAVSDK probes.
+- `gzphotodetectorsaver.py` — Gazebo photo saver.
+- `barrel_log.py`, `pipeline.py` — training pipeline glue.
+
+**Training scripts (untouched):**
+- `train_yolo.py`, `eval_model.py`, `deploy_model.py`, `gen_data_yaml.py`, `gen_smoke_data.py`, `split_train_val.py`, `validate_labels.py`, `import_roboflow.py`, `Train_YOLO_Models.ipynb`, `Train_YOLO_Models_new.ipynb`.
+
+If you (or the AI) is about to write code that does anything any of the above already does, **stop and use the existing file instead.**
+
+### 10.3 Rules the AI follows
+
+1. **Reuse first.** Use `drone_control.Drone`, `basic_offboard.py`, `coverage.py`, etc. before writing new code.
+2. **Document in README.** Anything new lands in this file, in a section like the one you're reading. Keep it human-readable — no terse compression here.
+3. **Mark edits.** Every Claude-edited file gets the `Edited by Claude` marker; every new file is added to §10.1.
+4. **Smallest change.** Minimum lines to fix the problem. No feature creep, no speculative abstractions.
+5. **Surface failures.** No silent `except Exception: pass`. Print a one-line diagnostic and either continue or re-raise.
+
+---
+
+## 11. Waypoint generation (today + roadmap)
+
+Today the project uses one strategy:
+
+### 11.1 Pre-baked lawnmower (current behaviour)
+
+`coverage.generate_lawnmower(origin_north, origin_east, width_north, width_east, altitude, lane_spacing=3.5, along_axis="north")` returns a list of `Waypoint(north, east, down, yaw_deg, is_turn)` covering a rectangular region in a boustrophedon (snake) sweep. The number of lanes is `ceil(|width_east| / lane_spacing) + 1`, and every other lane reverses direction so the drone walks back and forth without dead heads.
+
+Generation happens **once** at the start of `qualifier_run.mission_loop()` (around line 355). The list is then handed to `_go_to_waypoint(...)` one element at a time. The drone is considered "at" a waypoint when its NED distance is below `cfg.waypoint_radius_m` (default 0.8 m). On supervisor restart, `coverage.filter_unvisited(...)` drops the leading waypoints we already reached so we don't re-fly completed lanes.
+
+In other words, **the waypoint list itself is static**. What is "dynamic" is the *path between* waypoints: while flying toward a target, `qualifier_run` keeps the AvoidancePlanner (`AvoidancePlanner.py`) in the loop. If the depth stream sees an obstacle, the planner deviates the velocity command to clear it, then re-targets the original waypoint once free. The original list never gets regenerated.
+
+### 11.2 What "dynamic" generation would look like
+
+If you want the *list* to change at runtime, two natural extensions:
+
+- **Frontier-based exploration.** After every detection or every N seconds, look at the occupancy grid (`GlobalMapper.py`) and re-issue waypoints at the boundary of unexplored cells. Replace `generate_lawnmower(...)` at line 355 with a call into a `frontier_next(map)` helper that returns the next K waypoints. The mission loop already consumes the list one element at a time so swapping the source is a single-line change.
+- **Re-targeting around detections.** When a barrel is logged in `barrel_log`, generate a tighter sweep around it (e.g. four waypoints at 1.5 m radius). Insert those at the head of the queue. Easiest is a `collections.deque` instead of a `list` so you can `appendleft(...)` without reshuffling.
+
+Neither is implemented today — flag the request and we'll add it as its own PR with the same reuse-first ethos.

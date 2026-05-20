@@ -1,3 +1,5 @@
+# Edited by Claude — flight delegated to drone_control.Drone wrapper,
+#                    screen-capture fallback added. See README §10.
 """
 YOLO Data Collection — Hybrid Keyboard Fly + Auto-Tick + Burst Capture
 =======================================================================
@@ -122,10 +124,14 @@ VEL_MAP = {
     'd': ( 0.0,       0.0,       0.0,      YAW_RATE),
 }
 
-# ── Camera (Gazebo) ─────────────────────────────────────────────────────────
+# ── Camera (Gazebo + screen fallback) ───────────────────────────────────────
 _frame_lock = threading.Lock()
 _latest_frame_bgr: np.ndarray = None
 _frame_count = 0
+
+# Lazy screen-grabber. Initialised on first fallback request so headless rigs
+# without `mss` or without a display only pay the import cost if Gazebo fails.
+_screen_sct = None
 
 def _image_callback(msg: Image):
     global _latest_frame_bgr, _frame_count
@@ -138,9 +144,34 @@ def _image_callback(msg: Image):
     except Exception as e:
         print(f"\n[CAM] decode error: {e}")
 
+def _grab_screen():
+    """Fallback: grab the primary monitor as BGR. Returns None if unsupported."""
+    global _screen_sct
+    if _screen_sct is None:
+        try:
+            import mss  # noqa: WPS433 — lazy import is the point
+            _screen_sct = mss.mss()
+            print("[CAM] Screen-capture fallback enabled (mss).")
+        except Exception as e:
+            print(f"[CAM] screen fallback unavailable: {e}")
+            _screen_sct = False  # don't retry
+            return None
+    if _screen_sct is False:
+        return None
+    try:
+        shot = _screen_sct.grab(_screen_sct.monitors[1])  # monitor[0] is virtual full; [1] = primary
+        arr = np.array(shot)  # BGRA
+        return cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
+    except Exception as e:
+        print(f"[CAM] screen grab failed: {e}")
+        return None
+
 def _grab_latest():
+    """Return the latest Gazebo frame, or fall back to a screen grab."""
     with _frame_lock:
-        return None if _latest_frame_bgr is None else _latest_frame_bgr.copy()
+        if _latest_frame_bgr is not None:
+            return _latest_frame_bgr.copy()
+    return _grab_screen()
 
 # ── Terminal helpers ───────────────────────────────────────────────────────
 class RawTerminal:
@@ -416,11 +447,15 @@ async def main():
     await wrapper.connect()
 
     # 2. Gazebo camera subscriber AFTER MAVSDK is fully up.
+    #    If subscribe fails or no frames arrive, capture falls back to
+    #    screen grab via mss (see _grab_screen). Don't abort the run.
     cam_node = Node()
-    if not cam_node.subscribe(Image, CAMERA_TOPIC, _image_callback):
-        print(f"[CAM] FAILED to subscribe to {CAMERA_TOPIC}. Is Gazebo running?")
-        return
-    print(f"[CAM] Subscribed to {CAMERA_TOPIC}")
+    if cam_node.subscribe(Image, CAMERA_TOPIC, _image_callback):
+        print(f"[CAM] Subscribed to {CAMERA_TOPIC}")
+    else:
+        print(f"[CAM] WARN: failed to subscribe to {CAMERA_TOPIC}")
+        print(f"[CAM] Capture will fall back to screen grab. Make sure Gazebo")
+        print(f"[CAM] window is visible on the primary monitor.")
 
     # 3. Background tasks: telemetry + capture. Telemetry streams sit idle
     #    until offboard kicks in; the wrapper's arm_and_takeoff uses sleep(20)
