@@ -45,12 +45,14 @@ import numpy as np
 from gz.msgs10.image_pb2 import Image
 from gz.transport13 import Node
 from mavsdk import System
-from mavsdk.offboard import OffboardError, VelocityBodyYawspeed
+from mavsdk.offboard import VelocityBodyYawspeed
+
+from drone_control import Drone
 
 # ── Tunables ───────────────────────────────────────────────────────────────
-MAVSDK_ADDRESS    = "udpin://0.0.0.0:14540"
+# Connect string + takeoff altitude live in drone_control.Drone (the proven
+# wrapper used by qualifier_run.py). We do not duplicate them here.
 CAMERA_TOPIC      = "/world/roboverse/model/x500_vision_0/link/camera_link/sensor/IMX214/image"
-TAKEOFF_ALTITUDE  = 2.5
 
 SPEED_XY = 1.0
 SPEED_Z  = 1.0
@@ -222,75 +224,15 @@ def keyboard_thread():
                 state.class_prefix_idx = (state.class_prefix_idx + 1) % len(CLASS_PREFIXES)
                 out(f"\n[CAP] class prefix = {CLASS_PREFIXES[state.class_prefix_idx]}\n")
 
-# ── MAVSDK helpers ──────────────────────────────────────────────────────────
-async def _sanity_ping(drone: System):
-    """Confirm mavsdk_server still alive after the health-handshake.
-    A zombie mavsdk_server (stale UDP :14540 binding) lets connect() and
-    one telemetry.health() iter succeed, then the server exits and the
-    next RPC dies with 'Socket closed'. Fail fast here instead."""
-    try:
-        async def _probe():
-            async for s in drone.core.connection_state():
-                if s.is_connected:
-                    return
-        await asyncio.wait_for(_probe(), timeout=5.0)
-    except (asyncio.TimeoutError, grpc.aio.AioRpcError) as e:
-        print("\n[FATAL] mavsdk_server died after health-handshake.")
-        print("[FATAL] Likely a stale process is holding UDP :14540.")
-        print("[FATAL] Run:  pkill -9 -f mavsdk_server  and try again.")
-        if isinstance(e, grpc.aio.AioRpcError):
-            print(f"[FATAL] gRPC code={e.code()} details={e.details()}")
-        raise
-
-async def connect(drone: System):
-    print(f"[MAVSDK] Connecting to {MAVSDK_ADDRESS} ...")
-    await drone.connect(system_address=MAVSDK_ADDRESS)
-    async for health in drone.telemetry.health():
-        print(f"[HEALTH] GPS={health.is_global_position_ok}  "
-              f"Home={health.is_home_position_ok}  "
-              f"Arm={health.is_armable}")
-        if health.is_global_position_ok and health.is_home_position_ok:
-            break
-    await _sanity_ping(drone)
-    print("[MAVSDK] Connected and healthy.")
-
-async def arm_and_takeoff(drone: System):
-    try:
-        print("[MAVSDK] Arming ...")
-        await drone.action.arm()
-        print(f"[MAVSDK] Taking off to {TAKEOFF_ALTITUDE} m ...")
-        await drone.action.takeoff()
-        async for pos in drone.telemetry.position():
-            alt = pos.relative_altitude_m
-            sys.stdout.write(f"\r[MAVSDK] Alt: {alt:.2f} / {TAKEOFF_ALTITUDE:.2f} m   ")
-            sys.stdout.flush()
-            if alt >= TAKEOFF_ALTITUDE - 0.20:
-                break
-        print(f"\n[MAVSDK] Reached {alt:.2f} m – takeoff complete.")
-    except grpc.aio.AioRpcError as e:
-        print(f"\n[ERROR] gRPC dropped during arm/takeoff: {e.code()} – {e.details()}")
-        print("[HINT]  mavsdk_server probably died. Check for stale processes:")
-        print("[HINT]    pkill -9 -f mavsdk_server   then relaunch PX4 SITL.")
-        state.running = False
-        raise
-
-async def start_offboard(drone: System):
-    try:
-        await drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
-    except grpc.aio.AioRpcError as e:
-        print(f"[ERROR] gRPC link to mavsdk_server dead before offboard prime: "
-              f"{e.code()} – {e.details()}")
-        print("[HINT]  Check MAVSDK_ADDRESS scheme (must be udpin://) and that "
-              "PX4 SITL is publishing on UDP :14540.")
-        state.running = False
-        raise
-    try:
-        await drone.offboard.start()
-        state.offboard_active = True
-        print("[MAVSDK] Offboard mode ACTIVE.")
-    except OffboardError as e:
-        print(f"[ERROR] Offboard start failed: {e._result.result}")
-        raise
+# ── MAVSDK flight ───────────────────────────────────────────────────────────
+# Connect, arm, takeoff, offboard start, and land are delegated to
+# `drone_control.Drone` (same wrapper qualifier_run.py uses). That wrapper
+# does the proven sequence:
+#   connect → action.arm → action.takeoff → sleep(20) →
+#   offboard.set_velocity_ned(0,0,0,0) → offboard.start
+# We keep body-frame velocity for the keyboard loop because that is what the
+# W/A/S/D/U/J/H/K mapping is built for — once offboard is started (with a
+# NED prime), PX4 accepts both VelocityNedYaw and VelocityBodyYawspeed.
 
 # ── Telemetry stream tasks ──────────────────────────────────────────────────
 async def stream_pose(drone: System, stop: asyncio.Event):
@@ -320,29 +262,41 @@ async def stream_yaw(drone: System, stop: asyncio.Event):
         state.running = False
 
 # ── Control loop (20 Hz body-velocity setpoints) ────────────────────────────
-async def control_loop(drone: System):
-    print("[MAVSDK] Control loop running at 20 Hz ...")
+async def control_loop(wrapper: Drone):
+    print("[CTL] Control loop running at 20 Hz ...")
     dt = 0.05
     prev_key = ''
+    sys_drone: System = wrapper.drone
 
     while state.running:
         if state.takeoff:
             state.takeoff = False
-            await arm_and_takeoff(drone)
-            await start_offboard(drone)
+            try:
+                await wrapper.arm_and_takeoff()
+                state.offboard_active = True
+                print("[CTL] Offboard ACTIVE — fly with U/J/H/K/W/S/A/D, L=land, Q=quit")
+            except Exception as e:
+                print(f"\n[ERROR] arm_and_takeoff failed: {type(e).__name__}: {e}")
+                print("[HINT]  Check PX4 SITL is running and try:")
+                print("[HINT]    pkill -9 -f mavsdk_server  and rerun.")
+                state.running = False
+                break
 
         if state.land:
             state.land            = False
             state.offboard_active = False
             _update_active_key('')
-            print("[MAVSDK] Landing ...")
+            print("[CTL] Landing (offboard.stop + action.land) ...")
             try:
-                await drone.offboard.stop()
+                await sys_drone.offboard.stop()
             except Exception:
                 pass
-            await drone.action.land()
-            await asyncio.sleep(8)
-            print("[MAVSDK] Landed.")
+            try:
+                await sys_drone.action.land()
+                await asyncio.sleep(8)
+                print("[CTL] Landed.")
+            except Exception as e:
+                print(f"[ERROR] land failed: {e}")
 
         if not state.offboard_active:
             await asyncio.sleep(dt)
@@ -360,7 +314,7 @@ async def control_loop(drone: System):
             prev_key = active
 
         try:
-            await drone.offboard.set_velocity_body(
+            await sys_drone.offboard.set_velocity_body(
                 VelocityBodyYawspeed(
                     forward_m_s    = fwd,
                     right_m_s      = rgt,
@@ -450,37 +404,30 @@ def init_dirs():
             f.write("yellow_barrel\nred_barrel\n")
         print(f"[INIT] wrote {CLASSES_FILE}")
 
-# ── Shutdown ────────────────────────────────────────────────────────────────
-async def shutdown(drone: System):
-    print("[MAVSDK] Shutting down ...")
-    state.offboard_active = False
-    try:
-        await drone.offboard.stop()
-    except Exception:
-        pass
-    try:
-        await drone.action.disarm()
-    except Exception:
-        pass
-    print("[MAVSDK] Done.")
-
 # ── Main ───────────────────────────────────────────────────────────────────
 async def main():
     init_dirs()
 
-    # Camera subscriber — node MUST stay referenced for whole process lifetime
+    # 1. MAVSDK first — connect to PX4 before bringing up Gazebo transport
+    #    threads, otherwise gz.transport13's background I/O can race with
+    #    mavsdk_server's gRPC init and corrupt the UDP socket state.
+    wrapper = Drone()
+    print(f"[MAVSDK] Connecting via drone_control.Drone wrapper ...")
+    await wrapper.connect()
+
+    # 2. Gazebo camera subscriber AFTER MAVSDK is fully up.
     cam_node = Node()
     if not cam_node.subscribe(Image, CAMERA_TOPIC, _image_callback):
         print(f"[CAM] FAILED to subscribe to {CAMERA_TOPIC}. Is Gazebo running?")
         return
     print(f"[CAM] Subscribed to {CAMERA_TOPIC}")
 
-    drone = System()
-    await connect(drone)
-
+    # 3. Background tasks: telemetry + capture. Telemetry streams sit idle
+    #    until offboard kicks in; the wrapper's arm_and_takeoff uses sleep(20)
+    #    instead of polling position(), so there is no concurrent-consumer race.
     stop = asyncio.Event()
-    pose_task = asyncio.create_task(stream_pose(drone, stop))
-    yaw_task  = asyncio.create_task(stream_yaw(drone, stop))
+    pose_task = asyncio.create_task(stream_pose(wrapper.drone, stop))
+    yaw_task  = asyncio.create_task(stream_yaw(wrapper.drone, stop))
     cap_task  = asyncio.create_task(capture_scheduler())
 
     kb = threading.Thread(target=keyboard_thread, daemon=True)
@@ -489,7 +436,7 @@ async def main():
     print("[INFO] Press T to takeoff. Press O to start auto-save once in air.\n")
 
     try:
-        await control_loop(drone)
+        await control_loop(wrapper)
     except asyncio.CancelledError:
         pass
     finally:
@@ -500,7 +447,10 @@ async def main():
                 await t
             except (asyncio.CancelledError, Exception):
                 pass
-        await shutdown(drone)
+        try:
+            await wrapper.land()
+        except Exception as e:
+            print(f"[SHUTDOWN] wrapper.land() raised: {e}")
         # keep cam_node alive until here so callback isn't called on freed obj
         del cam_node
 
