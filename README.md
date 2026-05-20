@@ -19,9 +19,20 @@ Everything else in `Codes/` is **pre-existing** and is consumed by these four fi
 
 ## 1. Install
 
-### 1.0 Clone the repo
+### 1.0 Get the code
 
-The codebase lives at https://github.com/curryfarmer/brainhack-2026-drone (private). Clone with either method:
+Two ways. Pick whichever fits your workflow — both end up in a working folder you can `cd` into.
+
+**Drop-in (recommended for the drone PC).** No git, no clone — just download a fresh ZIP every time you want the latest code. This is what the rig actually does. See §12 for the full loop.
+
+```bash
+wget https://github.com/curryfarmer/brainhack-2026-drone/archive/refs/heads/main.zip
+unzip main.zip
+cd brainhack-2026-drone-main
+chmod +x run.sh
+```
+
+**Clone (for development on your laptop).**
 
 ```bash
 # HTTPS (uses a personal-access token or git credential manager)
@@ -398,6 +409,8 @@ This file and a handful of others have been touched by Claude (Anthropic's AI as
 | `imutest.py` | Same `udpin://` fix |
 | `takeoff_and_land.py` | Stale log message updated to match `udpin://` |
 | `requirements.txt` | Added `mss` for the screen-capture fallback |
+| `drone_control.py` | Round 4 — `_kill_stale_servers()` called at top of `connect()` to auto-clean any zombie `mavsdk_server` before the wrapper binds UDP :14540 |
+| `run.sh` | Round 4 — new drop-in launcher; kills stale servers, names the port owner, then `exec`s the script (see §12) |
 | `README.md` | This document — install/troubleshooting/inventory sections |
 
 ### 10.2 Files Claude has NOT touched (reuse these)
@@ -405,7 +418,7 @@ This file and a handful of others have been touched by Claude (Anthropic's AI as
 When asking for new behaviour, **point the AI at these first** so it composes them instead of writing new code.
 
 **Flight wrappers (use these — do not re-implement):**
-- `drone_control.py` — `Drone` class with `connect`, `arm_and_takeoff`, `land`, `send_velocity` (NED), `rotate_to_yaw`. Proven, used by `qualifier_run.py`.
+- `drone_control.py` — `Drone` class with `connect`, `arm_and_takeoff`, `land`, `send_velocity` (NED), `rotate_to_yaw`. Proven, used by `qualifier_run.py`. *(Has one Claude-added helper — `_kill_stale_servers()` — but the public surface is unchanged.)*
 - `drone_control_new.py` — alternative wrapper with `set_takeoff_altitude` and a more-forgiving health gate (`wait_until_ready`). Uses `goto_location` instead of offboard.
 - `basic_offboard.py` — minimum-correct offboard example.
 
@@ -461,3 +474,85 @@ If you want the *list* to change at runtime, two natural extensions:
 - **Re-targeting around detections.** When a barrel is logged in `barrel_log`, generate a tighter sweep around it (e.g. four waypoints at 1.5 m radius). Insert those at the head of the queue. Easiest is a `collections.deque` instead of a `list` so you can `appendleft(...)` without reshuffling.
 
 Neither is implemented today — flag the request and we'll add it as its own PR with the same reuse-first ethos.
+
+---
+
+## 12. Drop-in workflow (no git)
+
+The drone PC runs the code by downloading the GitHub ZIP, unzipping it, and launching from inside the extracted folder. There is **no `git pull`** on the rig — every code change cycle is a fresh download. This section is the single source of truth for that flow.
+
+### 12.1 One-time setup (per drone PC)
+
+These only need to be done once. They install Python deps and the Gazebo Python bindings into the rig's system Python.
+
+```bash
+# Python deps (covers mavsdk, ultralytics, opencv, mss, etc.)
+pip install -r requirements.txt
+
+# Gazebo Harmonic — provides gz.transport13 + gz.msgs10
+sudo apt install gz-harmonic
+```
+
+If you need torch on a specific accelerator, see §1.2.
+
+### 12.2 Every-run loop
+
+```bash
+# 1. Grab the latest code as a ZIP from GitHub. Refresh this each iteration.
+wget https://github.com/curryfarmer/brainhack-2026-drone/archive/refs/heads/main.zip -O latest.zip
+unzip -o latest.zip
+cd brainhack-2026-drone-main
+
+# 2. Make the launcher executable (first time only — the ZIP loses the bit).
+chmod +x run.sh
+
+# 3. Launch any script through run.sh. The launcher kills zombie mavsdk_server
+#    processes and reports who else owns UDP :14540 before handing off to Python.
+./run.sh collect_yolo_data.py
+```
+
+For other scripts:
+
+```bash
+./run.sh basic_offboard.py
+./run.sh keyboardcontrol.py
+./run.sh qualifier_run.py --no-detector --budget 60
+```
+
+### 12.3 What `run.sh` does (and why)
+
+The launcher is a five-step shell wrapper:
+
+1. `pkill -9 -f mavsdk_server` — kill any subprocess from a previous crashed run that's still holding UDP `:14540`. Silent if nothing matches.
+2. `sleep 0.5` — give the kernel a moment to release the bound port.
+3. `ss -ulpn | grep :14540` — check who, if anyone, still owns the port.
+4. If the port is owned by something we didn't just kill (e.g. PX4 itself), print a warning line naming the process plus the manual fix recipes.
+5. `exec python3 <your script> <args...>` — replace the shell with Python so Ctrl-C still cleans up the way you expect.
+
+`drone_control.Drone.connect()` ALSO runs the same `pkill` internally (see `_kill_stale_servers()`), so even if you forget the launcher, scripts that use the wrapper (`collect_yolo_data.py`, `qualifier_run.py`) are still self-healing.
+
+### 12.4 If `run.sh` still reports a bind error
+
+Two cases:
+
+- **PX4 SITL is configured to *bind* :14540 itself.** Some PX4 launch scripts run `mavlink start -u 14540 ...` where `-u` means "bind UDP". When that happens, MAVSDK cannot also `udpin://` the same port — it has to `udpout://` (send to) instead. One-line fix: edit `drone_control.py:27` and change
+  ```python
+  await self.drone.connect(system_address="udpin://0.0.0.0:14540")
+  ```
+  to
+  ```python
+  await self.drone.connect(system_address="udpout://127.0.0.1:14540")
+  ```
+  Then re-zip / re-download and run again. The launcher's warning line will tell you whether PX4 is the binder — look at the `users:(("px4",...))` portion of the `ss` output.
+
+- **Some unrelated process is holding :14540** (a stray QGroundControl, a leftover SITL from a previous reboot, etc.). Find the PID and kill it:
+  ```bash
+  sudo lsof -iUDP:14540
+  sudo kill -9 <PID>
+  ```
+
+Once `ss -ulpn | grep :14540` reports an empty line, MAVSDK can bind cleanly.
+
+### 12.5 If the screen-capture fallback ever runs
+
+If you see `[CAM] Screen-capture fallback enabled (mss).` in the console, the Gazebo camera topic was unavailable. Put the Gazebo window on the primary monitor so the recorded frames contain the simulated scene. If `mss` itself fails to import (`[CAM] screen fallback unavailable`), `pip install mss` and try again.
