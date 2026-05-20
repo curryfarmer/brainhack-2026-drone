@@ -15,17 +15,38 @@ Everything else in `Codes/` is **pre-existing** and is consumed by these four fi
 
 ## 1. Install
 
+### 1.0 Clone the repo
+
+The codebase lives at https://github.com/curryfarmer/brainhack-2026-drone (private). Clone with either method:
+
+```bash
+# HTTPS (uses a personal-access token or git credential manager)
+git clone https://github.com/curryfarmer/brainhack-2026-drone.git
+cd brainhack-2026-drone
+
+# OR SSH (recommended once your key is on github.com/settings/keys)
+git clone git@github.com:curryfarmer/brainhack-2026-drone.git
+cd brainhack-2026-drone
+```
+
+If you don't have collaborator access yet, ask the repo owner (`curryfarmer`) to add you under **Settings → Collaborators**.
+
+> The pre-trained `yolov10n.pt` (5.6 MB) is checked in, so a fresh clone is runnable as-is for `--no-detector` smoke tests. Training data and trained barrel weights are **not** committed — see `CONTEXT.md` for the side-channel that distributes them.
+
+### 1.1 Python environment
+
 One-time setup (already done on this machine, repeat on the competition rig):
 
 ```bash
-cd Codes
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip wheel setuptools
 pip install -r requirements.txt
 ```
 
-**Torch flavour**: `requirements.txt` does not pin a torch wheel — install the right one for your platform.
+### 1.2 Torch flavour
+
+`requirements.txt` does not pin a torch wheel — install the right one for your platform.
 
 ```bash
 # CPU dev (Mac, no GPU)
@@ -35,7 +56,9 @@ pip install torch torchvision
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 ```
 
-**Gazebo Python bindings (`gz.transport13`, `gz.msgs10`) are NOT on PyPI.** Install Gazebo Harmonic from system packages:
+### 1.3 Gazebo Harmonic
+
+The Gazebo Python bindings (`gz.transport13`, `gz.msgs10`) are **not** on PyPI. Install Gazebo Harmonic from system packages:
 
 ```bash
 brew install gz-harmonic                          # macOS
@@ -43,6 +66,19 @@ sudo apt install gz-harmonic                      # Ubuntu 24.04 (after adding p
 ```
 
 Without Gazebo Harmonic you can still import `qualifier_run` for unit testing — sensor/depth paths will refuse to start.
+
+### 1.4 PX4 SITL
+
+The drone scripts all expect PX4 SITL on `udpin://0.0.0.0:14540`. On the competition rig PX4 is launched separately; for local dev:
+
+```bash
+# clone + build PX4 (one-time)
+git clone --recursive https://github.com/PX4/PX4-Autopilot.git
+cd PX4-Autopilot
+make px4_sitl gz_x500_depth        # x500 quad with depth camera + Gazebo Harmonic
+```
+
+This boots PX4 on `:14540` and spawns the x500 model in Gazebo. Leave it running in its own terminal — every script in this repo will discover it.
 
 ---
 
