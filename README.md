@@ -319,6 +319,27 @@ Recommended addition: record `(timestamp, pose, depth_frame, rgb_frame)` tuples 
 | Barrel double-counted | Pose drift > `dedup_radius` between sightings | Increase `BarrelLog(dedup_radius=...)`; default 2.0 m |
 | Detector callback runs but no entries in CSV | `context["depth"]` was None when the YOLO frame ran — depth stream lagging | Verify depth receiver is publishing; check `cfg.depth_topic` |
 
+### 7.1 MAVSDK gRPC failures
+
+The `mavsdk_server` subprocess (spawned by `System()`) is the most common silent failure point. Three diagnostics + one cleanup snippet cover ~all cases:
+
+| gRPC error | Where it fires | Cause | Fix |
+|---|---|---|---|
+| `AioRpcError: Socket closed` (UNAVAILABLE) | first `drone.action.arm()` | Stale `mavsdk_server` holding UDP `:14540` from a previous crashed run. New server can't bind, exits, next RPC dies. | Run the cleanup below. |
+| `AioRpcError: recvmsg:Connection reset by peer` (UNAVAILABLE) | first `drone.offboard.set_velocity_body` | `MAVSDK_ADDRESS` uses legacy `udp://:14540`. MAVSDK 2.x reads that as `udpout` and the server segfaults on the first outbound write. | Use `udpin://0.0.0.0:14540`. (Already fixed in this repo; regression-catcher.) |
+| Health loop hangs forever (no traceback) | inside `connect()` | PX4 SITL not running, or running on a different port. | `pgrep -fa px4` and `ss -ulpn \| grep 14540` — confirm PX4 owns the port. |
+
+**Cleanup snippet (run on the drone PC before relaunching the script):**
+
+```bash
+pkill -9 -f mavsdk_server
+pkill -9 -f collect_yolo_data
+sleep 1
+ss -ulpn | grep 14540   # should now be empty or owned only by PX4
+```
+
+`collect_yolo_data.py` now does an explicit gRPC sanity ping at the end of `connect()` and prints a `[FATAL] mavsdk_server died after health-handshake.` message instead of a deep traceback when it detects this failure mode.
+
 ---
 
 ## 8. Help wanted from human

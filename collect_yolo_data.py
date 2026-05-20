@@ -223,6 +223,25 @@ def keyboard_thread():
                 out(f"\n[CAP] class prefix = {CLASS_PREFIXES[state.class_prefix_idx]}\n")
 
 # ── MAVSDK helpers ──────────────────────────────────────────────────────────
+async def _sanity_ping(drone: System):
+    """Confirm mavsdk_server still alive after the health-handshake.
+    A zombie mavsdk_server (stale UDP :14540 binding) lets connect() and
+    one telemetry.health() iter succeed, then the server exits and the
+    next RPC dies with 'Socket closed'. Fail fast here instead."""
+    try:
+        async def _probe():
+            async for s in drone.core.connection_state():
+                if s.is_connected:
+                    return
+        await asyncio.wait_for(_probe(), timeout=5.0)
+    except (asyncio.TimeoutError, grpc.aio.AioRpcError) as e:
+        print("\n[FATAL] mavsdk_server died after health-handshake.")
+        print("[FATAL] Likely a stale process is holding UDP :14540.")
+        print("[FATAL] Run:  pkill -9 -f mavsdk_server  and try again.")
+        if isinstance(e, grpc.aio.AioRpcError):
+            print(f"[FATAL] gRPC code={e.code()} details={e.details()}")
+        raise
+
 async def connect(drone: System):
     print(f"[MAVSDK] Connecting to {MAVSDK_ADDRESS} ...")
     await drone.connect(system_address=MAVSDK_ADDRESS)
@@ -232,20 +251,28 @@ async def connect(drone: System):
               f"Arm={health.is_armable}")
         if health.is_global_position_ok and health.is_home_position_ok:
             break
+    await _sanity_ping(drone)
     print("[MAVSDK] Connected and healthy.")
 
 async def arm_and_takeoff(drone: System):
-    print("[MAVSDK] Arming ...")
-    await drone.action.arm()
-    print(f"[MAVSDK] Taking off to {TAKEOFF_ALTITUDE} m ...")
-    await drone.action.takeoff()
-    async for pos in drone.telemetry.position():
-        alt = pos.relative_altitude_m
-        sys.stdout.write(f"\r[MAVSDK] Alt: {alt:.2f} / {TAKEOFF_ALTITUDE:.2f} m   ")
-        sys.stdout.flush()
-        if alt >= TAKEOFF_ALTITUDE - 0.20:
-            break
-    print(f"\n[MAVSDK] Reached {alt:.2f} m – takeoff complete.")
+    try:
+        print("[MAVSDK] Arming ...")
+        await drone.action.arm()
+        print(f"[MAVSDK] Taking off to {TAKEOFF_ALTITUDE} m ...")
+        await drone.action.takeoff()
+        async for pos in drone.telemetry.position():
+            alt = pos.relative_altitude_m
+            sys.stdout.write(f"\r[MAVSDK] Alt: {alt:.2f} / {TAKEOFF_ALTITUDE:.2f} m   ")
+            sys.stdout.flush()
+            if alt >= TAKEOFF_ALTITUDE - 0.20:
+                break
+        print(f"\n[MAVSDK] Reached {alt:.2f} m – takeoff complete.")
+    except grpc.aio.AioRpcError as e:
+        print(f"\n[ERROR] gRPC dropped during arm/takeoff: {e.code()} – {e.details()}")
+        print("[HINT]  mavsdk_server probably died. Check for stale processes:")
+        print("[HINT]    pkill -9 -f mavsdk_server   then relaunch PX4 SITL.")
+        state.running = False
+        raise
 
 async def start_offboard(drone: System):
     try:
