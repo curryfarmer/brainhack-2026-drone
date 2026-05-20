@@ -1,0 +1,7 @@
+{
+  "model_path": "yolov10n.pt",
+  "model_version": "placeholder_coco_baseline",
+  "created_at": "1970-01-01T00:00:00Z",
+  "metrics": {},
+  "note": "Placeholder pointing at the COCO-pretrained baseline. Run `python pipeline.py` after labeling real data to overwrite with a trained barrel model. Detector.py reads model_path from here when constructed with config_path='model_config.json'."
+}

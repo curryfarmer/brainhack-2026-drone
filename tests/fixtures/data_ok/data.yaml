@@ -1,0 +1,8 @@
+path: /Users/jp/Desktop/Coding projects/Brainhack 2026/robotics-shit/Codes/tests/fixtures/data_ok
+train: train/images
+val: validation/images
+nc: 2
+names:
+- yellow_barrel
+- red_barrel
+test: test/images

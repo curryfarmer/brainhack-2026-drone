@@ -1,0 +1,13 @@
+{
+  "ts": 1779194413.117663,
+  "image": "red_1779194413117_4.jpg",
+  "pose_ned": {
+    "n": 0.0,
+    "e": 5.0,
+    "d": -2.0
+  },
+  "yaw_deg": 74.53890794488791,
+  "altitude_m": 2.0,
+  "class_hint": "red",
+  "trigger": "smoke"
+}

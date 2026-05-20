@@ -1,0 +1,37 @@
+{
+  "classes": [
+    "yellow_barrel",
+    "red_barrel"
+  ],
+  "nc": 2,
+  "splits": {
+    "train": {
+      "num_images": 20,
+      "background_images": 0,
+      "per_class": {
+        "red_barrel": 10,
+        "yellow_barrel": 10
+      }
+    },
+    "validation": {
+      "num_images": 12,
+      "background_images": 0,
+      "per_class": {
+        "red_barrel": 6,
+        "yellow_barrel": 6
+      }
+    },
+    "test": {
+      "num_images": 12,
+      "background_images": 0,
+      "per_class": {
+        "red_barrel": 6,
+        "yellow_barrel": 6
+      }
+    }
+  },
+  "warnings": [
+    "yellow_barrel: 10 images, recommend >= 20",
+    "red_barrel: 10 images, recommend >= 20"
+  ]
+}

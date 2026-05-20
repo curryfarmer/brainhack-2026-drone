@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual env
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Training artifacts (regenerable)
+runs/
+detected_images/
+
+# Data + models (large; share via separate channel)
+data/_smoke/
+data/train/
+data/validation/
+data/test/
+data/session_meta/
+data/.validated.flag
+data/.split.log
+data/data.yaml
+data/validation_report.json
+data/import.log
+models/yolo_*/
+# keep models/latest_path.txt and model_config.json so newcomers see the schema
+
+# Logs
+*.log

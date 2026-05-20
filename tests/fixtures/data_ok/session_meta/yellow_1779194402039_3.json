@@ -1,0 +1,13 @@
+{
+  "ts": 1779194402.039936,
+  "image": "yellow_1779194402039_3.jpg",
+  "pose_ned": {
+    "n": 5.0,
+    "e": 5.0,
+    "d": -2.0
+  },
+  "yaw_deg": -146.60475790374176,
+  "altitude_m": 2.0,
+  "class_hint": "yellow",
+  "trigger": "smoke"
+}
