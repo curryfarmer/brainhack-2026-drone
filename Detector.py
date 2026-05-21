@@ -1,4 +1,3 @@
-import json
 import os
 import cv2
 import time
@@ -11,22 +10,15 @@ from ultralytics import YOLO
 class Detector:
     def __init__(
         self,
-        model_path: Optional[str] = None,
+        model_path: str = "yolov8n.pt",
         confidence_threshold: float = 0.5,
         callback: Optional[Callable[[List[Dict[str, Any]], np.ndarray, Optional[Any]], None]] = None,
         num_workers: int = 1,
         device: str = "cpu",
         save_dir: str = "./detected_images",
         enable_display: bool = True,
-        display_window_name: str = "YOLO Detections",
-        config_path: Optional[str] = None,
+        display_window_name: str = "YOLO Detections"
     ):
-        if config_path is not None:
-            with open(config_path) as _cf:
-                _cfg = json.load(_cf)
-            model_path = _cfg["model_path"]
-        if model_path is None:
-            model_path = "yolov8n.pt"
         self.model = YOLO(model_path).to(device)
         self.conf_threshold = confidence_threshold
         self.callback = callback

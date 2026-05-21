@@ -92,7 +92,6 @@ New module: `coverage.py` → `generate_lawnmower(corner, width, height, spacing
 
 ---
 
-
 ## 4. Avoidance integration
 
 `AvoidancePlanner` today is **the** planner — it dictates direction. For coverage we need it as a **deviation** layer:

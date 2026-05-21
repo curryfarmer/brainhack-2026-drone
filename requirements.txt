@@ -1,4 +1,3 @@
-# Edited by Claude — added mss for screen-capture fallback. See README §10.
 # RoboVerse Qualifier 2026 — drone autonomy stack
 # Install:  pip install -r requirements.txt
 # Then install torch separately per platform (see CONTEXT.md §8).
@@ -10,11 +9,9 @@ mavsdk>=2.0
 pymavlink
 
 # --- Vision / detection ---
-ultralytics>=8.2,<9
-torch>=2.1                # MPS fallback for Apple Silicon
+ultralytics>=8.2
 opencv-python
 Pillow
-mss                       # screen-capture fallback for collect_yolo_data when Gazebo camera unavailable
 
 # --- Numeric / planning ---
 numpy<2          # torch 2.2.x wheels were built against NumPy 1.x
