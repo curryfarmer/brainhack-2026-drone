@@ -1,27 +1,8 @@
-# Edited by Claude — auto-cleanup of stale mavsdk_server in connect(). See README §10.
 from mavsdk import System
 from mavsdk.offboard import Offboard
 from mavsdk.offboard import VelocityNedYaw, PositionNedYaw
 import asyncio
 import math
-import subprocess
-
-
-def _kill_stale_servers() -> None:
-    """Best-effort cleanup of any prior mavsdk_server still bound to :14540.
-    Called once at the top of Drone.connect() so wrapper-using scripts do not
-    have to fight a zombie subprocess from the previous crashed run."""
-    try:
-        subprocess.run(
-            ["pkill", "-9", "-f", "mavsdk_server"],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=2.0,
-        )
-    except Exception:
-        pass  # not fatal — bind error will surface naturally if cleanup failed
-
 
 class Drone:
     def __init__(self):
@@ -43,8 +24,6 @@ class Drone:
         return error
 
     async def connect(self):
-        _kill_stale_servers()
-        await asyncio.sleep(0.5)
         await self.drone.connect(system_address="udpin://0.0.0.0:14540")
 
         async for state in self.drone.core.connection_state():
