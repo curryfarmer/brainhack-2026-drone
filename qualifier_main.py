@@ -339,19 +339,140 @@ class QualifierMission:
     # Direction check: is the cell in 'direction' from current cell blocked?
     # ----------------------------------------------------------------------
     def _check_blocked_ahead(self) -> bool:
-        """Reads depth front-center and returns True if blocked."""
-        depth = self.depth_receiver.get_frame()
-        if depth is None:
-            return False  # don't claim blocked if no data; let timeout handle it
-        # Use planner's clearance helper for consistency
-        left, center, right = self.planner.compute_clearance(depth)
-        # We only care about the forward (center) cell. We check it's enough
-        # to clear at least CELL_SIZE_M plus a small margin.
+        NUM_SAMPLES = 5
+        SAMPLE_WINDOW_S = 1.0
+        MAX_SENSOR_RANGE = 15.0
         threshold = CELL_SIZE_M + 0.5
-        if math.isnan(center) or center < threshold:
-            print(f"[Mission] center clearance = {center:.2f}m < {threshold:.2f}m -> BLOCKED")
-            return True
-        return False
+        # What fraction of the center strip must be blocked to call it blocked
+        BLOCKED_PIXEL_RATIO = 0.30  # if 30%+ of center pixels are close → blocked
+
+        readings = []
+
+        for i in range(NUM_SAMPLES):
+            depth = self.depth_receiver.get_frame()
+            if depth is None:
+                time.sleep(SAMPLE_WINDOW_S / NUM_SAMPLES)
+                continue
+
+            h, w = depth.shape[:2]
+            depth_masked = depth.copy().astype(np.float32)
+
+            # Out-of-range → max range (passable)
+            depth_masked[~np.isfinite(depth_masked)] = MAX_SENSOR_RANGE
+            depth_masked[depth_masked <= 0.0] = MAX_SENSOR_RANGE
+            depth_masked[depth_masked > MAX_SENSOR_RANGE] = MAX_SENSOR_RANGE
+
+            # Mask drone arm intrusion top-left
+            depth_masked[:int(h * 0.35), :int(w * 0.25)] = np.nan
+
+            # Mask floor (bottom 20%) and ceiling (top 15%)
+            depth_masked[:int(h * 0.15), :] = np.nan
+            depth_masked[int(h * 0.80):, :] = np.nan
+
+            # Wider center strip — central 60% of width
+            col_l = int(w * 0.20)
+            col_r = int(w * 0.80)
+            center_strip = depth_masked[:, col_l:col_r]
+
+            valid = center_strip[np.isfinite(center_strip)]
+            if valid.size == 0:
+                readings.append((MAX_SENSOR_RANGE, 0.0, depth))
+                time.sleep(SAMPLE_WINDOW_S / NUM_SAMPLES)
+                continue
+
+            # Ratio of pixels that are closer than threshold
+            close_pixels = np.sum(valid < threshold)
+            blocked_ratio = close_pixels / valid.size
+
+            # 80th percentile for overall clearance estimate
+            clearance = float(np.percentile(valid, 80))
+            readings.append((clearance, blocked_ratio, depth))
+            time.sleep(SAMPLE_WINDOW_S / NUM_SAMPLES)
+
+        if not readings:
+            return False
+
+        # Blocked if EITHER:
+        # - majority of samples have low 80th percentile clearance, OR
+        # - majority of samples have >30% of pixels closer than threshold
+        clearance_blocked = sum(
+            1 for (c, _, __) in readings if c < threshold
+        )
+        ratio_blocked = sum(
+            1 for (_, r, __) in readings if r > BLOCKED_PIXEL_RATIO
+        )
+        is_blocked = (
+            clearance_blocked > len(readings) // 2
+            or ratio_blocked > len(readings) // 2
+        )
+
+        self._save_depth_debug(
+            readings=[(c, d) for c, _, d in readings],
+            threshold=threshold,
+            is_blocked=is_blocked,
+        )
+
+        if is_blocked:
+            worst = min(c for c, _, __ in readings)
+            worst_ratio = max(r for _, r, __ in readings)
+            print(f"[Mission] BLOCKED ({worst:.2f}m, {worst_ratio:.0%} pixels close)")
+        return is_blocked
+        
+    def _save_depth_debug(
+        self,
+        readings: list,
+        threshold: float,
+        is_blocked: bool,
+    ) -> None:
+        """Save an annotated debug image for the worst-case depth frame."""
+        import os
+
+        os.makedirs("./debug_depth", exist_ok=True)
+
+        # Pick the worst (lowest center clearance) frame to save
+        worst_idx = 0
+        worst_val = float('inf')
+        for i, (c, _) in enumerate(readings):
+            if not math.isnan(c) and c < worst_val:
+                worst_val = c
+                worst_idx = i
+
+        _, raw_depth = readings[worst_idx]
+        h, w = raw_depth.shape[:2]
+
+        # Normalise depth to 0-255 for visualisation (clip at 10m)
+        display = np.clip(raw_depth, 0, 40.0)
+        display = (display / 40.0 * 255).astype(np.uint8)
+        display = 255 - display
+        display_bgr = cv2.applyColorMap(display, cv2.COLORMAP_JET)
+
+        # Draw the masked region boundaries
+        cv2.line(display_bgr, (0, int(h*0.15)), (w, int(h*0.15)), (255,255,255), 1)  # ceiling mask
+        cv2.line(display_bgr, (0, int(h*0.80)), (w, int(h*0.80)), (255,255,255), 1)  # floor mask
+        cv2.line(display_bgr, (int(w*0.25), 0), (int(w*0.25), h), (255,255,255), 1)  # left mask
+        cv2.line(display_bgr, (int(w*0.75), 0), (int(w*0.75), h), (255,255,255), 1)  # right mask
+
+        # Annotate result
+        label = f"BLOCKED ({worst_val:.2f}m < {threshold:.2f}m)" if is_blocked \
+                else f"CLEAR ({worst_val:.2f}m)"
+        color = (0, 0, 255) if is_blocked else (0, 255, 0)
+        cv2.putText(display_bgr, label, (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+        # Also grab and overlay the RGB frame if available
+        rgb_frame = self.rgb_receiver.get_frame()
+        if rgb_frame is not None:
+            rgb_resized = cv2.resize(rgb_frame, (w, h))
+            combined = np.hstack([display_bgr, rgb_resized])
+        else:
+            combined = display_bgr
+
+        timestamp = time.strftime("%H%M%S")
+        cell_str = f"{self.current_cell[0]}_{self.current_cell[1]}"
+        status = "BLOCKED" if is_blocked else "CLEAR"
+        fname = f"./debug_depth/{timestamp}_cell{cell_str}_{status}.png"
+        cv2.imwrite(fname, combined)
+        print(f"[Mission] Debug image saved: {fname}")
 
     # ----------------------------------------------------------------------
     # Rotate to a target yaw, streaming setpoints (NOT using PID helper —
