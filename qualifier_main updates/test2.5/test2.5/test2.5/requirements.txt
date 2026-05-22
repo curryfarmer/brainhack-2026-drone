@@ -1,0 +1,24 @@
+# RoboVerse Qualifier 2026 — drone autonomy stack
+# Install:  pip install -r requirements.txt
+# Then install torch separately per platform (see CONTEXT.md §8).
+# Gazebo Python bindings (gz.transport13, gz.msgs10) are NOT pip-installable —
+# install Gazebo Harmonic system pkg (brew install gz-harmonic | apt install gz-harmonic).
+
+# --- Drone / autopilot ---
+mavsdk>=2.0
+pymavlink
+
+# --- Vision / detection ---
+ultralytics>=8.2
+opencv-python
+Pillow
+
+# --- Numeric / planning ---
+numpy<2          # torch 2.2.x wheels were built against NumPy 1.x
+scipy
+matplotlib
+PyYAML
+
+# --- Notebooks (Train_YOLO_Models*.ipynb local runs) ---
+jupyter
+ipykernel
