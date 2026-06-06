@@ -141,9 +141,11 @@ def test_main_real_profile_refuses_without_gate(repo_root, monkeypatch, capsys):
     assert "i-know-this-arms-real-drones" in capsys.readouterr().err
 
 
-def test_main_non_dry_run_points_at_s4(repo_root, monkeypatch):
+def test_main_no_drone_execution_points_at_s7(repo_root, monkeypatch):
+    """S4 wired the flight path (mock now RUNS — see test_orchestrator.py);
+    the no-drone replay/vision path stays a loud S7 pointer until then."""
     from finals.main import main
 
     monkeypatch.chdir(repo_root)
-    with pytest.raises(NotImplementedError, match="session S4"):
-        main(["--profile", "mock"])
+    with pytest.raises(NotImplementedError, match="S7"):
+        main(["--profile", "replay"])

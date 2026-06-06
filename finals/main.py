@@ -11,11 +11,25 @@ Usage (run from repo root):
   python -m finals.main --profile bench
   python -m finals.main --profile real --i-know-this-arms-real-drones
 
-Exit codes: 0 ok | 1 unexpected error | 2 config error | 3 preflight failure.
+Exit codes: 0 ok | 1 unexpected error / any drone FAILED | 2 config error |
+3 preflight failure.
 
-Session: S1 (CLI + config + wiring resolution + --dry-run). The flight path
-(preflight gate -> connect -> Orchestrator.run) is wired in S4; until then a
-non-dry-run invocation raises the S4 pointer loudly.
+Session: S1 (CLI + config + wiring resolution + --dry-run); S4 (flight path:
+run dir + crash hooks + EventLog + per-drone adapter/phase/agent wiring ->
+preflight gate -> Orchestrator.run -> exit code). The no-drone replay/vision
+path arrives with perception in S7 and still raises its pointer loudly.
+
+Wiring notes (binding):
+- BENCH SPECIAL CASE: BenchAdapter wraps an INNER backend, so the generic
+  flight_cls(drone_id) construction does not fit it — _build_adapter builds
+  the inner backend (PyhulaxAdapter, S9) first and wraps it (see the
+  BenchAdapter docstring).
+- Phase construction soft convention: a phase class MAY define
+  from_config(drone_cfg, cfg) (TakeoffDemo does — zone tunables + altitude
+  band); phases without it are built with no arguments.
+- Preflight gate: bench/real run finals.preflight.run_preflight (S10 stub —
+  raises its session pointer today); mock/sitl record a loud
+  preflight-skipped event instead (nothing to gate in pure software).
 
 Derives from: qualifier_run.py parse_args/_amain (CLI override conventions:
 --weights/--budget/--no-detector/--display kept compatible).
@@ -23,13 +37,19 @@ Derives from: qualifier_run.py parse_args/_amain (CLI override conventions:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import sys
 from typing import List, Optional, Type
 
-from finals.config import FinalsConfig, load_config
+from finals.config import DroneConfig, FinalsConfig, load_config
 from finals.errors import ConfigError, PreflightError
+from finals.events import EventLog, create_run_dir, install_crash_hooks
+from finals.mission.agent import DroneAgent
+from finals.mission.orchestrator import Orchestrator
+from finals.mission.phase import MissionPhase
 from finals.mission.phases import resolve_phase
+from finals.sightings import SightingBus
 
 _CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
 
@@ -185,12 +205,77 @@ def run(argv: Optional[List[str]] = None) -> int:
         print(format_resolved_plan(cfg, flight_cls, video_cls, config_path))
         return EXIT_OK
 
-    # ---- Mission execution is wired in S4 (preflight gate -> connect all ->
-    # Orchestrator.run -> shutdown/summary). Until then, refuse loudly. ----
-    raise NotImplementedError(
-        "finals.main: mission execution is wired in session S4 — see "
-        "finals/docs/module_map.md. The skeleton supports --dry-run only."
-    )
+    return _run_mission(cfg)
+
+
+# ============================================================
+# Mission execution (S4)
+# ============================================================
+def _build_adapter(cfg: FinalsConfig, drone_id: str):
+    """One adapter per drone. Bench is the documented special case: build
+    the inner backend FIRST, then wrap (BenchAdapter docstring)."""
+    if cfg.flight_backend == "bench":
+        from finals.flight.adapter import BenchAdapter
+        from finals.flight.pyhulax_adapter import PyhulaxAdapter   # S9
+        return BenchAdapter(PyhulaxAdapter(drone_id))
+    flight_cls = resolve_flight_adapter_cls(cfg.flight_backend)
+    if flight_cls is None:      # 'none' is guarded before we get here
+        raise ConfigError(
+            f"profile {cfg.profile!r} has flight_backend 'none' — nothing "
+            f"to fly; this path should have been routed to the no-drone "
+            f"branch (wiring bug)")
+    return flight_cls(drone_id)
+
+
+def _build_phases(drone_cfg: DroneConfig,
+                  cfg: FinalsConfig) -> List[MissionPhase]:
+    """Phase names -> instances. Soft convention: classes MAY define
+    from_config(drone_cfg, cfg); otherwise no-arg construction. Stub phases
+    raise their session pointer loudly here, at wiring time."""
+    phases: List[MissionPhase] = []
+    for name in drone_cfg.phases:
+        phase_cls = resolve_phase(name)
+        factory = getattr(phase_cls, "from_config", None)
+        phases.append(factory(drone_cfg, cfg) if factory is not None
+                      else phase_cls())
+    return phases
+
+
+async def _amain(cfg: FinalsConfig, agents: List[DroneAgent],
+                 events: EventLog, run_dir: str, bus: SightingBus) -> int:
+    """Preflight gate -> Orchestrator.run, on ONE event loop."""
+    if cfg.profile in ("bench", "real"):
+        from finals.preflight import run_preflight     # S10 — pointer today
+        await run_preflight(cfg.profile, agents, cfg)  # PreflightError -> 3
+    else:
+        # "mission" = the orchestrator's mission-level pseudo drone id.
+        events.log("mission", "preflight", status="skipped",
+                   reason=f"profile {cfg.profile!r} has no preflight gate "
+                          f"(P0-P10 applies to bench/real; arrives S10)")
+    orchestrator = Orchestrator(agents, events, run_dir,
+                                budget_s=cfg.mission_budget_s, bus=bus)
+    return await orchestrator.run()
+
+
+def _run_mission(cfg: FinalsConfig) -> int:
+    if cfg.flight_backend == "none":
+        raise NotImplementedError(
+            "finals.main: the no-drone (replay/vision) execution path is "
+            "wired with perception in session S7 — see "
+            "finals/docs/module_map.md. Only --dry-run works for this "
+            "profile today.")
+
+    run_dir = create_run_dir(cfg.run_dir)
+    install_crash_hooks(run_dir)
+    with EventLog(run_dir) as events:
+        bus = SightingBus()
+        agents = [
+            DroneAgent(d.id, _build_adapter(cfg, d.id),
+                       _build_phases(d, cfg), events, bus=bus,
+                       command_timeout_s=cfg.command_timeout_s)
+            for d in cfg.drones
+        ]
+        return asyncio.run(_amain(cfg, agents, events, run_dir, bus))
 
 
 def main(argv: Optional[List[str]] = None) -> int:

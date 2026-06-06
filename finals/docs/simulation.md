@@ -171,11 +171,12 @@ world (PX4-gazebo-models) is the smoke test; then the convoy world.
    `ActorTrajectoryNoMesh`). Actors are kinematic/non-colliding — use VelocityControl or
    TrajectoryFollower when collision matters.
 2. **pyhulax is not open source** — unlicensed source-available (see Tier 3).
-3. **The run logs do NOT yet contain everything a replay tool needs**: existing
-   `runs_finals/` dirs are hardcoded smoke-demo output; no initial-pose/origin or
-   executed-action events are emitted anywhere yet, and `est_north_m`/`est_east_m`/
-   `bearing_deg` are Optional and usually empty by design. Replay needs the S4 schema
-   addition, not just a plotter.
+3. **The run logs now carry the replay schema — RESOLVED in S4 (2026-06-06)**:
+   DroneAgent emits a per-drone `origin` event (initial pose + the binding frame note)
+   and one `action_complete` event per executed command (enum fields by NAME) into
+   `mission.jsonl` — the replay plotter feeds these through the real DeadReckoner.
+   `est_north_m`/`est_east_m`/`bearing_deg` remain Optional and usually empty by design
+   until S7 perception lands.
 4. ArUco-on-gz-sim evidence rests on SaxionMechatronics/ros2-gazebo-aruco (Garden),
    mohamedeyaad/aruco_visual_servoing (Harmonic), and the PX4 arucotag precision-landing
    ecosystem — NOT on the often-cited automaticaddison tutorial (that one is Gazebo Classic).

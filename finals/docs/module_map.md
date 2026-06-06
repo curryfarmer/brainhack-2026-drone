@@ -55,7 +55,7 @@ stand-in behind the FlightAdapter seam; the finals drones are HULA/pyhulax.)
 | `types.py` | ✅ implemented | S1 | pyhulax docs (Direction/units); hula_connection.py:46–50 (Action vocabulary) |
 | `errors.py` | ✅ implemented | S1 | failure-mode audit of the official examples |
 | `config.py` | ✅ implemented | S1 | qualifier_run.py:72–132 MissionConfig; known-issue #9 weights guards |
-| `main.py` | ✅ through `--dry-run` | S1 (flight-wired **S4**) | qualifier_run.py parse_args/_amain |
+| `main.py` | ✅ implemented | S1 / S4 | qualifier_run.py parse_args/_amain; S4: bench wiring builds the INNER backend first (BenchAdapter special case); phases via the `from_config` soft convention |
 | `mission/phase.py` | ✅ contract | S1 (exercised S4) | hula_connection.py:46–50, made pure |
 | `mission/phases/__init__.py` | ✅ registry | S1 | — |
 | `flight/adapter.py` | ✅ implemented (ABC + BenchAdapter) | S1 / S3 | pyhulax ∩ MAVSDK honest primitives; Bench wraps an inner adapter (S4 wiring needs a special case) |
@@ -65,9 +65,9 @@ stand-in behind the FlightAdapter seam; the finals drones are HULA/pyhulax.)
 | `flight/mock_adapter.py` | ✅ implemented | S3 | — (the test double everything stands on; pipeline order + deviations in its docstring) |
 | `flight/dead_reckon.py` | ✅ implemented | S3 | detection_to_world.py body→NED yaw math, reduced; yaw sign flipped to pyhulax CCW (psi_NED = -yaw_deg, documented + test-pinned) |
 | `docs/simulation.md` | ✅ doc | — | feasibility research pass (2026-06-06), load-bearing claims verified against primary sources; PX4 SITL = physics stand-in, finals drones are HULA |
-| `mission/agent.py` | ⬜ stub | **S4** | hula_connection.py:39–63 loop; mapping_drone.py watchdog gaps |
-| `mission/orchestrator.py` | ⬜ stub | **S4** | qualifier_run.py:407–513 supervisor MINUS auto-restart (unsafe on real aircraft) |
-| `mission/phases/takeoff_demo.py` | ⬜ stub | **S4** | mapping_drone.py:343–355 intent, as relative moves |
+| `mission/agent.py` | ✅ implemented | S4 | hula_connection.py:39–63 loop, formalized; mapping_drone.py watchdog gaps CLOSED: outer wait_for deadline on every command, telemetry-staleness check, emergency-land-EXACTLY-ONCE latch (shielded from cancellation), FAILED terminal — no auto-restart. Emits the `origin` + `action_complete` events (replay prereq) |
+| `mission/orchestrator.py` | ✅ implemented | S4 | qualifier_run.py:407–513 supervisor MINUS auto-restart (unsafe on real aircraft); agents = independent asyncio tasks; budget stop + settle-grace hard deadline; 1 Hz atomic heartbeat; seq-cursor SightingBus drain; whitelisted blanket catches always log tracebacks |
+| `mission/phases/takeoff_demo.py` | ✅ implemented | S4 | mapping_drone.py:343–355 intent, as relative moves (no UWB dependency); tunables via `zone["takeoff_demo"]` + `altitude_band_m` (`from_config`) |
 | `guards.py` | ⬜ stub | **S5** | qualifier_run.py emergency-land path; mapping_drone.py gap audit |
 | `flight/sitl_adapter.py` | ⬜ stub | **S6** | drone_control.py + get_position_with_task.py + qualifier_run.py:268–331 (all proven) |
 | `vision/aruco.py` | ⬜ stub | **S7** | **PRIMARY detector** (convoy robots carry ArUco markers — detect + read ID, no training). potential_detection_targets.py:5–30 (audited — it has a syntax error; detectMarkers returns 3 values) |
