@@ -1,0 +1,13 @@
+[
+  {
+    "after_n_submits": 2,
+    "detections": [
+      {
+        "bbox": [100.0, 100.0, 200.0, 200.0],
+        "confidence": 0.9,
+        "class_id": 0,
+        "class_name": "car"
+      }
+    ]
+  }
+]

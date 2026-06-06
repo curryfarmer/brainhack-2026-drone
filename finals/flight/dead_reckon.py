@@ -28,11 +28,12 @@ tests/test_dead_reckon.py before any consumer existed):
       BACK / LEFT = the negations.
   Spot check: at yaw +90 (rotated 90° CCW from north) the drone faces WEST;
   FORWARD moves it (0, -d) and its body-right points north (+d, 0).
-- KNOWN UPSTREAM CONFLICT (do not copy blindly in S7): the bearing comment
-  in types.py:102 reads "yaw + (cx - w/2)/w * HFOV". Under CCW-positive yaw
-  a target right of frame-centre (cx > w/2) lies at DECREASING yaw, so the
-  sign must be "yaw - offset" (or the yaw fed in must be compass/CW).
-  Resolve when implementing vision/perception.py.
+- UPSTREAM CONFLICT (RESOLVED, S7): the bearing comment in types.py
+  originally read "yaw + (cx - w/2)/w * HFOV". Under CCW-positive yaw a
+  target right of frame-centre (cx > w/2) lies at DECREASING yaw, so the
+  sign must be "yaw - offset". vision/perception.py bearing_from_bbox
+  implements exactly that (test-pinned, with this file cited); the
+  types.py comment is corrected.
 
 Semantics (binding):
 - note_action_complete() is called ONLY for actions that actually COMPLETED

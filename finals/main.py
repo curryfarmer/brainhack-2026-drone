@@ -16,8 +16,9 @@ Exit codes: 0 ok | 1 unexpected error / any drone FAILED | 2 config error |
 
 Session: S1 (CLI + config + wiring resolution + --dry-run); S4 (flight path:
 run dir + crash hooks + EventLog + per-drone adapter/phase/agent wiring ->
-preflight gate -> Orchestrator.run -> exit code). The no-drone replay/vision
-path arrives with perception in S7 and still raises its pointer loudly.
+preflight gate -> Orchestrator.run -> exit code); S7 (vision: the no-drone
+replay runner below, plus per-drone perception + VideoWatchdog wiring on
+flight profiles whose frame backend is in _WIRED_FRAME_BACKENDS).
 
 Wiring notes (binding):
 - BENCH SPECIAL CASE: BenchAdapter wraps an INNER backend, so the generic
@@ -30,6 +31,19 @@ Wiring notes (binding):
 - Preflight gate: bench/real run finals.preflight.run_preflight (S10 stub —
   raises its session pointer today); mock/sitl record a loud
   preflight-skipped event instead (nothing to gate in pure software).
+- VISION GATE (S7): perception + VideoWatchdog are wired ONLY for frame
+  backends in _WIRED_FRAME_BACKENDS ({"replay"} today) — deliberately
+  NARROWER than frame_backend != "none": sitl.json ships frame_backend
+  "gazebo" with a drone TODAY (S8 wires it), and gating on != "none" would
+  either crash on the GazeboRgbSource stub or hand agents a VideoWatchdog
+  with no frame source (the guaranteed-false "no frame EVER" DEGRADE of
+  guards.py reconciliation 5) on every SIM run.
+- Sighting CSV ownership (S7, binding for S8): sightings.csv rows are
+  appended at the PUBLISH site (PerceptionLoop / the detection callback) —
+  see finals/vision/perception.py. The bus drains here and in the
+  orchestrator are event mirrors only; S8 wires gazebo by adding it to
+  _WIRED_FRAME_BACKENDS + a source branch in _build_perception, with NO
+  orchestrator changes.
 
 Derives from: qualifier_run.py parse_args/_amain (CLI override conventions:
 --weights/--budget/--no-detector/--display kept compatible).
@@ -41,19 +55,22 @@ import asyncio
 import os
 import sys
 import threading
-from typing import List, Optional, Type
+import time
+import traceback
+from typing import List, Optional, Sequence, Tuple, Type
 
 from finals.config import DroneConfig, FinalsConfig, load_config
 from finals.errors import ConfigError, PreflightError
-from finals.events import EventLog, create_run_dir, install_crash_hooks
+from finals.events import (EventLog, EventLogError, create_run_dir,
+                           install_crash_hooks)
 from finals.guards import (AbortListener, BatteryGuard, GeofenceLite, Guard,
                            LoopOverrunGuard, MissionClockGuard, PhaseTimeout,
-                           SafetyController, TelemetryWatchdog)
+                           SafetyController, TelemetryWatchdog, VideoWatchdog)
 from finals.mission.agent import DroneAgent
 from finals.mission.orchestrator import Orchestrator
 from finals.mission.phase import MissionPhase
 from finals.mission.phases import resolve_phase
-from finals.sightings import SightingBus
+from finals.sightings import SightingBus, SightingLog
 
 _CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
 
@@ -142,15 +159,15 @@ def format_resolved_plan(cfg: FinalsConfig, flight_cls: Optional[Type],
         f"frame_backend  : {cfg.frame_backend:<12} -> {video_cls.__name__ if video_cls else '(none)'}",
         "detection      : "
         + ("(no frame source — perception off)" if cfg.frame_backend == "none" else
-           "aruco (primary, always on) + yolo: " + cfg.detector.backend
+           f"{cfg.marker_backend} (primary, always on) + yolo: " + cfg.detector.backend
            + (f"  weights={cfg.detector.weights}  conf={cfg.detector.conf}  device={cfg.detector.device}"
               if cfg.detector.backend == "ultralytics" else "")),
         f"budget         : {cfg.mission_budget_s:.0f} s   tick: {cfg.tick_hz:.0f} Hz   "
         f"cmd timeout: {cfg.command_timeout_s:.0f} s   battery floor: {cfg.min_battery_pct:.0f} %",
         f"run_dir        : {cfg.run_dir}",
     ]
-    if cfg.profile == "replay":
-        lines.append(f"replay_dir     : {cfg.replay_dir}")
+    if cfg.frame_backend == "replay":
+        lines.append(f"replay_dir     : {cfg.replay_dir}  ({cfg.replay_fps:g} fps)")
     if cfg.use_uwb:
         lines.append(f"uwb            : serial {cfg.uwb_serial_port}")
     lines.append("-" * 72)
@@ -252,6 +269,20 @@ def _build_phases(drone_cfg: DroneConfig,
 #: overrun limit is judged against the period the loop actually runs at.
 _HEARTBEAT_PERIOD_S = 1.0
 
+#: Frame backends with END-TO-END perception wiring (video source +
+#: PerceptionLoop + agent frame-ts). S8 adds "gazebo", S9 "pyhulax".
+#: DELIBERATELY narrower than `frame_backend != "none"` — see the VISION
+#: GATE wiring note in the module docstring (sitl.json declares "gazebo"
+#: today; wiring it before S8 would crash on the stub or false-DEGRADE).
+_WIRED_FRAME_BACKENDS = ("replay",)
+
+
+def _frames_wired(cfg: FinalsConfig) -> bool:
+    """ONE source of truth for the vision gate: _build_guards (the
+    VideoWatchdog) and _run_mission (perception) must never diverge — a
+    watchdog without a frame source is a guaranteed-false DEGRADE."""
+    return cfg.frame_backend in _WIRED_FRAME_BACKENDS
+
 
 def _build_guards(cfg: FinalsConfig, drone: DroneConfig) -> List[Guard]:
     """Per-drone guard list from config. FRESH instances per drone — guards
@@ -267,12 +298,15 @@ def _build_guards(cfg: FinalsConfig, drone: DroneConfig) -> List[Guard]:
     if g.geofence_radius_m is not None:
         guards.append(GeofenceLite(radius_m=g.geofence_radius_m,
                                    alt_max_m=g.geofence_alt_m))
-    # VideoWatchdog is implemented + unit-tested, but it is NOT built here
-    # until S7 plumbs FrameStamped.ts into the agent's GuardContext — wired
-    # before any frame source exists it would log a guaranteed-false
-    # "no frame EVER" DEGRADE on every sim run (guards.py reconciliation 5).
-    # S7: append VideoWatchdog(stale_s=g.video_stale_s) for
-    # cfg.frame_backend != "none" alongside the frame-ts plumbing.
+    if _frames_wired(cfg):
+        # S7: built ONLY when the perception wiring also feeds this drone's
+        # agent a frame timestamp (frame_ts_fn -> GuardContext.last_frame_ts
+        # in _run_mission). The stub-era note said `frame_backend != "none"`;
+        # that gate is deliberately NARROWED to the wired set — sitl.json
+        # declares "gazebo" before S8 wires it, and a watchdog with no frame
+        # source logs a guaranteed-false "no frame EVER" DEGRADE every run
+        # (guards.py reconciliation 5).
+        guards.append(VideoWatchdog(stale_s=g.video_stale_s))
     return guards
 
 
@@ -291,10 +325,101 @@ def _build_swarm_guards(cfg: FinalsConfig) -> List[Guard]:
     return swarm
 
 
+# ============================================================
+# Vision wiring (S7)
+# ============================================================
+def _build_detector(cfg: FinalsConfig, bus: SightingBus,
+                    slog: Optional[SightingLog], run_dir: str,
+                    csv_health=None):
+    """The OPTIONAL shared YOLO pool (ONE instance serves all drones — the
+    detector.py contract) or None for backend "none". Lazy imports per the
+    composition-root convention. csv_health: the RUN-WIDE
+    CsvRecordingHealth so YOLO-path CSV death is observable too."""
+    det = cfg.detector
+    if det.backend == "none":
+        return None
+    from finals.vision.perception import make_detection_callback
+    callback = make_detection_callback(
+        bus, slog, class_map=det.class_map,
+        camera_hfov_deg=cfg.camera_hfov_deg, csv_health=csv_health)
+    if det.backend == "canned":
+        from finals.vision.detector import CannedDetector
+        return CannedDetector(det.canned_script, callback,
+                              num_workers=det.workers)
+    if det.backend == "ultralytics":
+        from finals.vision.detector import make_ultralytics_detector
+        return make_ultralytics_detector(
+            det, callback,
+            save_dir=os.path.join(run_dir, "detections"),
+            enable_display=det.display)
+    raise ConfigError(   # unreachable after load_config validation
+        f"unknown detector.backend {det.backend!r} — wiring/validation drift")
+
+
+def _build_perception(cfg: FinalsConfig, drone_id: str, bus: SightingBus,
+                      slog: Optional[SightingLog], events: EventLog,
+                      detector, csv_health=None) -> Tuple[object, object]:
+    """One (VideoSource, PerceptionLoop) pair per drone. Called only when
+    _frames_wired(cfg) — today that means ReplaySource; S8 adds a gazebo
+    branch here (and "gazebo" to _WIRED_FRAME_BACKENDS)."""
+    from finals.vision.aruco import make_marker_detector
+    from finals.vision.perception import PerceptionLoop
+    from finals.vision.video import ReplaySource
+    source = ReplaySource(
+        drone_id, cfg.replay_dir, fps=cfg.replay_fps,
+        # The replay PROFILE ends when the frames do; a flight profile
+        # replaying frames (dev rig) loops the clip for the whole mission.
+        loop=(cfg.profile != "replay"))
+    perception = PerceptionLoop(
+        drone_id, source, bus, events,
+        detect_marker=make_marker_detector(cfg.marker_backend),
+        slog=slog, detector=detector,
+        camera_hfov_deg=cfg.camera_hfov_deg,
+        csv_health=csv_health,
+        sample_hz=cfg.tick_hz,
+        # A legal sub-1 Hz tick_hz must not die at PerceptionLoop's
+        # degraded_hz <= sample_hz gate — shedding just becomes a no-op.
+        degraded_hz=min(1.0, float(cfg.tick_hz)))
+    return source, perception
+
+
+def _perception_screamer(events: EventLog):
+    """Done-callback for perception tasks: a crashed perception task must
+    NEVER be a silent zero-sighting mission (install_crash_hooks does not
+    see swallowed task exceptions). Flight is unaffected by design — the
+    drone's VideoWatchdog DEGRADEs on the now-stale frame ts."""
+
+    def _scream(task: "asyncio.Task") -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()       # also marks the exception as retrieved
+        if exc is None:
+            return
+        tb = "".join(traceback.format_exception(type(exc), exc,
+                                                exc.__traceback__))
+        print(f"[main] ERROR: {task.get_name()} CRASHED — detection is DEAD "
+              f"for that drone (flight continues; its VideoWatchdog will "
+              f"DEGRADE on the stale frame ts):\n{tb}",
+              file=sys.stderr, flush=True)
+        try:
+            events.log("mission", "perception_crashed",
+                       task=task.get_name(), error=str(exc),
+                       error_type=type(exc).__name__)
+        except EventLogError as e:
+            print(f"[main] WARNING: could not log perception_crashed: {e}",
+                  file=sys.stderr, flush=True)
+
+    return _scream
+
+
 async def _amain(cfg: FinalsConfig, agents: List[DroneAgent],
-                 events: EventLog, run_dir: str, bus: SightingBus) -> int:
-    """Preflight gate -> Orchestrator.run (with the S5 abort listener
-    armed around it), on ONE event loop."""
+                 events: EventLog, run_dir: str, bus: SightingBus,
+                 perceptions: Sequence[Tuple[object, object]] = ()) -> int:
+    """Preflight gate -> perception tasks (S7, when frames are wired) ->
+    Orchestrator.run (with the S5 abort listener armed around it), on ONE
+    event loop. Perception teardown always runs (finally), in dependency
+    order: stop sampling -> stop sources (the detector pool is stopped by
+    _run_mission, which owns it)."""
     if cfg.profile in ("bench", "real"):
         from finals.preflight import run_preflight     # S10 — pointer today
         await run_preflight(cfg.profile, agents, cfg)  # PreflightError -> 3
@@ -311,20 +436,43 @@ async def _amain(cfg: FinalsConfig, agents: List[DroneAgent],
                                 abort_event=abort_event)
     listener = AbortListener(abort_event,
                              on_abort=orchestrator.request_stop_threadsafe)
+    p_stop = asyncio.Event()
+    p_tasks: List[asyncio.Task] = []
     listener.start()
     try:
+        if perceptions:
+            screamer = _perception_screamer(events)
+            # The mission's hard ceiling (budget + settle grace) bounds the
+            # perception tasks too; p_stop in the finally is the normal end.
+            p_deadline = time.monotonic() + cfg.mission_budget_s + 60.0
+            for source, perception in perceptions:
+                source.start(timeout_s=10.0)   # SensorTimeout -> loud abort
+                                               # BEFORE anything arms
+            for source, perception in perceptions:
+                task = asyncio.get_running_loop().create_task(
+                    perception.run(deadline=p_deadline, stop_event=p_stop),
+                    name=f"perception:{source.source_id}")
+                task.add_done_callback(screamer)
+                p_tasks.append(task)
         return await orchestrator.run()
     finally:
         listener.stop()
+        p_stop.set()
+        if p_tasks:
+            await asyncio.wait(p_tasks, timeout=10.0)
+            for task in p_tasks:
+                if not task.done():
+                    print(f"[main] WARNING: {task.get_name()} ignored the "
+                          f"stop event for 10 s — cancelling",
+                          file=sys.stderr, flush=True)
+                    task.cancel()
+        for source, _perception in perceptions:
+            source.stop()                      # idempotent, never raises
 
 
 def _run_mission(cfg: FinalsConfig) -> int:
     if cfg.flight_backend == "none":
-        raise NotImplementedError(
-            "finals.main: the no-drone (replay/vision) execution path is "
-            "wired with perception in session S7 — see "
-            "finals/docs/module_map.md. Only --dry-run works for this "
-            "profile today.")
+        return _run_replay(cfg)
 
     run_dir = create_run_dir(cfg.run_dir)
     install_crash_hooks(run_dir)
@@ -336,14 +484,216 @@ def _run_mission(cfg: FinalsConfig) -> int:
             land_retry_window_s=cfg.guards.land_retry_window_s,
             command_timeout_s=cfg.command_timeout_s,
             slot_wait_s=cfg.guards.slot_wait_s)
-        agents = [
-            DroneAgent(d.id, _build_adapter(cfg, d),
-                       _build_phases(d, cfg), events, bus=bus,
-                       command_timeout_s=cfg.command_timeout_s,
-                       guards=_build_guards(cfg, d), safety=safety)
-            for d in cfg.drones
-        ]
-        return asyncio.run(_amain(cfg, agents, events, run_dir, bus))
+        slog: Optional[SightingLog] = None
+        detector = None
+        csv_health = None
+        perceptions: List[Tuple[object, object]] = []
+        try:
+            if _frames_wired(cfg):
+                from finals.vision.perception import CsvRecordingHealth
+                slog = SightingLog(os.path.join(run_dir, "sightings.csv"))
+                csv_health = CsvRecordingHealth()  # run-wide, all paths
+                detector = _build_detector(cfg, bus, slog, run_dir,
+                                           csv_health=csv_health)
+            agents = []
+            for d in cfg.drones:
+                frame_ts_fn = None
+                on_degrade = None
+                perception = None
+                if _frames_wired(cfg):
+                    source, perception = _build_perception(
+                        cfg, d.id, bus, slog, events, detector,
+                        csv_health=csv_health)
+                    perceptions.append((source, perception))
+                    frame_ts_fn = perception.last_frame_ts
+                    on_degrade = (lambda trip, p=perception:
+                                  p.shed(trip.reason))
+                agent = DroneAgent(d.id, _build_adapter(cfg, d),
+                                   _build_phases(d, cfg), events, bus=bus,
+                                   command_timeout_s=cfg.command_timeout_s,
+                                   guards=_build_guards(cfg, d),
+                                   safety=safety,
+                                   frame_ts_fn=frame_ts_fn,
+                                   on_degrade=on_degrade)
+                if perception is not None:
+                    # Wire-once AFTER the agent exists (the perception<->
+                    # agent reference cycle): enrichment reads the agent's
+                    # cached per-tick telemetry, never the adapter directly.
+                    perception.set_telemetry_source(
+                        lambda a=agent: a.last_telemetry)
+                agents.append(agent)
+            return asyncio.run(_amain(cfg, agents, events, run_dir, bus,
+                                      perceptions=perceptions))
+        finally:
+            if detector is not None:
+                detector.stop()                # joins the worker threads
+            if slog is not None:
+                slog.close()
+
+
+# ============================================================
+# The no-drone replay runner (S7)
+# ============================================================
+def _run_replay(cfg: FinalsConfig) -> int:
+    """profile=replay: frames from disk -> marker detection (+ optional
+    YOLO) -> sightings.csv (the score-relevant artifact) + mission.jsonl.
+    0 drones, no flight — the Orchestrator (which refuses an empty agent
+    list) is replaced by the small bounded beat in _areplay. Exit 0 on a
+    clean run (frames exhausted or budget reached); 1 when perception
+    crashed or the source died mid-stream."""
+    run_dir = create_run_dir(cfg.run_dir)
+    install_crash_hooks(run_dir)
+    t0 = time.monotonic()
+    with EventLog(run_dir) as events:
+        from finals.vision.perception import CsvRecordingHealth
+        bus = SightingBus()
+        slog = SightingLog(os.path.join(run_dir, "sightings.csv"))
+        csv_health = CsvRecordingHealth()      # run-wide: marker + YOLO paths
+        detector = None
+        try:
+            detector = _build_detector(cfg, bus, slog, run_dir,
+                                       csv_health=csv_health)
+            source, perception = _build_perception(
+                cfg, "replay", bus, slog, events, detector,
+                csv_health=csv_health)
+            events.log("mission", "run_start", profile=cfg.profile,
+                       replay_dir=cfg.replay_dir, replay_fps=cfg.replay_fps,
+                       marker_backend=cfg.marker_backend,
+                       detector=cfg.detector.backend,
+                       budget_s=cfg.mission_budget_s, run_dir=run_dir)
+            source.start(timeout_s=10.0)       # SensorTimeout -> loud abort
+            try:
+                # _areplay stops the detector BEFORE its final drain, so the
+                # snapshot/summary below see every row a worker produced.
+                exit_code = asyncio.run(
+                    _areplay(cfg, events, bus, source, perception,
+                             detector=detector, csv_health=csv_health))
+            finally:
+                source.stop()
+            rows = slog.snapshot()
+            events.log("mission", "run_end", exit_code=exit_code,
+                       sightings=len(rows),
+                       csv_dead=csv_health.dead,
+                       frames_delivered=source.delivered_count,
+                       frames_sampled=perception.stats()["frames_sampled"])
+            _print_replay_summary(cfg, run_dir, rows, source, perception,
+                                  csv_health,
+                                  elapsed_s=time.monotonic() - t0)
+            return exit_code
+        finally:
+            if detector is not None:
+                detector.stop()                # idempotent (also in _areplay)
+            slog.close()
+
+
+async def _areplay(cfg: FinalsConfig, events: EventLog, bus: SightingBus,
+                   source, perception, detector=None, csv_health=None) -> int:
+    """The replay supervision beat: run perception as a task, mirror every
+    bus sighting into the event log (the orchestrator's _drain_bus shape),
+    end on frames-exhausted / source-error / budget / task-death — all
+    bounded (convention 3). A DEAD sighting CSV is exit 1: the CSV is the
+    score artifact, and 'exit 0 + silently truncated CSV' is exactly the
+    failure shape this runner exists to prevent."""
+    stop = asyncio.Event()
+    deadline = time.monotonic() + cfg.mission_budget_s
+    task = asyncio.get_running_loop().create_task(
+        perception.run(deadline=deadline, stop_event=stop),
+        name="perception:replay")
+    task.add_done_callback(_perception_screamer(events))
+    cursor = 0
+    beat_s = min(0.25, perception.current_period_s)
+
+    def _drain() -> None:
+        nonlocal cursor
+        cursor, items = bus.drain_after(cursor)
+        for s in items:
+            events.log(s.drone_id, "sighting", source=s.source,
+                       class_name=s.class_name, marker_id=s.marker_id,
+                       confidence=s.confidence, ts=s.ts,
+                       frame_number=s.frame_number,
+                       bearing_deg=s.bearing_deg)
+
+    exit_code = EXIT_OK
+    try:
+        # Bounded (convention 3): budget deadline + exhaustion + source
+        # error + perception-task death, re-checked every beat.
+        while True:
+            _drain()
+            if task.done():
+                break                          # screamer already reported it
+            if source.errored:
+                exit_code = EXIT_ERROR         # source screamed on stderr
+                events.log("mission", "replay_source_died",
+                           delivered=source.delivered_count)
+                break
+            if source.exhausted:
+                # Let perception drain the final frame before stopping.
+                await asyncio.sleep(3 * perception.current_period_s)
+                events.log("mission", "replay_exhausted",
+                           delivered=source.delivered_count)
+                break
+            if time.monotonic() >= deadline:
+                events.log("mission", "budget_expired",
+                           budget_s=cfg.mission_budget_s,
+                           note="replay budget reached before exhaustion")
+                break
+            await asyncio.sleep(beat_s)
+    finally:
+        stop.set()
+        await asyncio.wait({task}, timeout=10.0)
+        if not task.done():
+            print("[main] WARNING: perception:replay ignored the stop "
+                  "event for 10 s — cancelling", file=sys.stderr, flush=True)
+            task.cancel()
+            exit_code = EXIT_ERROR
+        elif not task.cancelled() and task.exception() is not None:
+            exit_code = EXIT_ERROR             # screamer printed the traceback
+        if detector is not None:
+            # BEFORE the final drain: joins the workers (pending frames are
+            # abandoned by contract), so every published sighting is on the
+            # bus by the time we drain — the event mirror and the CSV agree.
+            # Synchronous on the loop; the run is over, nothing to starve.
+            detector.stop()
+        _drain()                               # nothing left behind
+
+    if csv_health is not None and csv_health.dead:
+        events.log("mission", "csv_recording_dead",
+                   failures=csv_health.failures_total,
+                   recover="mission.jsonl 'sighting' events mirror the lost rows")
+        print("[main] ERROR: the sighting CSV died mid-run "
+              f"({csv_health.failures_total} append failure(s)) — exit 1; "
+              f"RECOVER score rows from this run's mission.jsonl 'sighting' "
+              f"events", file=sys.stderr, flush=True)
+        exit_code = EXIT_ERROR
+
+    return exit_code
+
+
+def _print_replay_summary(cfg: FinalsConfig, run_dir: str, rows: list,
+                          source, perception, csv_health,
+                          elapsed_s: float) -> None:
+    by_class: dict = {}
+    for s in rows:
+        by_class[s.class_name] = by_class.get(s.class_name, 0) + 1
+    stats = perception.stats()
+    lines = [
+        "=" * 72,
+        f"REPLAY SUMMARY  elapsed={elapsed_s:.1f}s  "
+        f"frames: {source.delivered_count} delivered / "
+        f"{stats['frames_sampled']} sampled  sightings={len(rows)}"
+        + ("  [DEGRADED]" if stats["degraded"] else "")
+        + ("  [CSV-DEAD — rows LOST; recover from mission.jsonl]"
+           if csv_health.dead else ""),
+        "=" * 72,
+    ]
+    for name in sorted(by_class):
+        lines.append(f"  {name:<24} x{by_class[name]}")
+    if not rows:
+        lines.append("  (no sightings — check the frames / marker_backend)")
+    lines.append(f"sightings.csv : {os.path.join(run_dir, 'sightings.csv')}")
+    lines.append(f"run dir       : {run_dir}")
+    lines.append("=" * 72)
+    print("\n".join(lines), flush=True)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -355,8 +705,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     except PreflightError as e:
         print(f"\nPREFLIGHT FAILED: {e}\n", file=sys.stderr)
         return EXIT_PREFLIGHT
-    # Anything else (incl. NotImplementedError stub pointers and FinalsError
-    # subtypes not handled above) propagates with a full traceback — fail loud.
+    # Anything else (incl. NotImplementedError stub session pointers — the
+    # finals/docs/module_map.md convention — and FinalsError subtypes not
+    # handled above) propagates with a full traceback: fail loud.
 
 
 if __name__ == "__main__":

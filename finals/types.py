@@ -90,7 +90,7 @@ class Sighting:
 
     drone_id: str
     ts: float
-    source: str                                          # "yolo" | "aruco"
+    source: str                                          # "yolo" | "aruco" | "qr"
     class_name: str                                      # e.g. "robomaster", "aruco_17"
     marker_id: Optional[int]                             # ArUco only
     bbox_xyxy: Tuple[float, float, float, float]
@@ -99,7 +99,9 @@ class Sighting:
     frame_number: Optional[int] = None
     drone_yaw_deg: Optional[float] = None
     drone_alt_m: Optional[float] = None
-    bearing_deg: Optional[float] = None                  # yaw + (cx - w/2)/w * HFOV (HFOV from config)
+    bearing_deg: Optional[float] = None                  # yaw - (cx - w/2)/w * HFOV (CCW+ yaw — see
+                                                         # flight/dead_reckon.py + vision/perception.py
+                                                         # bearing_from_bbox; sign fixed S7, test-pinned)
     pos_quality: PositionQuality = PositionQuality.NONE
     est_north_m: Optional[float] = None                  # filled only when pos_quality > NONE
     est_east_m: Optional[float] = None

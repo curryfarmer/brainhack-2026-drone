@@ -26,12 +26,24 @@ FINALS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # traceback): SafetyController safe-down + guard-evaluation wrapper live in
 # guards.py; the orchestrator top loop in orchestrator.py. Widening this list
 # is a deliberate, reviewable act.
+# S7 widening (reviewed): vision/detector.py — the vendored worker pool must
+# survive ARBITRARY model/callback exceptions (ultralytics/torch/cv2 raise an
+# open set; root Detector.py's worker died SILENTLY on them — the bug class
+# this file fixes). Its two catch sites each log the full traceback and
+# increment a loud counter; threading.excepthook is not covered by
+# install_crash_hooks, so these guards are the only thing keeping worker
+# death observable.
 EXCEPT_EXCEPTION_WHITELIST = {
     os.path.join("finals", "guards.py"),
     os.path.join("finals", "mission", "orchestrator.py"),
+    os.path.join("finals", "vision", "detector.py"),
 }
 
 # Modules that may import SDK/heavy-I/O packages at module top level.
+# S7 notes: perception.py is REMOVED (it is deliberately pure — detectors
+# arrive as injected callables; this scan now enforces that). video.py and
+# detector.py keep their entries but in fact lazy-import cv2/ultralytics
+# (main.py resolves every backend for --dry-run on SDK-less machines).
 SDK_ALLOWED = {
     os.path.join("finals", "flight", "sitl_adapter.py"),     # mavsdk (via drone_control)
     os.path.join("finals", "flight", "pyhulax_adapter.py"),  # pyhulax
@@ -40,12 +52,16 @@ SDK_ALLOWED = {
     os.path.join("finals", "vision", "pyhulax_video.py"),    # pyhulax
     os.path.join("finals", "vision", "detector.py"),         # ultralytics, cv2
     os.path.join("finals", "vision", "aruco.py"),            # cv2
-    os.path.join("finals", "vision", "perception.py"),       # cv2 (annotations)
 }
 
 FORBIDDEN_SDK_ROOTS = {
     "pyhulax", "mavsdk", "gz", "ultralytics", "cv2", "serial", "rclpy",
     "pyrealsense2", "torch",
+    # numpy is NOT installed in the bare dev venv (the suite must pass
+    # without it) — a top-level numpy import in a pure module would break
+    # that invariant silently. Whitelisted vision files keep their freedom;
+    # pure modules use the TYPE_CHECKING pattern (types.py:29).
+    "numpy",
 }
 
 
@@ -141,11 +157,6 @@ def test_main_real_profile_refuses_without_gate(repo_root, monkeypatch, capsys):
     assert "i-know-this-arms-real-drones" in capsys.readouterr().err
 
 
-def test_main_no_drone_execution_points_at_s7(repo_root, monkeypatch):
-    """S4 wired the flight path (mock now RUNS — see test_orchestrator.py);
-    the no-drone replay/vision path stays a loud S7 pointer until then."""
-    from finals.main import main
-
-    monkeypatch.chdir(repo_root)
-    with pytest.raises(NotImplementedError, match="S7"):
-        main(["--profile", "replay"])
+# (test_main_no_drone_execution_points_at_s7 was deleted in S7: the no-drone
+# replay runner is now real — its end-to-end coverage lives in
+# tests/test_replay_e2e.py.)

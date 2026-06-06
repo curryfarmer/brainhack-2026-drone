@@ -124,18 +124,79 @@ def test_custom_weights_resolved_relative_to_config_dir(write_config, tmp_path, 
 
 
 # ---------------- replay / bench profile rules ----------------
-def test_replay_requires_no_drones_and_replay_dir(write_config):
+def test_replay_requires_no_drones_and_replay_dir(write_config, tmp_path):
     base = {
         "profile": "replay", "flight_backend": "none", "frame_backend": "replay",
         "detector": {"backend": "none"}, "drones": [],
     }
     with pytest.raises(ConfigError, match="replay_dir"):
         load_config(write_config(dict(base)))
-    base["replay_dir"] = "frames/"
-    assert load_config(write_config(dict(base))).replay_dir == "frames/"
+    # S7: replay_dir must EXIST at load time (the weights-guard philosophy —
+    # a missing frame source dies at load, not in a perception thread) and
+    # is stored resolved-absolute.
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    base["replay_dir"] = str(frames)
+    assert load_config(write_config(dict(base))).replay_dir == str(frames)
     base["drones"] = [{"id": "alpha", "phases": ["takeoff_demo"]}]
     with pytest.raises(ConfigError, match="laptop-only"):
         load_config(write_config(base))
+
+
+def test_replay_dir_must_be_a_string(write_config):
+    base = {
+        "profile": "replay", "flight_backend": "none", "frame_backend": "replay",
+        "replay_dir": 123,
+        "detector": {"backend": "none"}, "drones": [],
+    }
+    with pytest.raises(ConfigError, match="replay_dir"):   # not a TypeError
+        load_config(write_config(base))
+
+
+def test_replay_dir_must_exist_on_disk(write_config):
+    base = {
+        "profile": "replay", "flight_backend": "none", "frame_backend": "replay",
+        "replay_dir": "no_such_frames_dir/",
+        "detector": {"backend": "none"}, "drones": [],
+    }
+    with pytest.raises(ConfigError, match="not found on disk"):
+        load_config(write_config(base))
+
+
+def test_replay_frames_on_mock_profile_require_replay_dir(
+        write_config, minimal_mock_config, tmp_path):
+    """frame_backend 'replay' is profile-independent (a mock flight over
+    disk frames is the S7 vision-wiring smoke) — replay_dir is required and
+    resolved on ANY profile, not just profile=replay."""
+    minimal_mock_config["frame_backend"] = "replay"
+    with pytest.raises(ConfigError, match="replay_dir"):
+        load_config(write_config(dict(minimal_mock_config)))
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    minimal_mock_config["replay_dir"] = str(frames)
+    assert load_config(write_config(minimal_mock_config)).replay_dir == str(frames)
+
+
+# ---------------- marker / replay knobs (S7) ----------------
+def test_marker_backend_default_and_membership(write_config, minimal_mock_config):
+    assert load_config(
+        write_config(dict(minimal_mock_config))).marker_backend == "aruco"
+    minimal_mock_config["marker_backend"] = "apriltag"
+    with pytest.raises(ConfigError, match="marker_backend"):
+        load_config(write_config(minimal_mock_config))
+
+
+@pytest.mark.parametrize("bad", [0, -1, float("inf"), True])
+def test_replay_fps_validated(write_config, minimal_mock_config, bad):
+    minimal_mock_config["replay_fps"] = bad
+    with pytest.raises(ConfigError, match="replay_fps"):
+        load_config(write_config(minimal_mock_config))
+
+
+def test_detector_workers_validated(write_config, minimal_mock_config):
+    minimal_mock_config["detector"] = {"backend": "none", "workers": 0}
+    with pytest.raises(ConfigError, match="workers"):
+        load_config(write_config(minimal_mock_config))
 
 
 def _bench_config(drones: list) -> dict:

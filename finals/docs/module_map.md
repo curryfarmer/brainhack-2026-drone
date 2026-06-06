@@ -14,8 +14,13 @@ pads; ONE 2-hour onsite hardware window. Full background:
 ```bash
 pytest finals/tests                          # zero hardware, always green
 python -m finals.main --profile mock --dry-run   # resolve + print the plan
+python -m finals.main --profile replay           # frames -> sightings.csv (S7; needs cv2)
 python -m finals.main --profile sitl --phases takeoff_demo   # VM (from S4+S6)
 ```
+
+Vision deps note (S7): the test suite stays green WITHOUT cv2/numpy (vision
+tests skip; everything else runs); `--profile replay` and the cv2-gated
+tests need `pip install opencv-python "numpy<2"` (already in requirements.txt).
 
 Profiles: `mock` (pure logic) | `sitl` (qualifier PX4 SITL + Gazebo VM) |
 `replay` (disk frames + detector, 0 drones) | `bench` (real drones, props off,
@@ -31,8 +36,11 @@ SIM-1/2 execute S6; SIM-3/4/5 execute S8.
 ## Binding conventions (every session re-reads these)
 
 1. **No bare `except`.** `except Exception` ONLY in `guards.py` (SafetyController
-   safe-down, guard-evaluation wrapper) and `mission/orchestrator.py` (top
-   loop) — always logged with traceback. Enforced by `tests/test_conventions.py`.
+   safe-down, guard-evaluation wrapper), `mission/orchestrator.py` (top
+   loop), and — widened S7, reviewed — `vision/detector.py` (the vendored
+   worker pool must survive ARBITRARY model/callback exceptions; the root
+   Detector.py worker died SILENTLY on them) — always logged with traceback
+   + a counter. Enforced by `tests/test_conventions.py`.
 2. Every blocking/awaited op takes `timeout_s` and raises a typed
    `finals.errors` exception with an ACTIONABLE message (what, which drone,
    how long, what to check).
@@ -58,11 +66,11 @@ SIM-1/2 execute S6; SIM-3/4/5 execute S8.
 | `types.py` | ✅ implemented | S1 | pyhulax docs (Direction/units); hula_connection.py:46–50 (Action vocabulary) |
 | `errors.py` | ✅ implemented | S1 | failure-mode audit of the official examples |
 | `config.py` | ✅ implemented | S1 | qualifier_run.py:72–132 MissionConfig; known-issue #9 weights guards |
-| `main.py` | ✅ implemented | S1 / S4 | qualifier_run.py parse_args/_amain; S4: bench wiring builds the INNER backend first (BenchAdapter special case); phases via the `from_config` soft convention |
+| `main.py` | ✅ implemented | S1 / S4 / S7 | qualifier_run.py parse_args/_amain; S4: bench wiring builds the INNER backend first (BenchAdapter special case); phases via the `from_config` soft convention; S7: `_run_replay` (the no-drone runner) + per-drone perception/VideoWatchdog wiring gated on `_WIRED_FRAME_BACKENDS` = {"replay"} — deliberately NOT `frame_backend != "none"`: sitl.json declares "gazebo" before S8 wires it (a watchdog without a frame source = guaranteed-false DEGRADE). **S8: add "gazebo" to the set + a source branch in `_build_perception` — no orchestrator changes** (sightings.csv is appended at the PUBLISH site, perception.py) |
 | `mission/phase.py` | ✅ contract | S1 (exercised S4) | hula_connection.py:46–50, made pure |
 | `mission/phases/__init__.py` | ✅ registry | S1 | — |
 | `flight/adapter.py` | ✅ implemented (ABC + BenchAdapter) | S1 / S3 | pyhulax ∩ MAVSDK honest primitives; Bench wraps an inner adapter (S4 wiring needs a special case) |
-| `vision/video.py` | ✅ ABC / ReplaySource stub | S1 / **S7** | qualifier_run.py:163–186 RgbReceiver contract |
+| `vision/video.py` | ✅ implemented (ABC + ReplaySource) | S1 / S7 | qualifier_run.py:163–186 RgbReceiver contract (latest-frame-copy); ReplaySource: dir-of-png/jpg or video file, paced thread, `frame_number` = monotonic delivery counter (perception dedupe key), `exhausted`/`errored` surfaces; cv2 imported LAZILY (main resolves every backend for --dry-run on cv2-less machines) + injectable `loader` seam so contract tests run dep-free |
 | `events.py` | ✅ implemented | S2 | barrel_log.py atomic-flush discipline; runs/<ts>/ convention |
 | `sightings.py` | ✅ implemented | S2 | barrel_log.py lock discipline, inverted to append-only+fsync |
 | `flight/mock_adapter.py` | ✅ implemented | S3 | — (the test double everything stands on; pipeline order + deviations in its docstring) |
@@ -74,14 +82,14 @@ SIM-1/2 execute S6; SIM-3/4/5 execute S8.
 | `tools/replay_plot.py` | ⬜ | **SIM-2** | feeds mission.jsonl through the REAL DeadReckoner (never reimplements the math); matplotlib-only — inside the conventions scan, cv2/gz forbidden here |
 | `configs/sitl3.json` | ⬜ | **SIM-2** | sitl.json × 3 (UDP 14540/41/42, gRPC 50051–53, bands 1.2/1.7/2.2) |
 | `configs/sitl3_vision.json` | ⬜ | **SIM-5** | sitl3 + gazebo frames + search; `command_timeout_s` sized from measured RTF |
-| `mission/agent.py` | ✅ implemented | S4 | hula_connection.py:39–63 loop, formalized; mapping_drone.py watchdog gaps CLOSED: outer wait_for deadline on every command, telemetry-staleness check, emergency-land-EXACTLY-ONCE latch (shielded from cancellation), FAILED terminal — no auto-restart. Emits the `origin` + `action_complete` events (replay prereq) |
+| `mission/agent.py` | ✅ implemented | S4 | hula_connection.py:39–63 loop, formalized; mapping_drone.py watchdog gaps CLOSED: outer wait_for deadline on every command, telemetry-staleness check, emergency-land-EXACTLY-ONCE latch (shielded from cancellation), FAILED terminal — no auto-restart. Emits the `origin` + `action_complete` events (replay prereq). S7: injectable `frame_ts_fn` (-> GuardContext.last_frame_ts, the VideoWatchdog feed) + `on_degrade` hook (DEGRADE_DETECTION trips -> PerceptionLoop.shed) + read-only `last_telemetry` (perception's enrichment source) |
 | `mission/orchestrator.py` | ✅ implemented | S4 | qualifier_run.py:407–513 supervisor MINUS auto-restart (unsafe on real aircraft); agents = independent asyncio tasks; budget stop + settle-grace hard deadline; 1 Hz atomic heartbeat; seq-cursor SightingBus drain; whitelisted blanket catches always log tracebacks |
 | `mission/phases/takeoff_demo.py` | ✅ implemented | S4 | mapping_drone.py:343–355 intent, as relative moves (no UWB dependency); tunables via `zone["takeoff_demo"]` + `altitude_band_m` (`from_config`) |
-| `guards.py` | ✅ implemented | S5 | qualifier_run.py:383–393 crash→land path; mapping_drone.py gap audit. Trip vocabulary ADVISORY→LAND_ALL (max severity wins); per-drone guards run in the AGENT loop, swarm guards on the orchestrator tick (stub-vs-S4 reconciliations in the module docstring); a raising guard IS a trip; SafetyController = landing slot + wall-clock-bounded retry ladder + completion-shared trip(); AbortListener thread ('q'+Enter → orderly land-all). VideoWatchdog ships TESTED but stays unwired until S7 plumbs frame ts |
+| `guards.py` | ✅ implemented | S5 | qualifier_run.py:383–393 crash→land path; mapping_drone.py gap audit. Trip vocabulary ADVISORY→LAND_ALL (max severity wins); per-drone guards run in the AGENT loop, swarm guards on the orchestrator tick (stub-vs-S4 reconciliations in the module docstring); a raising guard IS a trip; SafetyController = landing slot + wall-clock-bounded retry ladder + completion-shared trip(); AbortListener thread ('q'+Enter → orderly land-all). VideoWatchdog WIRED in S7 (agent `frame_ts_fn` -> GuardContext.last_frame_ts; built by main only for `_WIRED_FRAME_BACKENDS`) |
 | `flight/sitl_adapter.py` | ⬜ stub | **S6** = SIM-1 (V1) + SIM-2 (3×) | drone_control.py + get_position_with_task.py + qualifier_run.py:268–331 (all proven) — VENDORED-WITH-FIXES, not wrapped: connect() hardcodes :14540, `_kill_stale_servers` is a global pkill, System() not injectable ([`sim_sessions.md`](sim_sessions.md) recap §2) |
-| `vision/aruco.py` | ⬜ stub | **S7** | **PRIMARY detector** (convoy robots carry ArUco markers — detect + read ID, no training). potential_detection_targets.py:5–30 (audited — it has a syntax error; detectMarkers returns 3 values) |
-| `vision/detector.py` | ⬜ stub | **S7** (optional half) | OPTIONAL YOLO fallback, off by default in configs. Root Detector.py VENDORED with 3 verified bugs fixed (finally-NameError thread-killer, silent COCO fallback, unbounded queue) |
-| `vision/perception.py` | ⬜ stub | **S7** | qualifier_run.py:192–252 detection_loop/callback |
+| `vision/aruco.py` | ✅ implemented | S7 | **PRIMARY detector** (convoy robots carry markers — detect + read ID, no training). potential_detection_targets.py:5–30 (audited, not copied — its `detectMarkers` unpack is a SYNTAX ERROR; three values, fixed). Pluggable seam: `make_marker_detector(cfg.marker_backend)` -> "aruco" (DICT_6X6_250) or "qr" (cv2.QRCodeDetector, payload sanitized — newlines would poison the CSV codec), SAME Sighting stream. Detectors emit MINIMAL sightings; perception enriches |
+| `vision/detector.py` | ✅ implemented | S7 | OPTIONAL YOLO fallback, off by default in configs. Root Detector.py VENDORED with 3 verified bugs fixed: (1) finally-del NameError thread-killer -> per-item guard, loud survival; (2) silent COCO fallback -> NO fallback, `infer` injected + weights config-validated; (3) unbounded queue -> deque(maxlen) drop-OLDEST + rate-limited loud counter (`dropped_total` drives perception auto-shed). Callback contract root-identical (fires ONLY when detections exist). `except Exception` whitelist entry (deliberate, reviewed — see conventions). CannedDetector = same pool, worker-thread callbacks, JSON script |
+| `vision/perception.py` | ✅ implemented | S7 | qualifier_run.py:192–252 detection_loop/callback. PerceptionLoop per drone: frame_number dedupe, sync marker detect every new frame, enrichment via dataclasses.replace, **CSV+bus at the PUBLISH site** (bounded bus eviction must never lose score rows — binding for S8), `last_frame_ts()` feeds the agent's VideoWatchdog, `shed()` = the DEGRADE_DETECTION consumer. PURE (removed from SDK_ALLOWED — detectors are injected callables); bearing math here: **yaw MINUS px offset** (CCW+; fixed the types.py sign conflict, test-pinned) |
 | `vision/gazebo_video.py` | ⬜ stub | **S8** = SIM-4 (assets SIM-3, rehearsal SIM-5) | qualifier_run.py RgbReceiver (proven in sim) |
 | `mission/phases/search.py` | ⬜ stub | **S8** = SIM-4 | SentryScan default (no-position searcher); coverage.py lane math informs lawnmower |
 | `flight/pyhulax_adapter.py` | ⬜ stub | **S9** | hula_connection.py:29–37 + https://pyhulax.xenops.ae (audit bar: the mapping_drone.py bug list) |
@@ -117,7 +125,7 @@ flight without a proven abort.
 | Question | Default until answered |
 |---|---|
 | What scores (sightings/tracks/geo)? | PARTIALLY ANSWERED (user, 2026-06-06): convoy robots carry **ArUco markers to detect and READ** → ArUco is the primary detector, YOLO optional. Still open: exact scoring formula, whether repeat reads of the same ID score |
-| Convoy marker details (ID list? DICT_6X6_250 confirmed? or QR codes?) | PARTIALLY ANSWERED (user, 2026-06-06): markers are **QR codes, 20×20 cm**. CONFIRM: literal QR (cv2.QRCodeDetector / pyhulax onboard `recognize_qr`) vs "QR" said loosely for ArUco — and whether 20×20 applies to convoy markers, pad markers, or both. Both detector paths feed the same Sighting stream, so S7 keeps the detector seam pluggable |
+| Convoy marker details (ID list? DICT_6X6_250 confirmed? or QR codes?) | PARTIALLY ANSWERED (user, 2026-06-06): markers are **QR codes, 20×20 cm**. CONFIRM: literal QR (cv2.QRCodeDetector / pyhulax onboard `recognize_qr`) vs "QR" said loosely for ArUco — and whether 20×20 applies to convoy markers, pad markers, or both. S7 SHIPPED the pluggable seam: config `marker_backend` ("aruco" default \| "qr"), both paths feed the same Sighting stream — the confirmation is now a ONE-KEY config edit, zero code |
 | ~~Marker PHYSICAL SIZE?~~ | ANSWERED (user, 2026-06-06): **20×20 cm**. Range math @640 px, f≈433 px: the marker spans ≈29 px at 3 m, ≈58 px at 1.5 m. ArUco at 20 cm reads reliably from ~4–8 m; a true QR needs far more px/module → realistic decode standoff only **~1–2.5 m**, which constrains sentry altitude hard and makes the QR-vs-ArUco confirmation above the highest-value open question. Still measure actual read range at onsite gate F; keep range a config value (`zone` params). Sim detection-range math: [`simulation.md`](simulation.md) Tier 2 |
 | Pad validity encoding? | ArUco `valid_marker_ids` in config; shape classifier stub |
 | Abort key legal in scored runs? | wired, safety-only (land-all); ask organizers |

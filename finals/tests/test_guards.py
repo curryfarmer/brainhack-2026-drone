@@ -1062,3 +1062,98 @@ def test_raising_swarm_guard_is_a_land_all_trip(run_dir, capsys):
     assert any(t["data"]["guard"] == "RaiseOnNth"
                and t["data"]["action"] == "LAND_ALL" for t in trips)
     assert "kaboom" in capsys.readouterr().err  # traceback logged
+
+
+# ============================================================
+# 11. VideoWatchdog through the agent (S7 frame-ts plumbing) — live frames
+#     never trip; a stalled source trips DEGRADE exactly once and flight is
+#     UNAFFECTED; on_degrade reaches the shedding consumer.
+# ============================================================
+class FrameTs:
+    """A settable frame-ts source (what PerceptionLoop.last_frame_ts is in
+    production) — None until the first frame, then the stamp."""
+
+    def __init__(self, ts=None):
+        self.ts = ts
+
+    def __call__(self):
+        return self.ts
+
+
+class TimeBumpAdapter(MockAdapter):
+    """hover + every rotate cost 1.5 clock-seconds: the mission spans well
+    past the 2.0 s video-stale limit while telemetry stays fresh
+    (MockAdapter re-stamps it per read from the same injected clock)."""
+
+    def __init__(self, drone_id: str, clock: FakeClock, **kw):
+        super().__init__(drone_id, clock=clock, **kw)
+        self._bump_clock = clock
+
+    async def hover(self, duration_s):
+        await super().hover(duration_s)
+        self._bump_clock.t += 1.5
+
+    async def rotate(self, angle_deg, *, timeout_s=10.0):
+        await super().rotate(angle_deg, timeout_s=timeout_s)
+        self._bump_clock.t += 1.5
+
+
+def test_video_watchdog_live_frames_never_trip_across_mock_mission(run_dir):
+    """ONE clock domain for agent + commands + frame stamps (the production
+    contract): time advances across the whole mission, frames keep arriving
+    'just now' -> zero video trips end to end."""
+    clock = FakeClock(100.0)
+    adapter = TimeBumpAdapter("alpha", clock)
+    with EventLog(run_dir) as events:
+        agent = DroneAgent(
+            "alpha", adapter, [TakeoffDemo()], events, clock=clock,
+            guards=[VideoWatchdog(stale_s=2.0)],
+            frame_ts_fn=lambda: clock.t,       # a frame arrived "just now"
+            on_degrade=lambda trip: pytest.fail(
+                f"on_degrade fired on a LIVE stream: {trip.reason}"))
+        run_agent(agent, deadline=clock.t + 1000.0)
+
+    assert agent.state is AgentState.DONE
+    assert clock.t > 102.0, "the mission must outlive the 2.0 s stale limit"
+    assert guard_trips_of(run_dir) == [], (
+        "a continuously-fresh frame stream must never trip the VideoWatchdog")
+    assert agent.failure is None
+
+
+def test_video_watchdog_stalled_source_degrades_once_flight_unaffected(run_dir):
+    clock = FakeClock(100.0)
+    frame_ts = FrameTs(100.0)                  # one frame, then the source dies
+    shed_calls = []
+    adapter = TimeBumpAdapter("alpha", clock)
+    with EventLog(run_dir) as events:
+        agent = DroneAgent(
+            "alpha", adapter, [TakeoffDemo()], events, clock=clock,
+            guards=[VideoWatchdog(stale_s=2.0)],
+            frame_ts_fn=frame_ts,
+            on_degrade=lambda trip: shed_calls.append(trip))
+        run_agent(agent, deadline=clock.t + 1000.0)
+
+    # Flight UNAFFECTED: the demo flies to completion, lands clean, DONE.
+    assert agent.state is AgentState.DONE
+    assert agent.failure is None
+    assert names(adapter.calls)[0:2] == ["connect", "takeoff"]
+    assert names(adapter.calls)[-1] == "land"
+    assert "emergency_land" not in names(adapter.calls)
+    # Exactly ONE DEGRADE trip (edge latch) and it reached the consumer.
+    trips = guard_trips_of(run_dir)
+    assert [t["data"]["action"] for t in trips] == ["DEGRADE_DETECTION"], (
+        "the stale episode must be reported exactly once (edge latch), with "
+        "flight unaffected")
+    assert trips[0]["data"]["guard"] == "VideoWatchdog"
+    assert len(shed_calls) == 1, "on_degrade must reach the shedding consumer"
+    assert shed_calls[0].action is TripAction.DEGRADE_DETECTION
+
+
+def test_agent_rejects_non_callable_vision_hooks(run_dir):
+    with EventLog(run_dir) as events:
+        with pytest.raises(ValueError, match="frame_ts_fn"):
+            DroneAgent("alpha", MockAdapter("alpha"), [TakeoffDemo()],
+                       events, frame_ts_fn=42)
+        with pytest.raises(ValueError, match="on_degrade"):
+            DroneAgent("alpha", MockAdapter("alpha"), [TakeoffDemo()],
+                       events, on_degrade="not callable")

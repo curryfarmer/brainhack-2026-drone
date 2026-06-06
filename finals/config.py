@@ -35,6 +35,11 @@ from finals.errors import ConfigError
 VALID_PROFILES = ("mock", "sitl", "replay", "bench", "real")
 VALID_FRAME_BACKENDS = ("none", "gazebo", "pyhulax", "replay")
 VALID_DETECTOR_BACKENDS = ("none", "ultralytics", "canned")
+# The PRIMARY (marker) detector seam — S7. "aruco" is the default per the
+# 2026-06-06 intel (convoy robots carry markers to detect + READ); "qr" is
+# the alternate path for the still-open "QR 20x20 cm" confirmation. Both
+# feed the SAME Sighting stream (finals/vision/aruco.py).
+VALID_MARKER_BACKENDS = ("aruco", "qr")
 
 # Each profile pins its flight backend — both appear in the JSON so a human
 # reading the file sees the whole story, and the loader cross-checks them so a
@@ -120,7 +125,9 @@ class FinalsConfig:
     video_channel_order: str = "rgb"            # what .to_rgb() ACTUALLY returns — bench-verified
     camera_hfov_deg: Optional[float] = None     # needed for Sighting.bearing_deg; bench-measured
     sitl_address: str = "udpin://0.0.0.0:14540"
-    replay_dir: Optional[str] = None            # REQUIRED for profile=replay
+    marker_backend: str = "aruco"               # "aruco" | "qr" — the primary detector seam (S7)
+    replay_dir: Optional[str] = None            # REQUIRED whenever frame_backend=replay
+    replay_fps: float = 10.0                    # ReplaySource pacing (frames/s from disk)
     use_uwb: bool = False
     uwb_serial_port: Optional[str] = None
     guards: GuardsConfig = field(default_factory=GuardsConfig)
@@ -154,6 +161,11 @@ def _validate_detector(det: DetectorConfig, config_dir: str) -> None:
         )
     if not 0.0 < det.conf <= 1.0:
         raise ConfigError(f"detector.conf {det.conf} out of range (0, 1]")
+    if (not isinstance(det.workers, int) or isinstance(det.workers, bool)
+            or det.workers < 1):
+        raise ConfigError(
+            f"detector.workers must be an int >= 1, got {det.workers!r} — "
+            f"the worker pool needs at least one thread")
     if det.backend == "ultralytics":
         if not det.weights:
             raise ConfigError(
@@ -235,8 +247,8 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
         optional=(
             "run_dir", "tick_hz", "mission_budget_s", "command_timeout_s",
             "min_battery_pct", "video_channel_order", "camera_hfov_deg",
-            "sitl_address", "replay_dir", "use_uwb", "uwb_serial_port",
-            "guards",
+            "sitl_address", "marker_backend", "replay_dir", "replay_fps",
+            "use_uwb", "uwb_serial_port", "guards",
         ),
         where=path,
     )
@@ -275,7 +287,8 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
         **{k: top[k] for k in (
             "run_dir", "tick_hz", "mission_budget_s", "command_timeout_s",
             "min_battery_pct", "video_channel_order", "camera_hfov_deg",
-            "sitl_address", "replay_dir", "use_uwb", "uwb_serial_port",
+            "sitl_address", "marker_backend", "replay_dir", "replay_fps",
+            "use_uwb", "uwb_serial_port",
         ) if k in top},
     )
 
@@ -319,6 +332,12 @@ def _validate(cfg: FinalsConfig, config_dir: str) -> None:
             f"frame_backend {cfg.frame_backend!r} invalid — one of {VALID_FRAME_BACKENDS}"
         )
 
+    if cfg.marker_backend not in VALID_MARKER_BACKENDS:
+        raise ConfigError(
+            f"marker_backend {cfg.marker_backend!r} invalid — one of "
+            f"{VALID_MARKER_BACKENDS}"
+        )
+
     if cfg.profile == "replay":
         if cfg.drones:
             raise ConfigError(
@@ -335,6 +354,33 @@ def _validate(cfg: FinalsConfig, config_dir: str) -> None:
     else:
         if not cfg.drones:
             raise ConfigError(f"profile {cfg.profile!r} requires at least one drone")
+
+    if cfg.frame_backend == "replay":
+        # Any profile may replay frames from disk (e.g. a mock flight with
+        # replay frames is the S7 vision-wiring smoke). The dir/file must
+        # EXIST at load time — same philosophy as the weights guard: a
+        # missing frame source dies here, loudly, not minutes later in a
+        # perception thread.
+        if not isinstance(cfg.replay_dir, str) or not cfg.replay_dir:
+            # The isinstance check matters: a non-str (123, true) would
+            # escape as a raw TypeError from os.path.join below instead of
+            # the loader's ConfigError contract.
+            raise ConfigError(
+                f'frame_backend "replay" requires "replay_dir" (a string '
+                f"path to a directory of jpg/png frames or a video file) — "
+                f"got {cfg.replay_dir!r}"
+            )
+        candidates = [cfg.replay_dir, os.path.join(config_dir, cfg.replay_dir)]
+        resolved = next((p for p in candidates
+                         if os.path.isdir(p) or os.path.isfile(p)), None)
+        if resolved is None:
+            raise ConfigError(
+                f"replay_dir {cfg.replay_dir!r} not found on disk (tried "
+                f"{[os.path.abspath(c) for c in candidates]}) — check the "
+                f"path (dev fixtures live at finals/tests/fixtures/frames; "
+                f"run from the repo root)"
+            )
+        cfg.replay_dir = os.path.abspath(resolved)
 
     ids = [d.id for d in cfg.drones]
     if len(ids) != len(set(ids)):
@@ -360,6 +406,12 @@ def _validate(cfg: FinalsConfig, config_dir: str) -> None:
                         ("command_timeout_s", cfg.command_timeout_s)):
         if not value > 0:
             raise ConfigError(f"{name} must be > 0, got {value}")
+    if (not isinstance(cfg.replay_fps, (int, float))
+            or isinstance(cfg.replay_fps, bool)
+            or not math.isfinite(cfg.replay_fps) or cfg.replay_fps <= 0):
+        # inf would make the pacing period 0 (busy spin); NaN poisons it.
+        raise ConfigError(
+            f"replay_fps must be finite and > 0, got {cfg.replay_fps!r}")
     if not 0 <= cfg.min_battery_pct <= 100:
         raise ConfigError(f"min_battery_pct {cfg.min_battery_pct} out of range [0, 100]")
     if cfg.video_channel_order not in ("rgb", "bgr"):

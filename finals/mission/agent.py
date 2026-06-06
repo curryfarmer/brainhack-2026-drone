@@ -47,13 +47,24 @@ Surface (S4, implemented):
 - Guards (S5): when wired, the per-drone guard list runs through
   finals.guards.evaluate_guards every loop iteration — after the telemetry
   re-read, BEFORE the phase may act. Every trip is logged (guard_trip) and
-  the agent acts on the MAX severity: ADVISORY/DEGRADE_DETECTION -> event
-  only; HOLD_THIS -> bounded idle (hold_poll_s, wakes on stop/deadline),
-  phase NOT stepped this tick; LAND_THIS -> the clean break path below
-  (land -> DONE, stopped_reason names the guard); LAND_ALL -> set the
-  SHARED stop event (every agent winds down clean) and break. A guard that
-  raises becomes a trip INSIDE the wrapper (the catch lives in guards.py),
-  so this file gains no new exception handling for it.
+  the agent acts on the MAX severity: ADVISORY -> event only;
+  DEGRADE_DETECTION -> event + the on_degrade hook (S7, below); HOLD_THIS
+  -> bounded idle (hold_poll_s, wakes on stop/deadline), phase NOT stepped
+  this tick; LAND_THIS -> the clean break path below (land -> DONE,
+  stopped_reason names the guard); LAND_ALL -> set the SHARED stop event
+  (every agent winds down clean) and break. A guard that raises becomes a
+  trip INSIDE the wrapper (the catch lives in guards.py), so this file
+  gains no new exception handling for it.
+- Vision plumbing (S7): frame_ts_fn (when wired by main.py) feeds the last
+  sampled frame's timestamp into GuardContext.last_frame_ts each guard
+  evaluation — the VideoWatchdog's input; it must share the agent's
+  monotonic clock domain (PerceptionLoop.last_frame_ts does — frames are
+  stamped with the same time.monotonic; tests inject ONE FakeClock into
+  source, perception and agent). on_degrade is called once per
+  DEGRADE_DETECTION trip with the Trip — main.py wires it to that drone's
+  PerceptionLoop.shed, whose contract is to NEVER raise (anything else
+  raising from the hook propagates to the orchestrator's net like any
+  agent bug — fail loud).
 - SafetyController (S5): when wired, Land commands (phase-commanded and
   the final descent) route through it — the landing slot (at most one
   NORMAL landing at a time) plus the bounded land-retry ladder. That path
@@ -135,6 +146,8 @@ class DroneAgent:
                  telemetry_stale_s: float = DEFAULT_TELEMETRY_STALE_S,
                  guards: Sequence[Guard] = (),
                  safety: Optional[SafetyController] = None,
+                 frame_ts_fn: Optional[Callable[[], Optional[float]]] = None,
+                 on_degrade: Optional[Callable[[Trip], None]] = None,
                  hold_poll_s: float = 0.5,
                  clock: Callable[[], float] = time.monotonic):
         if not isinstance(drone_id, str) or not drone_id:
@@ -172,6 +185,13 @@ class DroneAgent:
                 f"DroneAgent({drone_id!r}): safety must be a SafetyController "
                 f"or None, got {type(safety).__name__!r} — check the main.py "
                 f"wiring")
+        for hook_name, hook in (("frame_ts_fn", frame_ts_fn),
+                                ("on_degrade", on_degrade)):
+            if hook is not None and not callable(hook):
+                raise ValueError(
+                    f"DroneAgent({drone_id!r}): {hook_name} must be callable "
+                    f"or None, got {hook!r} — check the main.py vision "
+                    f"wiring (S7)")
 
         self.drone_id = drone_id
         self._adapter = adapter
@@ -183,6 +203,8 @@ class DroneAgent:
         self._telemetry_stale_s = float(telemetry_stale_s)
         self._guards = list(guards)
         self._safety = safety
+        self._frame_ts_fn = frame_ts_fn
+        self._on_degrade = on_degrade
         self._hold_poll_s = float(hold_poll_s)
         self._clock = clock
 
@@ -215,6 +237,13 @@ class DroneAgent:
     @property
     def phases_completed(self) -> int:
         return self._phases_completed
+
+    @property
+    def last_telemetry(self) -> Optional[Telemetry]:
+        """The agent's cached per-tick telemetry — PerceptionLoop's
+        enrichment source (S7): one poll per tick, shared, never a second
+        adapter call from a vision thread."""
+        return self._last_telemetry
 
     def status(self) -> dict:
         """Non-blocking heartbeat snapshot. Uses CACHED telemetry so it stays
@@ -336,12 +365,22 @@ class DroneAgent:
                     phase_name=self._phases[self._phase_idx].name,
                     phase_elapsed_s=(now - self._phase_entered_at
                                      if self._phase_entered_at is not None
-                                     else None)))
+                                     else None),
+                    last_frame_ts=(self._frame_ts_fn()
+                                   if self._frame_ts_fn is not None
+                                   else None)))
                 if trips:
                     worst = max(trips, key=lambda tr: tr.action)
                     for tr in trips:
                         self._log("guard_trip", guard=tr.guard,
                                   action=tr.action.name, reason=tr.reason)
+                        if (tr.action is TripAction.DEGRADE_DETECTION
+                                and self._on_degrade is not None):
+                            # S7: the shedding consumer (PerceptionLoop.shed
+                            # — contract: never raises). Fires per DEGRADE
+                            # trip regardless of the worst severity: a
+                            # co-fired landing still wants detection shed.
+                            self._on_degrade(tr)
                     if worst.action is TripAction.LAND_ALL:
                         self._pending_trip = worst
                         self._stopped_reason = (f"guard {worst.guard} "
@@ -359,8 +398,8 @@ class DroneAgent:
                         await self._wait(Wait(duration_s=self._hold_poll_s),
                                          deadline, stop_event)
                         continue
-                    # ADVISORY / DEGRADE_DETECTION: logged above; the
-                    # detection-shedding consumers arrive with S7.
+                    # ADVISORY: logged above, flight unaffected.
+                    # DEGRADE_DETECTION: logged + on_degrade fired above.
 
             phase = self._phases[self._phase_idx]
             if not entered:

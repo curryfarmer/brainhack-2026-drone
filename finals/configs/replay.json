@@ -1,9 +1,11 @@
 {
-  "_comment": "Laptop-only dev: frames from disk -> ArUco (always on, the PRIMARY detector) -> sightings.csv. 0 drones, no flight. YOLO is OFF by default; to exercise it set detector backend 'ultralytics' + weights (best.pt = qualifier barrel model, plumbing only).",
+  "_comment": "Laptop-only dev: frames from disk -> marker detection (always on, the PRIMARY detector; marker_backend 'aruco'|'qr') -> sightings.csv. 0 drones, no flight. YOLO is OFF by default; to exercise it set detector backend 'ultralytics' + weights (best.pt = qualifier barrel model, plumbing only). replay_fps 5 = 2 sample chances per frame at the 10 Hz sample rate, robust by default.",
   "profile": "replay",
   "flight_backend": "none",
   "frame_backend": "replay",
   "replay_dir": "finals/tests/fixtures/frames",
+  "replay_fps": 5.0,
+  "marker_backend": "aruco",
   "detector": { "backend": "none" },
   "drones": []
 }
