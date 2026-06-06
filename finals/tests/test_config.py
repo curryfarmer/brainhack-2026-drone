@@ -188,3 +188,87 @@ def test_shipped_config_loads(profile, repo_root, monkeypatch):
     monkeypatch.chdir(repo_root)  # weights ("best.pt") resolve from repo root
     cfg = load_config(os.path.join(repo_root, "finals", "configs", f"{profile}.json"))
     assert cfg.profile == profile
+
+
+# ---------------- guards (S5) ----------------
+def test_guards_defaults_applied(write_config, minimal_mock_config):
+    cfg = load_config(write_config(minimal_mock_config))
+    assert cfg.guards.telemetry_stale_s == 2.0
+    assert cfg.guards.battery_warn_pct == 30.0
+    assert cfg.guards.landing_reserve_s == 0.0      # MissionClockGuard OFF
+    assert cfg.guards.phase_timeout_s is None       # PhaseTimeout OFF
+    assert cfg.guards.geofence_radius_m is None     # GeofenceLite OFF
+    assert cfg.guards.land_retry_period_s == 1.0
+    assert cfg.guards.land_retry_window_s == 30.0
+
+
+def test_guards_keys_roundtrip_and_comments_ignored(write_config,
+                                                    minimal_mock_config):
+    minimal_mock_config["guards"] = {
+        "_comment": "ignored",
+        "battery_warn_pct": 50.0,
+        "landing_reserve_s": 60.0,
+        "phase_timeout_s": 90.0,
+        "geofence_radius_m": 25.0,
+        "geofence_alt_m": 4.0,
+    }
+    cfg = load_config(write_config(minimal_mock_config))
+    assert cfg.guards.battery_warn_pct == 50.0
+    assert cfg.guards.landing_reserve_s == 60.0
+    assert cfg.guards.phase_timeout_s == 90.0
+    assert cfg.guards.geofence_radius_m == 25.0
+    assert cfg.guards.geofence_alt_m == 4.0
+
+
+def test_guards_unknown_key_named(write_config, minimal_mock_config):
+    minimal_mock_config["guards"] = {"battery_warn_pctt": 50.0}   # typo
+    with pytest.raises(ConfigError, match="battery_warn_pctt"):
+        load_config(write_config(minimal_mock_config))
+
+
+def test_guards_warn_under_floor_rejected(write_config, minimal_mock_config):
+    minimal_mock_config["guards"] = {"battery_warn_pct": 10.0}    # floor is 20
+    with pytest.raises(ConfigError, match="battery_warn_pct"):
+        load_config(write_config(minimal_mock_config))
+
+
+def test_guards_reserve_over_budget_rejected(write_config,
+                                             minimal_mock_config):
+    minimal_mock_config["guards"] = {"landing_reserve_s": 700.0}  # budget 600
+    with pytest.raises(ConfigError, match="landing_reserve_s"):
+        load_config(write_config(minimal_mock_config))
+
+
+def test_guards_reserve_checked_against_budget_override(write_config,
+                                                        minimal_mock_config):
+    """The instant-trip trap: a --budget override shrinking the budget under
+    the configured reserve must die at load time, not at t=0 in the air."""
+    minimal_mock_config["guards"] = {"landing_reserve_s": 60.0}
+    with pytest.raises(ConfigError, match="landing_reserve_s"):
+        load_config(write_config(minimal_mock_config),
+                    overrides={"budget_s": 30.0})
+
+
+def test_guards_geofence_alt_requires_radius(write_config,
+                                             minimal_mock_config):
+    minimal_mock_config["guards"] = {"geofence_alt_m": 4.0}
+    with pytest.raises(ConfigError, match="geofence_radius_m"):
+        load_config(write_config(minimal_mock_config))
+
+
+def test_guards_ladder_window_under_period_rejected(write_config,
+                                                    minimal_mock_config):
+    minimal_mock_config["guards"] = {"land_retry_period_s": 5.0,
+                                     "land_retry_window_s": 1.0}
+    with pytest.raises(ConfigError, match="land_retry_window_s"):
+        load_config(write_config(minimal_mock_config))
+
+
+def test_guards_telemetry_stale_over_backstop_rejected(write_config,
+                                                       minimal_mock_config):
+    """The layering-inversion trap: the TelemetryWatchdog policy threshold
+    at/above the agent's 5 s SensorTimeout backstop would turn every stale-
+    telemetry event into an emergency FAILED instead of a clean landing."""
+    minimal_mock_config["guards"] = {"telemetry_stale_s": 5.0}
+    with pytest.raises(ConfigError, match="backstop"):
+        load_config(write_config(minimal_mock_config))

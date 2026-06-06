@@ -44,13 +44,33 @@ Surface (S4, implemented):
   EventLogError) propagates out of run() to the orchestrator's top-loop
   net, which logs the traceback and calls fail_safe() — same latch, same
   exactly-once landing.
+- Guards (S5): when wired, the per-drone guard list runs through
+  finals.guards.evaluate_guards every loop iteration — after the telemetry
+  re-read, BEFORE the phase may act. Every trip is logged (guard_trip) and
+  the agent acts on the MAX severity: ADVISORY/DEGRADE_DETECTION -> event
+  only; HOLD_THIS -> bounded idle (hold_poll_s, wakes on stop/deadline),
+  phase NOT stepped this tick; LAND_THIS -> the clean break path below
+  (land -> DONE, stopped_reason names the guard); LAND_ALL -> set the
+  SHARED stop event (every agent winds down clean) and break. A guard that
+  raises becomes a trip INSIDE the wrapper (the catch lives in guards.py),
+  so this file gains no new exception handling for it.
+- SafetyController (S5): when wired, Land commands (phase-commanded and
+  the final descent) route through it — the landing slot (at most one
+  NORMAL landing at a time) plus the bounded land-retry ladder. That path
+  is internally bounded (slot wait + per-attempt deadlines + a fixed
+  attempt count), so it deliberately does NOT run under the single-command
+  outer wait_for, which would kill the ladder mid-attempt and mislabel a
+  retrying landing as a backend hang; action_start carries route="safety"
+  and the ladder's total bound instead. emergency_land NEVER routes
+  through the controller: the latched safe-down calls the adapter directly
+  and can never wait on the landing slot.
 
 Event vocabulary written to EventLog (the run's forensic story, and the
 replay-plot input — simulation.md Tier 0): agent_connect, origin (initial
 pose/origin: the replay prereq), phase_enter, action_start,
 action_complete (the executed-action record DeadReckoner replays),
-action_failed, phase_done, phase_abort, agent_stopped, agent_landing,
-agent_done, agent_failed, emergency_land, agent_disconnect.
+action_failed, phase_done, phase_abort, guard_trip, agent_stopped,
+agent_landing, agent_done, agent_failed, emergency_land, agent_disconnect.
 
 Derives from: the per-drone dict + state-loop pattern of
 hula_connection.py:39-63 (officially recommended), formalized as one agent
@@ -74,15 +94,25 @@ import enum
 import math
 import sys
 import time
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Sequence
 
 from finals.errors import FlightError, FlightTimeout, SensorTimeout
 from finals.events import EventLog
 from finals.flight.adapter import FlightAdapter
+from finals.guards import (Guard, GuardContext, SafetyController, Trip,
+                           TripAction, evaluate_guards)
 from finals.mission.phase import AgentContext, MissionPhase
 from finals.sightings import SightingBus
 from finals.types import (Abort, Action, Done, Hover, Land, Move, Rotate,
                           Takeoff, Telemetry, Wait)
+
+
+#: The telemetry-staleness MECHANISM backstop (SensorTimeout -> emergency
+#: land + FAILED). The S5 TelemetryWatchdog POLICY layer must stay STRICTLY
+#: tighter than this or the layering inverts — every stale-telemetry event
+#: would become an emergency instead of an orderly guard landing. Config
+#: validation enforces guards.telemetry_stale_s < this (finals/config.py).
+DEFAULT_TELEMETRY_STALE_S = 5.0
 
 
 class AgentState(enum.Enum):
@@ -102,7 +132,10 @@ class DroneAgent:
                  bus: Optional[SightingBus] = None,
                  command_timeout_s: float = 15.0,
                  command_grace_s: float = 2.0,
-                 telemetry_stale_s: float = 5.0,
+                 telemetry_stale_s: float = DEFAULT_TELEMETRY_STALE_S,
+                 guards: Sequence[Guard] = (),
+                 safety: Optional[SafetyController] = None,
+                 hold_poll_s: float = 0.5,
                  clock: Callable[[], float] = time.monotonic):
         if not isinstance(drone_id, str) or not drone_id:
             raise ValueError(
@@ -121,7 +154,8 @@ class DroneAgent:
                 f"phase construction in the wiring")
         for name, value, zero_ok in (("command_timeout_s", command_timeout_s, False),
                                      ("command_grace_s", command_grace_s, True),
-                                     ("telemetry_stale_s", telemetry_stale_s, False)):
+                                     ("telemetry_stale_s", telemetry_stale_s, False),
+                                     ("hold_poll_s", hold_poll_s, False)):
             if (not isinstance(value, (int, float)) or isinstance(value, bool)
                     or not math.isfinite(value)
                     or value < 0 or (value == 0 and not zero_ok)):
@@ -129,6 +163,15 @@ class DroneAgent:
                     f"DroneAgent({drone_id!r}): {name} must be finite and "
                     f"{'>= 0' if zero_ok else '> 0'}, got {value!r} — an "
                     f"unbounded deadline would defeat the whole watchdog")
+        if not all(isinstance(g, Guard) for g in guards):
+            raise ValueError(
+                f"DroneAgent({drone_id!r}): guards must be Guard instances, "
+                f"got {guards!r} — check the main._build_guards wiring")
+        if safety is not None and not isinstance(safety, SafetyController):
+            raise ValueError(
+                f"DroneAgent({drone_id!r}): safety must be a SafetyController "
+                f"or None, got {type(safety).__name__!r} — check the main.py "
+                f"wiring")
 
         self.drone_id = drone_id
         self._adapter = adapter
@@ -138,11 +181,16 @@ class DroneAgent:
         self._command_timeout_s = float(command_timeout_s)
         self._command_grace_s = float(command_grace_s)
         self._telemetry_stale_s = float(telemetry_stale_s)
+        self._guards = list(guards)
+        self._safety = safety
+        self._hold_poll_s = float(hold_poll_s)
         self._clock = clock
 
         self._state = AgentState.INIT
         self._phase_idx = 0
         self._phases_completed = 0
+        self._phase_entered_at: Optional[float] = None
+        self._pending_trip: Optional[Trip] = None
         self._airborne = False
         self._emergency_landed = False     # the EXACTLY-ONCE latch
         self._disconnected = False
@@ -277,12 +325,50 @@ class DroneAgent:
                 await self._fail(str(e), exc=e)
                 return
 
+            # -- per-drone guards (S5): evaluated BEFORE the phase may act.
+            # The wrapper converts a raising guard into a trip; nothing to
+            # catch here. Acted on by MAX severity; every trip is logged. --
+            if self._guards:
+                trips = evaluate_guards(self._guards, GuardContext(
+                    drone_id=self.drone_id, now=now,
+                    mission_elapsed_s=now - self._t_start,
+                    telemetry=ctx.telemetry,
+                    phase_name=self._phases[self._phase_idx].name,
+                    phase_elapsed_s=(now - self._phase_entered_at
+                                     if self._phase_entered_at is not None
+                                     else None)))
+                if trips:
+                    worst = max(trips, key=lambda tr: tr.action)
+                    for tr in trips:
+                        self._log("guard_trip", guard=tr.guard,
+                                  action=tr.action.name, reason=tr.reason)
+                    if worst.action is TripAction.LAND_ALL:
+                        self._pending_trip = worst
+                        self._stopped_reason = (f"guard {worst.guard} "
+                                                f"tripped LAND_ALL: "
+                                                f"{worst.reason}")
+                        stop_event.set()    # every agent winds down clean
+                        break
+                    if worst.action is TripAction.LAND_THIS:
+                        self._pending_trip = worst
+                        self._stopped_reason = (f"guard {worst.guard}: "
+                                                f"{worst.reason}")
+                        break
+                    if worst.action is TripAction.HOLD_THIS:
+                        # Bounded idle; the phase is NOT stepped this tick.
+                        await self._wait(Wait(duration_s=self._hold_poll_s),
+                                         deadline, stop_event)
+                        continue
+                    # ADVISORY / DEGRADE_DETECTION: logged above; the
+                    # detection-shedding consumers arrive with S7.
+
             phase = self._phases[self._phase_idx]
             if not entered:
                 self._log("phase_enter", phase=phase.name,
                           index=self._phase_idx)
                 phase.on_enter(ctx)
                 entered = True
+                self._phase_entered_at = now
 
             action = phase.step(ctx)
 
@@ -293,6 +379,7 @@ class DroneAgent:
                 self._phases_completed += 1
                 self._phase_idx += 1
                 entered = False
+                self._phase_entered_at = None
                 continue
             if isinstance(action, Abort):
                 self._log("phase_abort", phase=phase.name,
@@ -390,9 +477,15 @@ class DroneAgent:
                  if isinstance(action, Hover) and math.isfinite(action.duration_s)
                  and action.duration_s > 0 else 0.0)
         outer = self._outer_s(extra)
+        route_fields = {}
+        if isinstance(action, Land) and self._safety is not None:
+            # The safety landing path carries its own (larger) total bound —
+            # log THAT so the forensic record cites the deadline that binds.
+            outer = self._safety.land_bound_s
+            route_fields["route"] = "safety"
 
         self._log("action_start", action=name, timeout_s=t,
-                  outer_deadline_s=outer, **fields)
+                  outer_deadline_s=outer, **route_fields, **fields)
         t0 = self._clock()
         try:
             if isinstance(action, Takeoff):
@@ -408,7 +501,20 @@ class DroneAgent:
             elif isinstance(action, Hover):
                 await asyncio.wait_for(a.hover(action.duration_s), outer)
             elif isinstance(action, Land):
-                await asyncio.wait_for(a.land(timeout_s=t), outer)
+                if self._safety is not None:
+                    # safety.land/trip are internally bounded (slot wait +
+                    # per-attempt deadlines + a fixed attempt count); the
+                    # standard outer wait_for would kill the retry ladder
+                    # mid-attempt and mislabel it a backend hang. A guard-
+                    # tripped descent goes through the latched trip() entry
+                    # (idempotent across racing trip sources).
+                    if self._pending_trip is not None:
+                        await self._safety.trip(a, self.drone_id,
+                                                self._pending_trip.reason)
+                    else:
+                        await self._safety.land(a, self.drone_id)
+                else:
+                    await asyncio.wait_for(a.land(timeout_s=t), outer)
             else:   # _execute is only called with the five flight actions
                 raise TypeError(
                     f"{self.drone_id}: _execute() got non-flight action "

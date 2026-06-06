@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import glob
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -71,6 +72,30 @@ class DetectorConfig:
 
 
 @dataclass
+class GuardsConfig:
+    """S5 guard thresholds (finals/guards.py). Everything here is the onsite
+    "tune config, not code" surface; main.py builds the guard objects from
+    these. BatteryGuard's FLOOR deliberately stays the existing top-level
+    min_battery_pct (one battery floor, not two)."""
+
+    telemetry_stale_s: float = 2.0          # TelemetryWatchdog (policy layer;
+                                            # the agent's 5 s backstop stays)
+    battery_warn_pct: float = 30.0          # BatteryGuard warn -> advisory event
+    video_stale_s: float = 2.0              # VideoWatchdog (built only when
+                                            # frame_backend != "none")
+    landing_reserve_s: float = 0.0          # MissionClockGuard: land-all at
+                                            # budget - reserve; 0 = guard OFF
+    phase_timeout_s: Optional[float] = None # PhaseTimeout; None = guard OFF
+    geofence_radius_m: Optional[float] = None   # GeofenceLite (advisory only);
+    geofence_alt_m: Optional[float] = None      # None = guard OFF
+    loop_overrun_factor: float = 2.0        # LoopOverrunGuard: latency limit =
+    loop_overrun_ticks: int = 5             # factor x period, for n ticks
+    land_retry_period_s: float = 1.0        # SafetyController ladder cadence
+    land_retry_window_s: float = 30.0       # ladder total -> operator alarm
+    slot_wait_s: float = 120.0              # max wait for the landing slot
+
+
+@dataclass
 class DroneConfig:
     id: str                                     # "alpha" — used in logs, sightings, prefixes
     plane_id: Optional[int] = None              # Dola discovery key (REQUIRED for bench/real)
@@ -98,6 +123,7 @@ class FinalsConfig:
     replay_dir: Optional[str] = None            # REQUIRED for profile=replay
     use_uwb: bool = False
     uwb_serial_port: Optional[str] = None
+    guards: GuardsConfig = field(default_factory=GuardsConfig)
 
 
 # ============================================================
@@ -210,6 +236,7 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
             "run_dir", "tick_hz", "mission_budget_s", "command_timeout_s",
             "min_battery_pct", "video_channel_order", "camera_hfov_deg",
             "sitl_address", "replay_dir", "use_uwb", "uwb_serial_port",
+            "guards",
         ),
         where=path,
     )
@@ -223,6 +250,17 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
     )
     detector = DetectorConfig(**det_data)
 
+    guards_data = _check_keys(
+        top.get("guards", {}),
+        required=(),
+        optional=("telemetry_stale_s", "battery_warn_pct", "video_stale_s",
+                  "landing_reserve_s", "phase_timeout_s", "geofence_radius_m",
+                  "geofence_alt_m", "loop_overrun_factor", "loop_overrun_ticks",
+                  "land_retry_period_s", "land_retry_window_s", "slot_wait_s"),
+        where=f"{path}: guards",
+    )
+    guards = GuardsConfig(**guards_data)
+
     if not isinstance(top["drones"], list):
         raise ConfigError(f"{path}: drones must be a list (may be empty only for replay)")
     drones = [_build_drone(d, i) for i, d in enumerate(top["drones"])]
@@ -233,6 +271,7 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
         frame_backend=top["frame_backend"],
         detector=detector,
         drones=drones,
+        guards=guards,
         **{k: top[k] for k in (
             "run_dir", "tick_hz", "mission_budget_s", "command_timeout_s",
             "min_battery_pct", "video_channel_order", "camera_hfov_deg",
@@ -330,3 +369,76 @@ def _validate(cfg: FinalsConfig, config_dir: str) -> None:
         raise ConfigError('use_uwb=true requires "uwb_serial_port" (e.g. "COM7" / "/dev/ttyUSB0")')
 
     _validate_detector(cfg.detector, config_dir)
+    _validate_guards(cfg)
+
+
+def _validate_guards(cfg: FinalsConfig) -> None:
+    """Guard thresholds (S5). Runs AFTER CLI overrides, so e.g. a --budget
+    override is checked against landing_reserve_s too."""
+    g = cfg.guards
+
+    def _num(name: str, value, *, zero_ok: bool = False) -> None:
+        if (not isinstance(value, (int, float)) or isinstance(value, bool)
+                or not math.isfinite(value)
+                or value < 0 or (value == 0 and not zero_ok)):
+            raise ConfigError(
+                f"guards.{name} must be finite and "
+                f"{'>= 0' if zero_ok else '> 0'}, got {value!r}")
+
+    _num("telemetry_stale_s", g.telemetry_stale_s)
+    # Lazy import: only the one constant, and only at validation time.
+    from finals.mission.agent import DEFAULT_TELEMETRY_STALE_S
+    if g.telemetry_stale_s >= DEFAULT_TELEMETRY_STALE_S:
+        raise ConfigError(
+            f"guards.telemetry_stale_s ({g.telemetry_stale_s}) must stay "
+            f"UNDER the agent's {DEFAULT_TELEMETRY_STALE_S:.0f} s "
+            f"SensorTimeout backstop — at/above it the layering inverts and "
+            f"every stale-telemetry event becomes an emergency FAILED "
+            f"instead of the orderly guard landing")
+    _num("video_stale_s", g.video_stale_s)
+    _num("battery_warn_pct", g.battery_warn_pct, zero_ok=True)
+    if not g.battery_warn_pct <= 100:
+        raise ConfigError(
+            f"guards.battery_warn_pct {g.battery_warn_pct} out of range [0, 100]")
+    if g.battery_warn_pct < cfg.min_battery_pct:
+        raise ConfigError(
+            f"guards.battery_warn_pct ({g.battery_warn_pct}) < min_battery_pct "
+            f"({cfg.min_battery_pct}) — the warn must come BEFORE the floor "
+            f"on the way down")
+    _num("landing_reserve_s", g.landing_reserve_s, zero_ok=True)
+    if g.landing_reserve_s >= cfg.mission_budget_s:
+        raise ConfigError(
+            f"guards.landing_reserve_s ({g.landing_reserve_s}) >= "
+            f"mission_budget_s ({cfg.mission_budget_s}) — the mission clock "
+            f"guard would land everything at t=0 (check a --budget override "
+            f"shrinking the budget under the reserve)")
+    if g.phase_timeout_s is not None:
+        _num("phase_timeout_s", g.phase_timeout_s)
+    if g.geofence_radius_m is not None:
+        _num("geofence_radius_m", g.geofence_radius_m)
+    if g.geofence_alt_m is not None:
+        _num("geofence_alt_m", g.geofence_alt_m)
+        if g.geofence_radius_m is None:
+            raise ConfigError(
+                "guards.geofence_alt_m is set but guards.geofence_radius_m is "
+                "not — GeofenceLite needs the radius; without it the altitude "
+                "limit would be silently ignored")
+    _num("loop_overrun_factor", g.loop_overrun_factor)
+    if not g.loop_overrun_factor > 1:
+        raise ConfigError(
+            f"guards.loop_overrun_factor must be > 1 (a factor <= 1 trips on "
+            f"a healthy loop), got {g.loop_overrun_factor!r}")
+    if (not isinstance(g.loop_overrun_ticks, int)
+            or isinstance(g.loop_overrun_ticks, bool)
+            or g.loop_overrun_ticks < 1):
+        raise ConfigError(
+            f"guards.loop_overrun_ticks must be an int >= 1, got "
+            f"{g.loop_overrun_ticks!r}")
+    _num("land_retry_period_s", g.land_retry_period_s)
+    _num("land_retry_window_s", g.land_retry_window_s)
+    if g.land_retry_window_s < g.land_retry_period_s:
+        raise ConfigError(
+            f"guards.land_retry_window_s ({g.land_retry_window_s}) < "
+            f"land_retry_period_s ({g.land_retry_period_s}) — the landing "
+            f"ladder would never retry")
+    _num("slot_wait_s", g.slot_wait_s)

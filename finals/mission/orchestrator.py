@@ -30,13 +30,31 @@ Surface (S4, implemented):
 - Operator kill: KeyboardInterrupt / CancelledError (what Ctrl+C under
   asyncio.run delivers) sets stop, cancels all agent tasks, fail_safe()s
   every agent (emergency land, latched), then re-raises after the finally
-  cleanup. (The AbortListener 'q' channel arrives with guards in S5.)
+  cleanup.
+- Operator ABORT KEY (S5): the AbortListener 'q' channel is ORDERLY, not
+  the Ctrl+C path — the tick polls abort_event (a threading.Event) and on
+  the first observation sets stop + logs operator_abort; agents land clean
+  and end DONE. request_stop_threadsafe() is the listener's prompt-wakeup
+  hook (loop.call_soon_threadsafe -> stop.set) so agents wake mid-Wait
+  instead of at the next beat; the poll stays the reliable channel.
+- Swarm-level guards (S5): evaluated each tick through
+  finals.guards.evaluate_guards with error_action=LAND_ALL (a buggy
+  mission-level guard cannot be trusted to stay quiet) under the "mission"
+  pseudo id (MissionClockGuard; LoopOverrunGuard consuming the BEAT-TO-BEAT
+  gap — the number a starved loop stretches; the drain-only duration in the
+  heartbeat cannot measure starvation, it has no awaits).
+  Every trip is logged (guard_trip); LAND_THIS-or-worse sets stop — at
+  mission level there is no single drone to act on, so any land-grade trip
+  means land ALL via the same stop machinery the budget uses. An AGENT
+  setting the shared stop (a per-drone LAND_ALL trip) is noticed and
+  logged once as stop_signalled.
 - NO auto-restart in flight profiles: a crash-restart that re-arms 3 real
   aircraft is unsafe. Per-drone FAILED is terminal; the others continue.
 
 Mission-level events are logged under the pseudo drone id "mission"
-(run_start, budget_expired, tick_error, run_end, ...) — agents therefore
-must not use that id (enforced at construction).
+(run_start, budget_expired, guard_trip, operator_abort, stop_signalled,
+tick_error, run_end, ...) — agents therefore must not use that id
+(enforced at construction).
 
 Derives from: qualifier_run.py:407-513 supervisor — kept: the wall-clock
 budget computed ONCE up front, long-lived singletons owned outside the
@@ -57,11 +75,13 @@ from __future__ import annotations
 import asyncio
 import math
 import sys
+import threading
 import time
 import traceback
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Sequence
 
 from finals.events import EventLog, EventLogError, write_heartbeat
+from finals.guards import Guard, GuardContext, TripAction, evaluate_guards
 from finals.mission.agent import AgentState, DroneAgent
 from finals.sightings import SightingBus
 
@@ -81,6 +101,8 @@ class Orchestrator:
                  bus: Optional[SightingBus] = None,
                  heartbeat_period_s: float = 1.0,
                  settle_grace_s: float = 60.0,
+                 swarm_guards: Sequence[Guard] = (),
+                 abort_event: Optional[threading.Event] = None,
                  clock: Callable[[], float] = time.monotonic):
         if not isinstance(agents, list) or not agents \
                 or not all(isinstance(a, DroneAgent) for a in agents):
@@ -107,6 +129,16 @@ class Orchestrator:
                     f"{'>= 0' if zero_ok else '> 0'}, got {value!r} — an "
                     f"unbounded supervision loop is the bug class this "
                     f"module exists to prevent")
+        if not all(isinstance(g, Guard) for g in swarm_guards):
+            raise ValueError(
+                f"Orchestrator: swarm_guards must be Guard instances, got "
+                f"{swarm_guards!r} — check the main.py wiring")
+        if abort_event is not None and not isinstance(abort_event,
+                                                      threading.Event):
+            raise ValueError(
+                f"Orchestrator: abort_event must be a threading.Event or "
+                f"None, got {type(abort_event).__name__!r} — check the "
+                f"main.py wiring")
 
         self._agents = list(agents)
         self._events = events
@@ -115,6 +147,8 @@ class Orchestrator:
         self._bus = bus
         self._heartbeat_period_s = float(heartbeat_period_s)
         self._settle_grace_s = float(settle_grace_s)
+        self._swarm_guards = list(swarm_guards)
+        self._abort_event = abort_event
         self._clock = clock
 
         # Per-run counters (reset by run(); instance state, never module
@@ -123,7 +157,16 @@ class Orchestrator:
         self._cursor = 0
         self._n_sightings = 0
         self._last_tick_latency_s = 0.0
+        #: Beat-to-beat gap (None until the second beat) — what a starved/
+        #: blocked event loop stretches; feeds LoopOverrunGuard. The drain
+        #: duration above CANNOT measure starvation (it has no awaits).
+        self._last_beat_gap_s: Optional[float] = None
         self._t_start: Optional[float] = None
+        self._abort_handled = False
+        self._stop_seen = False
+        # request_stop_threadsafe plumbing — set by run(), used cross-thread.
+        self._loop_ref: Optional[asyncio.AbstractEventLoop] = None
+        self._stop_ref: Optional[asyncio.Event] = None
 
     # ---------------- logging helpers (never let forensics kill flight) ----
     def _log_mission(self, event: str, **data) -> None:
@@ -144,16 +187,41 @@ class Orchestrator:
               file=sys.stderr, flush=True)
         self._try_log(_MISSION_ID, "tick_error", where=where, traceback=tb)
 
+    # ---------------- operator abort (thread-side hook) ----------------
+    def request_stop_threadsafe(self) -> None:
+        """Prompt-stop entry for OTHER THREADS (the AbortListener's wakeup
+        hook): schedules stop.set() on the orchestrator's loop so agents
+        wake mid-Wait instead of at the next 1 Hz poll. Best-effort — the
+        per-tick abort_event poll is the reliable channel; before run() or
+        after the loop closed this just notes it and returns."""
+        loop, stop = self._loop_ref, self._stop_ref
+        if loop is None or stop is None:
+            print("[Orchestrator] abort wakeup before run() — the abort "
+                  "event poll catches it at start", file=sys.stderr,
+                  flush=True)
+            return
+        try:
+            loop.call_soon_threadsafe(stop.set)
+        except RuntimeError as e:        # loop already closed: mission over
+            print(f"[Orchestrator] abort wakeup skipped ({e}) — loop "
+                  f"closed; nothing airborne to stop", file=sys.stderr,
+                  flush=True)
+
     # ---------------- the supervision loop ----------------
     async def run(self) -> int:
         self._tick = 0
         self._cursor = 0
         self._n_sightings = 0
         self._last_tick_latency_s = 0.0
+        self._last_beat_gap_s = None
+        self._abort_handled = False
+        self._stop_seen = False
         self._t_start = self._clock()
         deadline = self._t_start + self._budget_s
         hard_deadline = deadline + self._settle_grace_s
         stop = asyncio.Event()
+        self._stop_ref = stop
+        self._loop_ref = asyncio.get_running_loop()
 
         self._log_mission(
             "run_start", drones=[a.drone_id for a in self._agents],
@@ -169,11 +237,18 @@ class Orchestrator:
 
         try:
             # Bounds (convention 3): all tasks done OR the hard deadline.
+            prev_beat: Optional[float] = None
             while True:
                 pending = [t for t in tasks.values() if not t.done()]
                 if not pending:
                     break
                 now = self._clock()
+                # Beat-to-beat gap: the supervision-health number a starved
+                # loop stretches (LoopOverrunGuard input). Healthy ~= the
+                # heartbeat period, since the wait below times out at it.
+                self._last_beat_gap_s = (None if prev_beat is None
+                                         else now - prev_beat)
+                prev_beat = now
                 if now >= hard_deadline:
                     names = [n for n, t in tasks.items() if not t.done()]
                     print(
@@ -189,8 +264,58 @@ class Orchestrator:
                     for t in pending:
                         t.cancel()
                     break       # reconciliation below force-lands them
+                # -- operator abort key (S5): orderly land-all, NOT the
+                # Ctrl+C cancel path. First observation wins attribution. --
+                if (self._abort_event is not None
+                        and self._abort_event.is_set()
+                        and not self._abort_handled):
+                    self._abort_handled = True
+                    self._stop_seen = True
+                    print("[Orchestrator] OPERATOR ABORT (abort key): "
+                          "landing all drones cleanly",
+                          file=sys.stderr, flush=True)
+                    stop.set()
+                    self._try_log(_MISSION_ID, "operator_abort",
+                                  kind="abort_key")
+                # -- swarm-level guards (S5): a raising guard is a LAND_ALL
+                # trip (converted inside the wrapper, traceback logged). --
+                if self._swarm_guards:
+                    trips = evaluate_guards(
+                        self._swarm_guards,
+                        GuardContext(
+                            drone_id=_MISSION_ID, now=now,
+                            mission_elapsed_s=now - self._t_start,
+                            tick_latency_s=self._last_beat_gap_s),
+                        error_action=TripAction.LAND_ALL)
+                    for tr in trips:
+                        self._try_log(_MISSION_ID, "guard_trip",
+                                      guard=tr.guard, action=tr.action.name,
+                                      reason=tr.reason)
+                    if trips and not stop.is_set():
+                        worst = max(trips, key=lambda tr: tr.action)
+                        if worst.action >= TripAction.LAND_THIS:
+                            # Mission level has no single drone to act on:
+                            # any land-grade trip means land ALL, clean.
+                            self._stop_seen = True
+                            print(f"[Orchestrator] guard {worst.guard} "
+                                  f"tripped {worst.action.name}: landing "
+                                  f"all drones cleanly — {worst.reason}",
+                                  file=sys.stderr, flush=True)
+                            stop.set()
+                if stop.is_set() and not self._stop_seen:
+                    # Someone ELSE set the shared stop — an agent's
+                    # per-drone LAND_ALL trip (every orchestrator-side
+                    # setter marks _stop_seen itself, so no deadline gate is
+                    # needed and a trip landing AT the budget edge still
+                    # gets attributed). The tripping agent's own guard_trip/
+                    # agent_stopped events carry the detail.
+                    self._stop_seen = True
+                    self._try_log(_MISSION_ID, "stop_signalled",
+                                  source="agent",
+                                  elapsed_s=round(now - self._t_start, 3))
                 if now >= deadline and not stop.is_set():
                     stop.set()
+                    self._stop_seen = True
                     self._try_log(_MISSION_ID, "budget_expired",
                                   budget_s=self._budget_s,
                                   note="stop signalled; agents land and "
@@ -216,6 +341,7 @@ class Orchestrator:
             print(f"[Orchestrator] OPERATOR ABORT ({kind}): cancelling "
                   f"agents and emergency-landing everything",
                   file=sys.stderr, flush=True)
+            self._stop_seen = True      # attributed here, not stop_signalled
             stop.set()
             for t in tasks.values():
                 if not t.done():
@@ -235,7 +361,22 @@ class Orchestrator:
     # ---------------- shutdown / reconciliation ----------------
     async def _settle_and_shutdown(self, tasks: Dict[str, asyncio.Task],
                                    stop: asyncio.Event) -> None:
+        # Captured BEFORE the unconditional set below: an abort key or an
+        # agent-initiated LAND_ALL can fire and finish every task between
+        # two beats, so the tick loop never observes it — attribute the
+        # stop here instead, in the same priority order as the tick.
+        externally_stopped = stop.is_set()
         stop.set()      # whatever path got us here, agents must wind down
+        if (self._abort_event is not None and self._abort_event.is_set()
+                and not self._abort_handled):
+            self._abort_handled = True
+            self._stop_seen = True
+            self._try_log(_MISSION_ID, "operator_abort", kind="abort_key")
+        if (externally_stopped and not self._stop_seen
+                and self._t_start is not None):
+            self._stop_seen = True
+            self._try_log(_MISSION_ID, "stop_signalled", source="agent",
+                          elapsed_s=round(self._clock() - self._t_start, 3))
         pending = [t for t in tasks.values() if not t.done()]
         for t in pending:
             t.cancel()
@@ -320,6 +461,8 @@ class Orchestrator:
             "budget_s": self._budget_s,
             "stop_signalled": stop_signalled,
             "tick_latency_s": round(self._last_tick_latency_s, 6),
+            "beat_gap_s": (None if self._last_beat_gap_s is None
+                           else round(self._last_beat_gap_s, 6)),
             "sightings_drained": self._n_sightings,
             "drones": {a.drone_id: a.status() for a in self._agents},
         })

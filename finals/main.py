@@ -40,11 +40,15 @@ import argparse
 import asyncio
 import os
 import sys
+import threading
 from typing import List, Optional, Type
 
 from finals.config import DroneConfig, FinalsConfig, load_config
 from finals.errors import ConfigError, PreflightError
 from finals.events import EventLog, create_run_dir, install_crash_hooks
+from finals.guards import (AbortListener, BatteryGuard, GeofenceLite, Guard,
+                           LoopOverrunGuard, MissionClockGuard, PhaseTimeout,
+                           SafetyController, TelemetryWatchdog)
 from finals.mission.agent import DroneAgent
 from finals.mission.orchestrator import Orchestrator
 from finals.mission.phase import MissionPhase
@@ -244,9 +248,53 @@ def _build_phases(drone_cfg: DroneConfig,
     return phases
 
 
+#: The orchestrator's supervision beat — shared with LoopOverrunGuard so the
+#: overrun limit is judged against the period the loop actually runs at.
+_HEARTBEAT_PERIOD_S = 1.0
+
+
+def _build_guards(cfg: FinalsConfig, drone: DroneConfig) -> List[Guard]:
+    """Per-drone guard list from config. FRESH instances per drone — guards
+    hold per-drone latch/counter state (see finals/guards.py)."""
+    g = cfg.guards
+    guards: List[Guard] = [
+        TelemetryWatchdog(stale_s=g.telemetry_stale_s),
+        BatteryGuard(floor_pct=cfg.min_battery_pct,
+                     warn_pct=g.battery_warn_pct),
+    ]
+    if g.phase_timeout_s is not None:
+        guards.append(PhaseTimeout(timeout_s=g.phase_timeout_s))
+    if g.geofence_radius_m is not None:
+        guards.append(GeofenceLite(radius_m=g.geofence_radius_m,
+                                   alt_max_m=g.geofence_alt_m))
+    # VideoWatchdog is implemented + unit-tested, but it is NOT built here
+    # until S7 plumbs FrameStamped.ts into the agent's GuardContext — wired
+    # before any frame source exists it would log a guaranteed-false
+    # "no frame EVER" DEGRADE on every sim run (guards.py reconciliation 5).
+    # S7: append VideoWatchdog(stale_s=g.video_stale_s) for
+    # cfg.frame_backend != "none" alongside the frame-ts plumbing.
+    return guards
+
+
+def _build_swarm_guards(cfg: FinalsConfig) -> List[Guard]:
+    """Mission-level guard list for the orchestrator tick."""
+    g = cfg.guards
+    swarm: List[Guard] = []
+    if g.landing_reserve_s > 0:
+        # reserve 0 = OFF (the default): a non-zero default would
+        # instant-trip short --budget smoke runs (guards.py reconciliation 7).
+        swarm.append(MissionClockGuard(budget_s=cfg.mission_budget_s,
+                                       landing_reserve_s=g.landing_reserve_s))
+    swarm.append(LoopOverrunGuard(period_s=_HEARTBEAT_PERIOD_S,
+                                  factor=g.loop_overrun_factor,
+                                  n_ticks=g.loop_overrun_ticks))
+    return swarm
+
+
 async def _amain(cfg: FinalsConfig, agents: List[DroneAgent],
                  events: EventLog, run_dir: str, bus: SightingBus) -> int:
-    """Preflight gate -> Orchestrator.run, on ONE event loop."""
+    """Preflight gate -> Orchestrator.run (with the S5 abort listener
+    armed around it), on ONE event loop."""
     if cfg.profile in ("bench", "real"):
         from finals.preflight import run_preflight     # S10 — pointer today
         await run_preflight(cfg.profile, agents, cfg)  # PreflightError -> 3
@@ -255,9 +303,19 @@ async def _amain(cfg: FinalsConfig, agents: List[DroneAgent],
         events.log("mission", "preflight", status="skipped",
                    reason=f"profile {cfg.profile!r} has no preflight gate "
                           f"(P0-P10 applies to bench/real; arrives S10)")
+    abort_event = threading.Event()
     orchestrator = Orchestrator(agents, events, run_dir,
-                                budget_s=cfg.mission_budget_s, bus=bus)
-    return await orchestrator.run()
+                                budget_s=cfg.mission_budget_s, bus=bus,
+                                heartbeat_period_s=_HEARTBEAT_PERIOD_S,
+                                swarm_guards=_build_swarm_guards(cfg),
+                                abort_event=abort_event)
+    listener = AbortListener(abort_event,
+                             on_abort=orchestrator.request_stop_threadsafe)
+    listener.start()
+    try:
+        return await orchestrator.run()
+    finally:
+        listener.stop()
 
 
 def _run_mission(cfg: FinalsConfig) -> int:
@@ -272,10 +330,17 @@ def _run_mission(cfg: FinalsConfig) -> int:
     install_crash_hooks(run_dir)
     with EventLog(run_dir) as events:
         bus = SightingBus()
+        safety = SafetyController(
+            events,
+            land_retry_period_s=cfg.guards.land_retry_period_s,
+            land_retry_window_s=cfg.guards.land_retry_window_s,
+            command_timeout_s=cfg.command_timeout_s,
+            slot_wait_s=cfg.guards.slot_wait_s)
         agents = [
             DroneAgent(d.id, _build_adapter(cfg, d),
                        _build_phases(d, cfg), events, bus=bus,
-                       command_timeout_s=cfg.command_timeout_s)
+                       command_timeout_s=cfg.command_timeout_s,
+                       guards=_build_guards(cfg, d), safety=safety)
             for d in cfg.drones
         ]
         return asyncio.run(_amain(cfg, agents, events, run_dir, bus))
