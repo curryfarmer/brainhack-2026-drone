@@ -30,12 +30,14 @@ Implementations: MockAdapter (S3, finals/flight/mock_adapter.py),
 MavsdkSitlAdapter (S6, sitl_adapter.py), PyhulaxAdapter (S9,
 pyhulax_adapter.py), BenchAdapter (S3, below).
 
-Session: S1 (ABC implemented; BenchAdapter stub — session S3).
+Session: S1 (ABC); S3 (BenchAdapter implemented).
 """
 from __future__ import annotations
 
+import sys
 from abc import ABC, abstractmethod
 
+from finals.errors import FlightError
 from finals.types import Direction, Telemetry
 
 
@@ -94,44 +96,82 @@ class FlightAdapter(ABC):
 class BenchAdapter(FlightAdapter):
     """Bench profile: real drones on the ground, props-off validation only.
 
-    connect()/telemetry()/set_led() delegate to a wrapped PyhulaxAdapter's
-    non-flight surface; takeoff/move/rotate/land/hover raise FlightError
-    ("bench profile: flight commands disabled"). emergency_land is a no-op
-    (nothing is airborne).
+    Wraps the INNER adapter that actually talks to the drone (PyhulaxAdapter
+    at S9; any FlightAdapter in tests — the seam is generic and is exercised
+    over MockAdapter from S3). connect/disconnect/telemetry/set_led delegate
+    to the inner adapter's non-flight surface; takeoff/land/move/rotate/hover
+    are REFUSED with a FlightError naming the drone, the command, and the
+    bench profile. emergency_land is a logged no-op — nothing is airborne,
+    and it deliberately does NOT delegate (a bench session must never send
+    any flight command, not even a safe-down, to a props-off airframe).
 
-    STUB — session S3 (after PyhulaxAdapter's telemetry poller shape exists in
-    mock form). Derives from: finals/flight/pyhulax_adapter.py non-flight surface.
+    Never-raise paths (disconnect/emergency_land) are kept safe by doing
+    nothing risky — NOT by catching: this file is outside the
+    blanket-exception-catching whitelist (tests/test_conventions.py).
+
+    S4 wiring note: the generic `flight_cls(drone_id)` construction does not
+    fit this class — bench needs a special case that builds the inner
+    backend first and wraps it (BenchAdapter(inner)).
+
+    Session: S3 (implemented; inner=PyhulaxAdapter arrives S9).
     """
 
-    _STUB = "finals.flight.adapter.BenchAdapter: session S3 — see finals/docs/module_map.md"
+    def __init__(self, inner: FlightAdapter):
+        if not isinstance(inner, FlightAdapter):
+            # The S4 generic flight_cls(drone_id) wiring WILL hit this if the
+            # bench special case is forgotten — make the failure self-explain
+            # instead of dying on inner.drone_id with a bare AttributeError.
+            raise TypeError(
+                f"BenchAdapter wraps an INNER FlightAdapter instance, got "
+                f"{type(inner).__name__!r} ({inner!r}) — build the real "
+                f"backend first, then BenchAdapter(inner); the generic "
+                f"flight_cls(drone_id) wiring needs a bench special case "
+                f"(see the class docstring)")
+        super().__init__(inner.drone_id)
+        self.inner = inner
 
-    def __init__(self, drone_id: str, *args, **kwargs):
-        raise NotImplementedError(self._STUB)
+    def _refuse(self, command: str) -> FlightError:
+        return FlightError(
+            f"{self.drone_id}: {command} refused — bench profile: flight "
+            f"commands disabled (props-off validation only) — use "
+            f"--profile sitl or --profile real to fly")
 
     async def connect(self, timeout_s: float = 10.0) -> None:
-        raise NotImplementedError(self._STUB)
+        await self.inner.connect(timeout_s=timeout_s)
 
     async def disconnect(self) -> None:
-        raise NotImplementedError(self._STUB)
+        await self.inner.disconnect()
 
     async def takeoff(self, height_cm: int = 80, timeout_s: float = 30.0) -> None:
-        raise NotImplementedError(self._STUB)
+        raise self._refuse(f"takeoff({height_cm} cm)")
 
     async def land(self, timeout_s: float = 30.0) -> None:
-        raise NotImplementedError(self._STUB)
+        raise self._refuse("land()")
 
     async def move(self, direction: Direction, distance_cm: int,
                    timeout_s: float = 15.0) -> None:
-        raise NotImplementedError(self._STUB)
+        raise self._refuse(f"move({direction.name}, {distance_cm} cm)")
 
     async def rotate(self, angle_deg: float, timeout_s: float = 15.0) -> None:
-        raise NotImplementedError(self._STUB)
+        raise self._refuse(f"rotate({angle_deg:g} deg)")
 
     async def hover(self, duration_s: float) -> None:
-        raise NotImplementedError(self._STUB)
+        raise self._refuse(f"hover({duration_s:g} s)")
 
     def telemetry(self) -> Telemetry:
-        raise NotImplementedError(self._STUB)
+        return self.inner.telemetry()
+
+    async def set_led(self, r: int, g: int, b: int) -> None:
+        await self.inner.set_led(r, g, b)
 
     async def emergency_land(self) -> None:
-        raise NotImplementedError(self._STUB)
+        try:
+            print(
+                f"[BenchAdapter] {self.drone_id}: emergency_land is a no-op "
+                f"on the bench (props off, nothing airborne) — NOT delegated",
+                file=sys.stderr, flush=True,
+            )
+        except OSError:
+            # A closed/broken stderr must not turn the one must-never-raise
+            # path into a raise; there is nowhere left to log to.
+            pass
