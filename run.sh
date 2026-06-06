@@ -2,7 +2,7 @@
 # Edited by Claude — drop-in launcher for the no-git ZIP-download workflow.
 # Usage: ./run.sh collect_yolo_data.py     (any script in this folder)
 # Kills zombie mavsdk_server, names whoever else owns UDP :14540, then runs
-# the script. See README §12.
+# the script. See docs/quali/deployment.md ("Drop-in workflow").
 
 set -eu
 

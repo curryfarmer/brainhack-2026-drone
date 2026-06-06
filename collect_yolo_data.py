@@ -1,5 +1,5 @@
 # Edited by Claude — flight delegated to drone_control.Drone wrapper,
-#                    screen-capture fallback added. See README §10.
+#                    screen-capture fallback added. See docs/AUTHORSHIP.md.
 """
 YOLO Data Collection — Hybrid Keyboard Fly + Auto-Tick + Burst Capture
 =======================================================================
