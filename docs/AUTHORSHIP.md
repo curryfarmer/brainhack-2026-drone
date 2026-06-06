@@ -104,6 +104,8 @@ Note: `qualifier_run.py` is now one of **two** mission entry points. The other, 
 
 These read as minimal pedagogical examples typical of a competition starter kit: one concept per script, simple top-to-bottom flow, tutorial-style comments.
 
+> **Pristine baseline available:** [`quali/example_code/`](quali/example_code/) (added 2026-06-06) holds the **untampered original handout** — no Claude edit markers, pre-patch `Detector.py`/`drone_control.py`, legacy `udp://:14540` strings. To determine the exact provenance of any root file, diff it against its baseline copy: `git diff --no-index "docs/quali/example_code/<file>" <file>`.
+
 - Flight basics: `basic_offboard.py`, `takeoff_and_land.py`, `go_to.py`
 - Planner/detector examples: `RRTExample.py` (and its Claude refactor variant `RRTExample_new.py`), `UseDetectorExample.py`
 - Telemetry probes: `get_battery.py`, `get_position.py`, `get_depth.py`, `get_flightmode.py`, `imu.py`, `imutest.py`, `is_arm_air.py`

@@ -28,3 +28,10 @@ Related: `best.pt` (trained barrel weights, 6.2 MB) now exists at repo root, but
 ## About these docs
 
 Reorganized **2026-06-06** from the original root `README`/`CONTEXT`/`APPROACH`/`HANDOVER` documents (since deleted). Content was carried over, restructured by task, and updated where the repo had drifted — e.g. stale paths that pointed at a separate code subdirectory (the repo root *is* the code directory now). Full history, including what was lost and recovered around the May 22 upload regression, is in [AUTHORSHIP.md](AUTHORSHIP.md).
+
+Two reference-code archives live alongside the docs — **read-only baselines, never edit or import from them**:
+
+- [`quali/example_code/`](quali/example_code/) — the **pristine, untampered** qualifier handout (verified: no Claude edit markers, pre-patch `Detector.py`/`drone_control.py`, legacy `udp://` strings). The repo root holds the *live, modified* versions; diff against this baseline to see exactly what the team changed.
+- [`finals/example_code/`](finals/example_code/) — the official finals example scripts (Hula/RealSense/RKNN/UWB stack).
+
+These docs are also the standing context base for planning future work — keep them current when the code moves.
