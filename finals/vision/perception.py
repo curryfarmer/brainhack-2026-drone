@@ -1,12 +1,14 @@
 """PerceptionLoop — per-drone sampler: video -> YOLO + ArUco -> bus + log.
 
 Planned surface (S7):
-- One async loop per drone with a VideoSource, sampling at ~5 Hz (the
-  qualifier detection_loop cadence, qualifier_run.py:236-252), rate-adjusted
-  per agent state (search vs landing vs idle):
+- One async loop per drone with a VideoSource, rate-adjusted per agent state
+  (search vs landing vs idle); ArUco is the PRIMARY detector and is cheap, so
+  sample as fast as the stream delivers (~10 Hz target; the qualifier ran
+  5 Hz, qualifier_run.py:236-252) — high rates matter for reading markers on
+  MOVING robots:
     frame = source.get_frame(); if None -> count + warn-once; continue
-    detect_aruco(frame) -> bus.publish(...)          # synchronous, ~ms
-    detector.submit_image(frame.image, context=...)  # YOLO via worker pool
+    detect_aruco(frame) -> bus.publish(...)          # synchronous, ~ms, EVERY frame
+    detector.submit_image(frame.image, context=...)  # OPTIONAL YOLO via worker pool, config-gated
 - The detector callback (fires on a WORKER thread) maps class names via
   cfg.detector.class_map, builds Sighting(source="yolo") with bearing_deg
   from yaw + bbox center + camera_hfov_deg (bearing-only — no depth, no

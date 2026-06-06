@@ -1,5 +1,12 @@
 """Laptop YOLO detection — vendored FIXED Detector + CannedDetector mock.
 
+OPTIONAL FALLBACK (user-confirmed 2026-06-06): the convoy robots carry ArUco
+markers, so finals/vision/aruco.py is the primary detector and YOLO is OFF by
+default in every shipped config (detector.backend "none"). Enable it (one
+config edit: backend "ultralytics" + weights) only if the briefing scores
+spotting robots whose marker isn't readable — which also reactivates the
+retraining question (best.pt is barrel-trained).
+
 Planned surface (S7):
 - A vendored copy of root Detector.py (threaded ultralytics worker pool;
   callback(detections, annotated_image, context)) with the verified bugs

@@ -65,8 +65,8 @@ flight REFUSED) | `real` (gated 3×: CLI flag → preflight P0–P10 → operato
 | `mission/phases/takeoff_demo.py` | ⬜ stub | **S4** | mapping_drone.py:343–355 intent, as relative moves |
 | `guards.py` | ⬜ stub | **S5** | qualifier_run.py emergency-land path; mapping_drone.py gap audit |
 | `flight/sitl_adapter.py` | ⬜ stub | **S6** | drone_control.py + get_position_with_task.py + qualifier_run.py:268–331 (all proven) |
-| `vision/detector.py` | ⬜ stub | **S7** | root Detector.py VENDORED with 3 verified bugs fixed (finally-NameError thread-killer, silent COCO fallback, unbounded queue) |
-| `vision/aruco.py` | ⬜ stub | **S7** | potential_detection_targets.py:5–30 (audited — it has a syntax error; detectMarkers returns 3 values) |
+| `vision/aruco.py` | ⬜ stub | **S7** | **PRIMARY detector** (convoy robots carry ArUco markers — detect + read ID, no training). potential_detection_targets.py:5–30 (audited — it has a syntax error; detectMarkers returns 3 values) |
+| `vision/detector.py` | ⬜ stub | **S7** (optional half) | OPTIONAL YOLO fallback, off by default in configs. Root Detector.py VENDORED with 3 verified bugs fixed (finally-NameError thread-killer, silent COCO fallback, unbounded queue) |
 | `vision/perception.py` | ⬜ stub | **S7** | qualifier_run.py:192–252 detection_loop/callback |
 | `vision/gazebo_video.py` | ⬜ stub | **S8** | qualifier_run.py RgbReceiver (proven in sim) |
 | `mission/phases/search.py` | ⬜ stub | **S8** | SentryScan default (no-position searcher); coverage.py lane math informs lawnmower |
@@ -87,7 +87,7 @@ flight REFUSED) | `real` (gated 3×: CLI flag → preflight P0–P10 → operato
 | S4 | `mission/{phase,agent,orchestrator}.py`, `takeoff_demo`, main wiring | `--profile mock` flies takeoff_demo end-to-end; 2-agent failure-injection test (other completes; emergency_land exactly once) | pytest + mock run |
 | S5 | `guards.py` | every guard trips in tests; raising guard = trip; SafetyController idempotent | pytest |
 | S6 | `flight/sitl_adapter.py` | telemetry-polling takeoff/land (no blind sleeps); `_body_offset_to_ned` unit-tested | **VM V1**: sitl takeoff→square→land; PX4 killed mid-move ⇒ FlightTimeout, not a hang |
-| S7 | `vision/{video,detector,aruco,perception}.py` | vendored Detector bugs fixed; replay profile writes sightings.csv | pytest + replay run |
+| S7 | `vision/{video,aruco,perception,detector}.py` | **ArUco first**: detect + read marker IDs on every sampled frame → sightings.csv via the replay profile; vendored YOLO Detector (bugs fixed) lands as the optional config-gated extra | pytest + replay run |
 | S8 | `vision/gazebo_video.py`, `phases/search.py` | SentryScan + config-gated lawnmower | **VM V2**: sitl search logs sightings |
 | S9 | pyhulax leaves (+FakeDroneAPI/FakeVideoStream) | unit tests green WITHOUT pyhulax installed; audit-grade review | pytest |
 | S10 | `preflight.py` + `docs/onsite_test_plan.md` | P0–P10 runnable via `--preflight-only`; bench B1–B8 scripted | pytest + bench-ready |
@@ -102,7 +102,9 @@ flight without a proven abort.
 
 | Question | Default until answered |
 |---|---|
-| What scores (sightings/tracks/geo)? | append-only sighting log; tracking deferred |
+| What scores (sightings/tracks/geo)? | PARTIALLY ANSWERED (user, 2026-06-06): convoy robots carry **ArUco markers to detect and READ** → ArUco is the primary detector, YOLO optional. Still open: exact scoring formula, whether repeat reads of the same ID score |
+| Convoy marker details (ID list? DICT_6X6_250 confirmed? or QR codes?) | DICT_6X6_250 per example code; marker→robot ID map in config. If they turn out to be QR codes, cv2.QRCodeDetector slots into the same Sighting stream (and pyhulax has onboard recognize_qr as a fallback) |
+| **ArUco marker PHYSICAL SIZE?** Readable range scales with size — a ~10 cm marker is reliably decodable from roughly 2–4 m on a 640×480 stream, and motion blur on a moving robot shrinks that further | Constrains sentry altitude + standoff distance directly. Default: fly the LOWEST altitude band the safety rules allow and measure actual read range at onsite gate F (detection flight) before fixing search geometry; treat range as a config value (`zone` params), not an assumption |
 | Pad validity encoding? | ArUco `valid_marker_ids` in config; shape classifier stub |
 | Abort key legal in scored runs? | wired, safety-only (land-all); ask organizers |
 | C2-side UWB for swarm challenge? | `use_uwb: false`; UWB code is a leaf |

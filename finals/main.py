@@ -116,9 +116,11 @@ def format_resolved_plan(cfg: FinalsConfig, flight_cls: Optional[Type],
         "=" * 72,
         f"flight_backend : {cfg.flight_backend:<12} -> {flight_cls.__name__ if flight_cls else '(none)'}",
         f"frame_backend  : {cfg.frame_backend:<12} -> {video_cls.__name__ if video_cls else '(none)'}",
-        f"detector       : {cfg.detector.backend}"
-        + (f"  weights={cfg.detector.weights}  conf={cfg.detector.conf}  device={cfg.detector.device}"
-           if cfg.detector.backend == "ultralytics" else ""),
+        "detection      : "
+        + ("(no frame source — perception off)" if cfg.frame_backend == "none" else
+           "aruco (primary, always on) + yolo: " + cfg.detector.backend
+           + (f"  weights={cfg.detector.weights}  conf={cfg.detector.conf}  device={cfg.detector.device}"
+              if cfg.detector.backend == "ultralytics" else "")),
         f"budget         : {cfg.mission_budget_s:.0f} s   tick: {cfg.tick_hz:.0f} Hz   "
         f"cmd timeout: {cfg.command_timeout_s:.0f} s   battery floor: {cfg.min_battery_pct:.0f} %",
         f"run_dir        : {cfg.run_dir}",

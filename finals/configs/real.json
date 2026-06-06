@@ -1,5 +1,6 @@
 {
   "_comment": "REAL FLIGHT. Requires the --i-know-this-arms-real-drones CLI gate AND preflight P0-P10 passing AND the operator typing GO. Every value here is re-validated onsite (gates A-E) before any mission. camera_hfov_deg is bench-measured; until set, sightings carry bearing_deg=null.",
+  "_detector_note": "ArUco is the primary detector and always runs (convoy robots carry markers to detect + READ; marker->robot ID map goes in drone zone/config once the briefing lands). YOLO stays OFF unless the briefing scores marker-less spotting — enabling it is one edit: backend 'ultralytics' + RoboMaster-trained weights.",
   "profile": "real",
   "flight_backend": "pyhulax",
   "frame_backend": "pyhulax",
@@ -9,13 +10,7 @@
   "command_timeout_s": 15.0,
   "min_battery_pct": 20.0,
   "use_uwb": false,
-  "detector": {
-    "_comment": "Replace with RoboMaster-trained weights before a scored run; best.pt (barrels) is a placeholder that at least exercises the real pipeline.",
-    "backend": "ultralytics",
-    "weights": "best.pt",
-    "conf": 0.4,
-    "device": "cpu"
-  },
+  "detector": { "backend": "none" },
   "drones": [
     { "id": "alpha",   "plane_id": 1, "led_rgb": [255, 0, 0],   "altitude_band_m": 1.2, "phases": ["takeoff_demo"] },
     { "id": "bravo",   "plane_id": 2, "led_rgb": [0, 255, 0],   "altitude_band_m": 1.7, "phases": ["takeoff_demo"] },
