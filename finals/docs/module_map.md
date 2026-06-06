@@ -56,8 +56,8 @@ flight REFUSED) | `real` (gated 3×: CLI flag → preflight P0–P10 → operato
 | `mission/phases/__init__.py` | ✅ registry | S1 | — |
 | `flight/adapter.py` | ✅ ABC / BenchAdapter stub | S1 / **S3** | pyhulax ∩ MAVSDK honest primitives |
 | `vision/video.py` | ✅ ABC / ReplaySource stub | S1 / **S7** | qualifier_run.py:163–186 RgbReceiver contract |
-| `events.py` | ⬜ stub | **S2** | barrel_log.py atomic-flush discipline; runs/<ts>/ convention |
-| `sightings.py` | ⬜ stub | **S2** | barrel_log.py lock discipline, inverted to append-only+fsync |
+| `events.py` | ✅ implemented | S2 | barrel_log.py atomic-flush discipline; runs/<ts>/ convention |
+| `sightings.py` | ✅ implemented | S2 | barrel_log.py lock discipline, inverted to append-only+fsync |
 | `flight/mock_adapter.py` | ⬜ stub | **S3** | — (the test double everything stands on) |
 | `flight/dead_reckon.py` | ⬜ stub | **S3** | detection_to_world.py body→NED yaw math, reduced |
 | `mission/agent.py` | ⬜ stub | **S4** | hula_connection.py:39–63 loop; mapping_drone.py watchdog gaps |
