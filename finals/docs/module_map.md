@@ -24,6 +24,9 @@ flight REFUSED) | `real` (gated 3×: CLI flag → preflight P0–P10 → operato
 Simulation strategy — what is/isn't simulable, tier recipes, rejected
 alternatives: [`simulation.md`](simulation.md). (PX4 SITL is a physics
 stand-in behind the FlightAdapter seam; the finals drones are HULA/pyhulax.)
+Sim build-out ladder — SIM-0…SIM-5, one fresh session each, smoke gates +
+ready-to-paste handover prompts + evidence log: [`sim_sessions.md`](sim_sessions.md).
+SIM-1/2 execute S6; SIM-3/4/5 execute S8.
 
 ## Binding conventions (every session re-reads these)
 
@@ -65,16 +68,22 @@ stand-in behind the FlightAdapter seam; the finals drones are HULA/pyhulax.)
 | `flight/mock_adapter.py` | ✅ implemented | S3 | — (the test double everything stands on; pipeline order + deviations in its docstring) |
 | `flight/dead_reckon.py` | ✅ implemented | S3 | detection_to_world.py body→NED yaw math, reduced; yaw sign flipped to pyhulax CCW (psi_NED = -yaw_deg, documented + test-pinned) |
 | `docs/simulation.md` | ✅ doc | — | feasibility research pass (2026-06-06), load-bearing claims verified against primary sources; PX4 SITL = physics stand-in, finals drones are HULA |
+| `docs/sim_sessions.md` | ✅ doc | — | sim ladder + handover prompts + evidence log; design pass 2026-06-06 (source-verified: conventions-scan scope, drone_control.py unwrappable for multi-drone, lockstep-RTF risk) |
+| `sim/` env scripts (`launch_sitl.sh`, `sitl_smoke.py`, `README.md`) | ⬜ | **SIM-0** | repo root BY DESIGN — outside the conventions scan/SDK whitelist; raw-MAVSDK harness sanctioned for env bring-up only ([`sim_sessions.md`](sim_sessions.md) recap §4-5) |
+| `sim/` world assets (`gen_markers.py`, convoy model+world, `check_detection.py`) | ⬜ | **SIM-3** (∥ S4–S7) | simulation.md Tier 2 recipes; markers BOTH ArUco + QR (20×20 cm intel); convoy driver per SIM-0 ros_gz probe |
+| `tools/replay_plot.py` | ⬜ | **SIM-2** | feeds mission.jsonl through the REAL DeadReckoner (never reimplements the math); matplotlib-only — inside the conventions scan, cv2/gz forbidden here |
+| `configs/sitl3.json` | ⬜ | **SIM-2** | sitl.json × 3 (UDP 14540/41/42, gRPC 50051–53, bands 1.2/1.7/2.2) |
+| `configs/sitl3_vision.json` | ⬜ | **SIM-5** | sitl3 + gazebo frames + search; `command_timeout_s` sized from measured RTF |
 | `mission/agent.py` | ✅ implemented | S4 | hula_connection.py:39–63 loop, formalized; mapping_drone.py watchdog gaps CLOSED: outer wait_for deadline on every command, telemetry-staleness check, emergency-land-EXACTLY-ONCE latch (shielded from cancellation), FAILED terminal — no auto-restart. Emits the `origin` + `action_complete` events (replay prereq) |
 | `mission/orchestrator.py` | ✅ implemented | S4 | qualifier_run.py:407–513 supervisor MINUS auto-restart (unsafe on real aircraft); agents = independent asyncio tasks; budget stop + settle-grace hard deadline; 1 Hz atomic heartbeat; seq-cursor SightingBus drain; whitelisted blanket catches always log tracebacks |
 | `mission/phases/takeoff_demo.py` | ✅ implemented | S4 | mapping_drone.py:343–355 intent, as relative moves (no UWB dependency); tunables via `zone["takeoff_demo"]` + `altitude_band_m` (`from_config`) |
 | `guards.py` | ⬜ stub | **S5** | qualifier_run.py emergency-land path; mapping_drone.py gap audit |
-| `flight/sitl_adapter.py` | ⬜ stub | **S6** | drone_control.py + get_position_with_task.py + qualifier_run.py:268–331 (all proven) |
+| `flight/sitl_adapter.py` | ⬜ stub | **S6** = SIM-1 (V1) + SIM-2 (3×) | drone_control.py + get_position_with_task.py + qualifier_run.py:268–331 (all proven) — VENDORED-WITH-FIXES, not wrapped: connect() hardcodes :14540, `_kill_stale_servers` is a global pkill, System() not injectable ([`sim_sessions.md`](sim_sessions.md) recap §2) |
 | `vision/aruco.py` | ⬜ stub | **S7** | **PRIMARY detector** (convoy robots carry ArUco markers — detect + read ID, no training). potential_detection_targets.py:5–30 (audited — it has a syntax error; detectMarkers returns 3 values) |
 | `vision/detector.py` | ⬜ stub | **S7** (optional half) | OPTIONAL YOLO fallback, off by default in configs. Root Detector.py VENDORED with 3 verified bugs fixed (finally-NameError thread-killer, silent COCO fallback, unbounded queue) |
 | `vision/perception.py` | ⬜ stub | **S7** | qualifier_run.py:192–252 detection_loop/callback |
-| `vision/gazebo_video.py` | ⬜ stub | **S8** | qualifier_run.py RgbReceiver (proven in sim) |
-| `mission/phases/search.py` | ⬜ stub | **S8** | SentryScan default (no-position searcher); coverage.py lane math informs lawnmower |
+| `vision/gazebo_video.py` | ⬜ stub | **S8** = SIM-4 (assets SIM-3, rehearsal SIM-5) | qualifier_run.py RgbReceiver (proven in sim) |
+| `mission/phases/search.py` | ⬜ stub | **S8** = SIM-4 | SentryScan default (no-position searcher); coverage.py lane math informs lawnmower |
 | `flight/pyhulax_adapter.py` | ⬜ stub | **S9** | hula_connection.py:29–37 + https://pyhulax.xenops.ae (audit bar: the mapping_drone.py bug list) |
 | `flight/discovery.py` | ⬜ stub | **S9** | dola.py (port 8668 — trust the code, not its docstring) |
 | `vision/pyhulax_video.py` | ⬜ stub | **S9** | hula_connection.py + pyhulax video docs (no auto-reconnect!) |
@@ -91,9 +100,9 @@ stand-in behind the FlightAdapter seam; the finals drones are HULA/pyhulax.)
 | S3 | `flight/adapter.py` (Bench), `mock_adapter.py`, `dead_reckon.py` | contract suite over MockAdapter; scriptable failures; DR math vs hand-computed | pytest |
 | S4 | `mission/{phase,agent,orchestrator}.py`, `takeoff_demo`, main wiring (+ run-start initial-pose/origin event in the events schema — replay-plot prereq, [`simulation.md`](simulation.md) Tier 0) | `--profile mock` flies takeoff_demo end-to-end; 2-agent failure-injection test (other completes; emergency_land exactly once) | pytest + mock run |
 | S5 | `guards.py` | every guard trips in tests; raising guard = trip; SafetyController idempotent | pytest |
-| S6 | `flight/sitl_adapter.py` | telemetry-polling takeoff/land (no blind sleeps); `_body_offset_to_ned` unit-tested; 3× multi-instance launch recipe documented ([`simulation.md`](simulation.md) Tier 1: UDP 14540/41/42, gRPC 50051–53, `PX4_GZ_STANDALONE=1`) | **VM V1**: sitl takeoff→square→land; PX4 killed mid-move ⇒ FlightTimeout, not a hang. Stretch (after V1): 3× concurrent takeoff→square→land |
+| S6 | `flight/sitl_adapter.py` | telemetry-polling takeoff/land (no blind sleeps); `_body_offset_to_ned` unit-tested; 3× multi-instance launch recipe documented ([`simulation.md`](simulation.md) Tier 1: UDP 14540/41/42, gRPC 50051–53, `PX4_GZ_STANDALONE=1`) | **VM V1**: sitl takeoff→square→land; PX4 killed mid-move ⇒ FlightTimeout, not a hang. Stretch (after V1): 3× concurrent takeoff→square→land. Executed as SIM-1 (V1) + SIM-2 (3×) — [`sim_sessions.md`](sim_sessions.md) |
 | S7 | `vision/{video,aruco,perception,detector}.py` | **ArUco first**: detect + read marker IDs on every sampled frame → sightings.csv via the replay profile; vendored YOLO Detector (bugs fixed) lands as the optional config-gated extra | pytest + replay run |
-| S8 | `vision/gazebo_video.py`, `phases/search.py` + convoy world (5 moving ArUco robots, 2 pads) + 640×480 cam model ([`simulation.md`](simulation.md) Tier 2) | SentryScan + config-gated lawnmower | **VM V2**: 3× sitl search logs sightings of MOVING markers |
+| S8 | `vision/gazebo_video.py`, `phases/search.py` + convoy world (5 moving marker robots, 2 pads) + 640×480 cam model ([`simulation.md`](simulation.md) Tier 2). Executed partwise: assets **SIM-3** (∥ S4–S7), single-drone V2a **SIM-4**, 3× rehearsal **SIM-5** — [`sim_sessions.md`](sim_sessions.md) | SentryScan + config-gated lawnmower | **VM V2**: 3× sitl search logs sightings of MOVING markers (V2a = 1 drone in SIM-4; full V2 = SIM-5) |
 | S9 | pyhulax leaves (+FakeDroneAPI/FakeVideoStream) | unit tests green WITHOUT pyhulax installed; audit-grade review | pytest |
 | S10 | `preflight.py` + `docs/onsite_test_plan.md` | P0–P10 runnable via `--preflight-only`; bench B1–B8 scripted | pytest + bench-ready |
 | S11 | briefing phases (`track_convoy`, `land_on_pad`) | canned-tested; all tunables in config | pytest + SITL rehearsal |

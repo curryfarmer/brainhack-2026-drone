@@ -1,0 +1,431 @@
+# Sim build-out ladder — SIM-0…SIM-5, one fresh session each
+
+> Created 2026-06-06 from the verified feasibility pass in [`simulation.md`](simulation.md).
+> This file is BOTH the plan and the logbook: each part below has a ready-to-paste handover
+> prompt, and the session that executes it appends its evidence under **Evidence log** at the
+> bottom. A fresh session needs only `module_map.md` + `simulation.md` + this file — no chat
+> history.
+
+**Mapping rule**: SIM-1 and SIM-2 execute roadmap **S6** (V1 gate, then the 3× stretch);
+SIM-3/4/5 execute **S8** (assets ∥, core, full rehearsal). module_map session numbers are
+NEVER renumbered — stub `NotImplementedError` messages reference them. Headless sim is done
+after SIM-2; full sim after SIM-5.
+
+## Binding recap (every sim session re-reads this)
+
+1. **PX4 SITL is a physics stand-in** — the finals drones are HULA/pyhulax. Nothing
+   PX4-specific may leak above the FlightAdapter; no SITL result retires a HULA-specific risk
+   (`simulation.md` fidelity framing).
+2. **Root `drone_control.py` is NEVER edited and CANNOT be wrapped for multi-drone**:
+   `connect()` hardcodes `udpin://0.0.0.0:14540`, `_kill_stale_servers()` does a GLOBAL
+   `pkill -9 -f mavsdk_server` (kills all three drones' servers), and `System()` is built
+   internally so the gRPC port can't be injected. SIM-1 REIMPLEMENTS vendored-with-fixes
+   (sanctioned by convention 9 "imported or vendored-with-fixes") — the
+   `sitl_adapter.py` stub docstring that says "wraps drone_control.Drone.connect()" is STALE
+   and overridden here.
+3. **Global `pkill -f mavsdk_server` is BANNED while anything runs.** Root `run.sh` does it
+   at line 14 — fine as a *launcher* (one process, servers not yet spawned), lethal
+   mid-mission. `sim/launch_sitl.sh stop` kills via PID files only; stale-server cleanup is
+   always targeted: `pkill -9 -f "mavsdk_server.*-p <grpc_port>"`.
+4. **`sim/` (repo root) is outside the conventions scan + SDK whitelist BY DESIGN**
+   (`tests/test_conventions.py` walks only `finals/`): raw MAVSDK/cv2/gz/rclpy scripts live
+   there. `finals/tools/` IS scanned — matplotlib is fine there, cv2/gz are not.
+5. **The raw-MAVSDK harness (`sim/sitl_smoke.py`) is sanctioned ONLY for SIM-0** environment
+   validation. From SIM-1 on, every flight goes through `--profile sitl` — the sim flies the
+   real mission code or it proves nothing (strategy pillar 2).
+6. **Fail-loud applies in `sim/` too**: every wait has a deadline; scripts exit nonzero with
+   WHAT / WHICH instance / WHAT-TO-CHECK messages. (And remember for `finals/` work: the
+   conventions test greps RAW source — banned phrases stay out of docstrings/comments too.)
+7. **Marker duality**: organizer intel says **QR, 20×20 cm**, but literal-QR vs
+   loosely-said-ArUco is UNCONFIRMED (module_map open questions). All marker assets and
+   detection checks support BOTH types; the px-vs-distance table is reported PER TYPE.
+8. **Lockstep RTF vs wall-clock**: an overloaded VM slows sim time but physics stays correct
+   — slow runs trip `timeout_s` SPURIOUSLY. Record RTF in every evidence block; the fix is
+   config (`command_timeout_s`), never code.
+9. **Session bar before commit** (team playbook): pytest green on Windows AND on the VM where
+   applicable; adversarial self-review of new modules; mutation kill-check on new tests;
+   evidence pasted into this file's log.
+
+## VM access + sync (single source — every prompt points here)
+
+- VM: Ubuntu 24.04; `~/PX4-Autopilot` with `make px4_sitl` already built (recently flew the
+  qualifier); Gazebo Harmonic; Python venv per `docs/quali/deployment.md`.
+- Sync: **clone once in SIM-0** (`git clone <repo-url> ~/brainhack-2026-drone`), then per
+  iteration push from Windows → `git -C ~/brainhack-2026-drone pull` on the VM. Fallback if
+  VM git/credentials fail: the ZIP drop-in workflow in `docs/quali/deployment.md`.
+- Always invoke scripts as `bash sim/<script>.sh` (exec bits/line endings can be lost via
+  Windows; `.gitattributes` pins `*.sh text eol=lf` from SIM-0).
+- In-VM run pattern: `source .venv/bin/activate` (SIM-0 verifies/creates it), then
+  `./run.sh -m finals.main …` (run.sh is the sanctioned launcher; see recap §3).
+
+## Notes to roadmap sessions (gates owned elsewhere — hand these over verbatim)
+
+- **S4**: besides the run-start initial-pose/origin event already in its row (replay-plot
+  prereq), the flight-adapter factory cannot be a bare `flight_cls(drone_id)`:
+  `MavsdkSitlAdapter` needs per-drone `(sitl_address, mavsdk_grpc_port)` from config, and
+  `BenchAdapter` needs an inner adapter (its docstring already says so). Make the factory
+  take `(FinalsConfig, DroneConfig)`.
+- **S5**: SIM-2's drills assume guards + the abort listener exist; SIM-4 assumes the
+  lost-video guard.
+- **S7**: keep the detector seam pluggable (ArUco AND QR — recap §7); SIM-4 wires whichever
+  is configured into the convoy world.
+
+## The ladder
+
+| Part | = roadmap | One-line scope | Prereqs | Status |
+|---|---|---|---|---|
+| SIM-0 | env | VM bring-up: launch/stop scripts, raw smoke 1×+3×, rendering/ros2/resource probes | — | ⬜ |
+| SIM-1 | **S6** | `MavsdkSitlAdapter` (vendored-with-fixes) + per-drone config schema; **VM V1** + kill drill | SIM-0, S4 (S5 recommended) | ⬜ |
+| SIM-2 | S6 stretch | `replay_plot.py` (proven on the SIM-1 fixture) → `sitl3.json` → 3× headless swarm + drills — **HEADLESS SIM DONE** | SIM-1, S5 | ⬜ |
+| SIM-3 | S8 assets | Convoy world: markers (ArUco+QR), robots, pads, band-altitude cams; detection check — **∥ with S4–S7** | SIM-0 | ⬜ |
+| SIM-4 | **S8** core | `gazebo_video.py` + `search.py`; **V2a**: single drone logs sightings of MOVING markers | SIM-1, SIM-3, S7, S5 | ⬜ |
+| SIM-5 | S8 full | 3 camera-drones, full mission, all drills — **FULL SIM DONE** + residual-gaps list for S10 | SIM-2, SIM-4 | ⬜ |
+
+## Smoke matrix — what "thoroughly smoked" means per part
+
+| Part | Automated (pytest) | Scripted smoke (VM) | Manual evidence pasted | Failure/kill drills |
+|---|---|---|---|---|
+| SIM-0 | full suite green ON THE VM (env proof) | `launch_sitl.sh start 1` + `sitl_smoke.py --instance 0`; then `start 3` + `--all 3` | 3× PASS; `ss -ulpn` 14540–42; RTF; nproc/RAM; GL verdict; llvmpipe camera FPS; ros2/ros_gz verdict | stop-cleanliness (pgrep empty → relaunch); kill one instance, others live, solo relaunch |
+| SIM-1 | `_body_offset_to_ned` ≡ DeadReckoner property (any yaw); config schema tests; conventions green | **V1**: `--profile sitl --phases takeoff_demo` | console + mission.jsonl tail; telemetry-vs-DR drift (m); fixture committed | kill-PX4 mid-move-2 → FlightTimeout (stopwatched) + emergency_land + nonzero exit; stale-server recovery + dummy-server-survives proof |
+| SIM-2 | replay_plot vs `sim1_v1_square.jsonl` (closed square asserted) | 3× concurrent takeoff_demo via orchestrator | summary 3-ok; per-drone jsonl tails; bands in telemetry; replay PNG committed | kill instance #2 → FAILED + exactly-one emergency_land + others complete; headless `q` abort lands all |
+| SIM-3 | suite green UNTOUCHED (proves no `finals/` leak) | `gz sim -s -r` convoy world + `check_detection.py` per band | all convoy+pad IDs read; px-vs-distance table PER MARKER TYPE; annotated frames; FPS per rung | llvmpipe rung exercised for real; two-run determinism |
+| SIM-4 | search phase over MockAdapter; topic/conversion units; gz tests skip-if-absent | **V2a**: 1 drone, convoy world, `--phases search` | sightings.csv head + per-ID counts over ≥1 lap; replay plot with bearing rays | kill gz mid-search → video guard fires, no hang; empty-world → zero sightings, clean exit |
+| SIM-5 | full suite | full 3-drone mission, `sitl3_vision.json` | summary; every-ID sightings review; 3-track plot; RTF audit: ZERO spurious FlightTimeouts | `q` abort lands 3; kill instance #2; post-run pgrep clean; 2 consecutive runs |
+
+---
+
+## Handover prompts (paste the whole block into a fresh session)
+
+### SIM-0 — environment bring-up
+
+```text
+You are doing SIM-0 (sim environment bring-up) for the BrainHack finals repo.
+
+ORIENTATION (read in order): finals/docs/module_map.md (conventions, status);
+finals/docs/simulation.md (Tier 1 recipe + rendering ladder); finals/docs/sim_sessions.md
+(binding recap §1-9, VM access + sync, smoke matrix — your session contract);
+docs/quali/simulator-testing.md + docs/quali/deployment.md (existing VM workflow). Facts: the
+VM exists, ~/PX4-Autopilot is built (`make px4_sitl`), it recently flew qualifier missions.
+
+SCOPE (ZERO finals/ changes):
+1. .gitattributes at repo root: `*.sh text eol=lf`.
+2. sim/README.md — VM runbook: clone/pull sync + ZIP fallback, venv, launch/stop/status
+   usage, port map (UDP 14540+i, gRPC 50051+i, MAV_SYS_ID i+1), the global-pkill ban, the
+   kill-drill one-liners.
+3. sim/launch_sitl.sh — `start N [--world W] [--model M] | stop | status`. start: instance 0
+   first (HEADLESS=1 PX4_SYS_AUTOSTART=4001 PX4_SIM_MODEL=gz_x500 PX4_GZ_MODEL_POSE="0,<i>"
+   ~/PX4-Autopilot/build/px4_sitl_default/bin/px4 -i <i>, output to sim/run/px4_<i>.log, PID
+   to sim/run/px4_<i>.pid), poll gz-server readiness WITH A DEADLINE before starting
+   instances 1+ with PX4_GZ_STANDALONE=1 (simultaneous launch flakes). stop: kill via PID
+   files + the gz server it started — NEVER `pkill -f mavsdk_server`. status: pgrep summary
+   + `ss -ulpn | grep 1454`. PID files exist precisely so later kill drills are scriptable.
+4. sim/sitl_smoke.py — raw-MAVSDK env validation ONLY (sanctioned for SIM-0, banned after:
+   recap §5): `--instance N` → mavsdk System(port=50051+N) →
+   connect("udpin://0.0.0.0:" + str(14540+N)) → health-ready poll → arm → takeoff ~1.5 m →
+   poll altitude ≥1.2 m → land → poll landed → print "PASS instance N". `--all K` runs K
+   concurrently (asyncio.gather). EVERY wait has a deadline and a WHAT/WHICH/CHECK failure
+   message; exit nonzero on any failure.
+5. Probes (record verdicts in the evidence block — later parts consume them):
+   a. GL: `glxinfo -B` (OpenGL version/renderer).
+   b. Camera rendering: launch the proven qualifier camera model (make px4_sitl
+      gz_x500_vision) or `gz sim -s -r` any camera world; measure image-topic FPS with the
+      existing gz.transport13 subscriber pattern; repeat under LIBGL_ALWAYS_SOFTWARE=1;
+      record the rendering-ladder verdict (which rung the VM supports).
+   c. ros2 + ros_gz presence: `which ros2`, `ros2 pkg list | grep ros_gz`. Verdict decides
+      SIM-3's convoy driver: present → rclpy waypoint node via ros_gz; absent → gz-native.
+   d. Resources: nproc, free -h, and RTF lines from the px4 logs while 3 instances run.
+
+SMOKE (paste everything into sim_sessions.md → Evidence log → SIM-0):
+- VM sync: clone, venv, `python -m pytest finals/tests -q` green ON THE VM.
+- `bash sim/launch_sitl.sh start 1` → `python sim/sitl_smoke.py --instance 0` → PASS.
+- Drill: `bash sim/launch_sitl.sh stop` → `pgrep -fa 'px4|gz sim'` empty → restart works.
+- `bash sim/launch_sitl.sh start 3` → `ss -ulpn` shows 14540/14541/14542 →
+  `python sim/sitl_smoke.py --all 3` → three concurrent PASSes.
+- Drill: kill instance 1 via its PID file; instances 0/2 still answer; solo relaunch of 1.
+- All probe outputs + verdicts (a–d).
+
+DONE WHEN: evidence appended to sim_sessions.md, its ladder Status flipped, module_map
+`sim/` row flipped, committed + pushed. finals/ untouched (pytest proves it).
+```
+
+### SIM-1 — MavsdkSitlAdapter + VM gate V1 (= roadmap S6)
+
+```text
+You are doing SIM-1 = roadmap S6: the SITL flight adapter and the first real-mission sim
+flight (VM gate V1).
+
+ORIENTATION (read in order): finals/docs/module_map.md (S6 row + conventions — NOTE the
+conventions test greps RAW source: banned phrases stay out of docstrings too);
+finals/docs/simulation.md Tier 1; finals/docs/sim_sessions.md (binding recap — especially
+§2/§3 —, SIM-0 evidence: ports/RTF/resources, and "Notes to roadmap sessions" to see how the
+S4 factory landed); finals/flight/adapter.py (the ABC contract is BINDING);
+finals/flight/dead_reckon.py (frame convention: yaw CCW+, psi_NED = -yaw_deg) +
+finals/flight/mock_adapter.py; finals/errors.py; finals/config.py; finals/main.py +
+finals/mission/ as landed in S4; root drone_control.py, get_position_with_task.py,
+qualifier_run.py:268-331 (PROVEN sources — read and adapt, never edit).
+
+BINDING EMPHASIS — the sitl_adapter.py stub docstring is STALE where it says to wrap
+drone_control.Drone.connect() incl. _kill_stale_servers. Do NOT wrap drone_control.Drone:
+its connect() hardcodes udpin://0.0.0.0:14540, its _kill_stale_servers() pkill-9's EVERY
+mavsdk_server on the box (destroys the other two drones), and it builds System() internally
+so the gRPC port can't be injected. REIMPLEMENT vendored-with-fixes (convention 9), listing
+every fix in the module docstring (convention 7):
+- parameterized per-drone (sitl_address, mavsdk_grpc_port);
+- targeted stale-server cleanup: pkill -9 -f "mavsdk_server.*-p <grpc_port>" (prove the
+  targeting in the drill below);
+- EKF/health poll WITH DEADLINE before arming (multi-instance load slows EKF settle;
+  drone_control arms blind);
+- telemetry-polled takeoff to >=0.9x target altitude (replaces the blind 20 s sleep);
+- move(): read NED+yaw from the telemetry poller (get_position_with_task.py pattern), then
+  _body_offset_to_ned(direction, distance_cm, yaw_deg) -> NED waypoint, then the PROVEN
+  10 Hz setpoint loop (qualifier_run.py:268-331) WITH a hard deadline -> FlightTimeout
+  naming drone, waypoint, elapsed, what-to-check;
+- rotate(): the proven yaw PID + deadline; land(): poll in_air False + disarm + deadline;
+- cm->m at this boundary; Telemetry altitude is UP-POSITIVE (negate down_m);
+- _body_offset_to_ned is a PURE function importable WITHOUT mavsdk (keep mavsdk imports
+  method-local so Windows pytest never needs the SDK).
+
+TESTS: hypothesis property — for arbitrary yaw and every Direction, _body_offset_to_ned's
+(dN,dE) == DeadReckoner's documented deltas under psi_NED = -yaw_deg — plus a hand-computed
+grid (yaw 0/30/90/-120). Add `hypothesis` to requirements.txt (test-only). Config schema:
+per-drone OPTIONAL sitl_address + mavsdk_grpc_port on DroneConfig; sitl profile with >1
+drone validates DISTINCT addresses, ports, altitude_band_m; single drone falls back to
+top-level sitl_address + 50051. Update configs/sitl.json _comment only. Verify the S4
+factory constructs this adapter from (FinalsConfig, DroneConfig); widen it if S4 left it
+narrower.
+
+SMOKE:
+- `python -m pytest finals/tests -q` green on Windows AND the VM.
+- VM gate V1: push → pull on VM → `bash sim/launch_sitl.sh start 1` →
+  `./run.sh -m finals.main --profile sitl --phases takeoff_demo` → takeoff → square → land.
+  Paste: console, `tail -20` of the run's mission.jsonl, and the final telemetry-NED vs
+  DeadReckoner-pose drift in metres (one number — it calibrates how honest DR is on a real
+  flight path).
+- Copy that run's mission.jsonl to finals/tests/fixtures/sim1_v1_square.jsonl and COMMIT it
+  (runs_finals/ is gitignored; SIM-2's plotter is pytest-validated against this fixture).
+
+DRILLS (paste evidence):
+- Kill-PX4 mid-move: fresh V1 run; second terminal waits for the 2nd move event
+  (`tail -f` the run's mission.jsonl) then `kill -9 $(cat sim/run/px4_0.pid)`. MUST:
+  FlightTimeout with its actionable message within the command timeout (stopwatch it),
+  emergency_land attempted + logged, process exits NONZERO, no hang.
+- Stale-server: rerun V1 immediately after the kill with NO manual cleanup — connect()
+  recovers via the targeted cleanup. Then prove targeting: start a dummy
+  `mavsdk_server -p 50052` and show it SURVIVES alpha's cleanup.
+
+DONE WHEN: V1 + drill evidence in sim_sessions.md, fixture committed, module_map S6 row
+flipped to "✅ SIM-1 (3x = SIM-2)", ladder Status flipped, adversarial self-review +
+mutation kill-check done, committed + pushed.
+```
+
+### SIM-2 — 3-drone headless swarm + replay tool (= S6 stretch) → HEADLESS SIM DONE
+
+```text
+You are doing SIM-2 = roadmap S6 stretch: the replay evidence tool, then the first 3-drone
+headless swarm flight.
+
+ORIENTATION (read in order): finals/docs/module_map.md; finals/docs/simulation.md Tier 0
+(replay-plot spec) + Tier 1; finals/docs/sim_sessions.md (SIM-0 resource baseline, SIM-1
+evidence + fixture); finals/flight/dead_reckon.py (the REAL math — the plotter IMPORTS it,
+never reimplements); finals/events.py (read_events + the S4 origin event); finals/guards.py
++ the abort listener as landed in S5; finals/configs/sitl.json.
+
+SCOPE, IN THIS ORDER (the evidence tool is proven BEFORE the flights it must judge):
+1. finals/tools/__init__.py (empty) + finals/tools/replay_plot.py (~150 lines): parse a run
+   dir's mission.jsonl; feed each drone's COMPLETED command events through
+   finals.flight.dead_reckon.DeadReckoner; plot east-on-X / north-on-Y, set_aspect('equal'),
+   yaw quivers, sighting points + bearing rays when present. Per-drone NED origins DIFFER
+   (spawn poses) — one subplot per drone, or offset tracks by the spawn poses documented in
+   the config _comment. matplotlib ONLY (finals/tools/ is inside the conventions scan; cv2
+   and gz are forbidden there). CLI: python -m finals.tools.replay_plot <run_dir>
+   [--save out.png].
+2. pytest: plotter over finals/tests/fixtures/sim1_v1_square.jsonl → track closes (square
+   within tolerance) and a PNG writes to tmp_path. A commanded right-turn square rendering
+   as left turns is a sign bug — that is exactly what this test exists to catch.
+3. finals/configs/sitl3.json: alpha/bravo/charlie; sitl_address udpin://0.0.0.0:14540/41/42;
+   mavsdk_grpc_port 50051/52/53; altitude_band_m 1.2/1.7/2.2; phases takeoff_demo;
+   frame_backend none; detector none; spawn poses ("0,0","0,1","0,2") in _comment matching
+   sim/launch_sitl.sh.
+4. The 3-drone run.
+
+SMOKE:
+- pytest green Windows + VM.
+- `bash sim/launch_sitl.sh start 3` →
+  `./run.sh -m finals.main --profile sitl --config finals/configs/sitl3.json` → all three
+  agents complete. Paste: orchestrator summary, per-drone mission.jsonl tails, altitude
+  bands visible in telemetry events. Replay plot → commit as
+  finals/docs/evidence/sim2_3drone.png. Record RTF + wall time vs the SIM-0 baseline.
+
+DRILLS (paste evidence):
+- Kill instance #2 mid-mission: `kill -9 $(cat sim/run/px4_1.pid)` → bravo FAILED with
+  exactly ONE emergency_land event (grep -c it), alpha + charlie COMPLETE, summary shows
+  2 ok / 1 failed, exit code reflects partial failure.
+- Headless abort: fresh 3x run, press 'q' → all three land, orderly shutdown + summary.
+- Optional flavor: kill bravo's mavsdk_server instead (different error path — must still end
+  FAILED, never a hang).
+
+DONE WHEN: "HEADLESS SIM DONE" recorded in the evidence log with all of the above, PNG +
+fixture-based test committed, module_map + ladder flipped, review + mutation check, pushed.
+```
+
+### SIM-3 — convoy world assets + detection check (= S8 assets; ∥ with S4–S7)
+
+```text
+You are doing SIM-3 = S8 world assets: a Gazebo world with the moving marker convoy —
+gz-only, NO PX4, NO flight, NO finals imports. Parallelizable: it needs only SIM-0.
+
+ORIENTATION (read in order): finals/docs/simulation.md Tier 2 (marker/convoy/camera recipes;
+corrections #1 actors-DO-work and #4 evidence repos); finals/docs/sim_sessions.md (binding
+recap §7 marker duality; SIM-0 rendering + ros2 probe verdicts — they pick your convoy
+driver); finals/docs/module_map.md open questions (markers may be QR 20x20 cm; QR-vs-ArUco
+UNCONFIRMED); the qualifier gz.transport13 subscriber pattern (root depth_receiver.py and
+docs/quali/simulator-testing.md sensor topics).
+
+SCOPE (all under sim/):
+1. sim/gen_markers.py: --type aruco|qr --size-cm (default 20) --ids ... . ArUco:
+   cv2.aruco.generateImageMarker(DICT_6X6_250, id, 800) + copyMakeBorder >=1-module white
+   quiet zone. QR: cv2.QRCodeEncoder with the ID string as payload (fallback: the `qrcode`
+   pip package if the encoder is missing from the cv2 build). Output one gz model dir per
+   marker (model.config + model.sdf: STATIC plane sized to --size-cm at z=0.001, the
+   pbr/metal/albedo_map pattern from simulation.md Tier 2). Generate convoy IDs in both
+   types + 2 pad markers (separate --size-cm for pads).
+2. sim/models/convoy_robot/: RoboMaster-ish chassis (~0.4x0.3x0.25 m) with a top-facing
+   marker plane. Driver per the SIM-0 verdict:
+   - ros_gz PRESENT: spawn via `ros2 run ros_gz_sim create`, drive with
+     sim/convoy_driver.py — an rclpy node publishing Twist per robot along a configurable
+     waypoint loop, bridged with `ros2 run ros_gz_bridge parameter_bridge
+     /model/<n>/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist`.
+   - ros_gz ABSENT: gz-native — VelocityControl plugin circles (initial_linear +
+     initial_angular, 5 phase-offset spawns) and/or /world/<w>/set_pose scripting for
+     deterministic scenarios.
+3. sim/worlds/convoy.sdf: ground + sun + 5 convoy robots (phase-offset along the route) +
+   2 landing-pad markers + 3 STATIC downward 640x480 cameras at 1.2 / 1.7 / 2.2 m above the
+   route (the altitude bands — yields px-vs-distance data with zero flight variables).
+4. sim/models/mono_cam_640/: stock mono_cam clone at 640x480 (keep HFOV, note its value in
+   an SDF comment — SIM-4 copies it into config camera_hfov_deg).
+5. sim/check_detection.py: gz.transport13-subscribe to the 3 static cameras; per frame run
+   RAW cv2.aruco.detectMarkers AND cv2.QRCodeDetector.detectAndDecode (the finals detector
+   wrapper arrives in S7 — this script validates the WORLD, not the package); log per-ID
+   read counts + marker px sizes; save sample annotated frames.
+
+SMOKE (paste into the evidence log):
+- `gz sim -s -r sim/worlds/convoy.sdf` at the SIM-0-verdict rendering rung; >=1 full convoy
+  lap observed per camera.
+- ALL convoy + pad IDs read by at least one band camera (record which bands read which).
+- px-vs-distance table PER MARKER TYPE (expect the QR decode floor to be much closer than
+  ArUco — this table directly feeds the sentry-altitude/standoff decision and the
+  QR-vs-ArUco question in module_map).
+- FPS per rendering rung, including one REAL llvmpipe run; two-run determinism (same lap →
+  same ID set).
+
+DONE WHEN: assets + table + annotated frames committed (frames under
+finals/docs/evidence/), an explicit "what this does NOT validate" note in the evidence block
+(HULA HFOV, real-world read range, motion blur — the onsite list), `python -m pytest
+finals/tests -q` STILL green and finals/ untouched, module_map + ladder flipped, pushed.
+```
+
+### SIM-4 — gazebo video + search phase, single-drone vision-in-the-loop (= S8 core)
+
+```text
+You are doing SIM-4 = roadmap S8 core: the Gazebo video backend + the search phase, then the
+first vision-in-the-loop sim flight (gate V2a).
+
+ORIENTATION (read in order): finals/docs/module_map.md (S8 row + conventions);
+finals/docs/simulation.md Tier 2 (camera topics, channel order);
+finals/docs/sim_sessions.md (SIM-1 V1 evidence, SIM-3 world + detection table);
+qualifier_run.py:163-186 (RgbReceiver contract) + root depth_receiver.py (gz subscriber
+pattern); finals/vision/video.py (ABC) + finals/vision/{aruco,perception}.py as landed in S7
+(the detector seam is pluggable ArUco/QR); finals/guards.py lost-video guard (S5);
+finals/configs/sitl.json.
+
+SCOPE:
+1. finals/vision/gazebo_video.py (gz import is whitelisted in SDK_ALLOWED; its tests
+   skip-if-absent — Windows has no gz): VideoSource implementation; deterministic per-drone
+   topic /world/<w>/model/<model>_<N>/link/camera_link/sensor/camera/image; R8G8B8 → the
+   configured video_channel_order; staleness tracking + timeout_s per convention 2; NO
+   silent auto-reconnect — surface the failure to the guard.
+2. finals/mission/phases/search.py: SentryScan (hover → look → rotate step → repeat; all
+   tunables from config: step_deg, dwell_s, cycles); OpenLoopLawnmower config-gated, OFF by
+   default.
+3. sim/: a PX4-spawnable x500 + mono_cam_640 model assembled from SIM-3 parts (verify
+   PX4_SIM_MODEL spawning yields the deterministic camera topic name);
+   sim/launch_sitl.sh gains --world/--model passthrough if SIM-0 didn't already include it.
+4. configs/sitl.json: frame_backend "gazebo" for this run; camera_hfov_deg copied FROM the
+   camera SDF (bearing math needs the true value).
+
+SMOKE:
+- pytest Windows + VM: search phase unit-tested over MockAdapter with canned Sightings;
+  topic-name builder + channel conversion unit-tested; gz-dependent tests skip cleanly on
+  Windows.
+- V2a gate (VM): `bash sim/launch_sitl.sh start 1 --world convoy` →
+  `./run.sh -m finals.main --profile sitl --phases search` → sightings.csv accumulates
+  MOVING-marker reads across >=1 convoy lap. Paste: per-ID counts + `head` of
+  sightings.csv. Replay plot with bearing rays → finals/docs/evidence/sim4_search.png.
+- Record RTF (1 camera) vs the SIM-0/SIM-3 numbers.
+
+DRILLS (paste evidence):
+- Kill gz mid-search (kill the gz server PID): the lost-video guard fires within its
+  deadline; the agent takes the configured response; NO hang.
+- Empty-world control: same phases in a marker-less world → ZERO sightings, clean
+  completion (no false positives from the rendered scene).
+
+DONE WHEN: V2a + drill evidence + PNG committed, module_map S8 row part-flipped (SIM-4 done,
+SIM-5 pending), ladder flipped, review + mutation check, pushed.
+```
+
+### SIM-5 — full rehearsal: 3 camera-drones, full mission → FULL SIM DONE
+
+```text
+You are doing SIM-5 = the full-sim rehearsal: 3 camera-drones flying the full mission in the
+convoy world, all drills mandatory. The ladder ends here.
+
+ORIENTATION (read in order): finals/docs/sim_sessions.md — ALL prior evidence blocks
+(especially SIM-0 resource baseline + rendering verdict, SIM-3 FPS table, SIM-2/SIM-4
+gates); finals/docs/simulation.md (rendering ladder, Tiers 1-2);
+finals/docs/module_map.md (onsite hard rules — "tune config, not code" applies to sim
+rehearsals too).
+
+SCOPE:
+1. finals/configs/sitl3_vision.json: sitl3.json + frame_backend "gazebo" + search phases +
+   camera_hfov_deg + command_timeout_s SIZED FROM MEASURED RTF at the chosen rendering rung
+   (recap §8: lockstep means slow ≠ wrong, but slow trips wall-clock timeouts — fix by
+   config, never code).
+2. Pick the highest rendering rung that holds 3 cameras (SIM-0/SIM-3 data decides; ladder in
+   simulation.md: real GL → llvmpipe → --headless-rendering → WSL2).
+3. Full mission: 3 drones take off to their bands → search the convoy world → sightings
+   accumulate → land. Within budget_s.
+
+SMOKE:
+- Full run end-to-end: orchestrator summary 3 ok. Sightings review: EVERY convoy ID read at
+  least once; repeats logged, never deduped. Replay plot, 3 tracks (spawn-pose offsets) →
+  finals/docs/evidence/sim5_full.png. RTF + timeout audit: ZERO spurious FlightTimeouts (if
+  any: resize command_timeout_s and rerun — config only; paste both runs).
+- TWO consecutive full runs with no manual cleanup between (launch stop/start only).
+
+DRILLS (ALL mandatory, paste evidence):
+- 'q' abort mid-search → all three land, orderly exit.
+- Kill instance #2 mid-search (`kill -9 $(cat sim/run/px4_1.pid)`) → bravo FAILED +
+  exactly-once emergency_land; alpha + charlie complete the mission.
+- Post-run cleanliness: `bash sim/launch_sitl.sh stop` → pgrep empty.
+
+DONE WHEN: "FULL SIM DONE" recorded in the evidence log, PLUS a WRITTEN residual-gaps list:
+start from simulation.md "what simulation can NEVER answer", confirm/expand from what these
+runs showed — that list is the direct input to S10's docs/onsite_test_plan.md. Ladder +
+module_map flipped, review + mutation check, pushed.
+```
+
+---
+
+## Evidence log (each session appends under its heading; this doc is the logbook)
+
+### SIM-0 — pending
+
+### SIM-1 — pending
+
+### SIM-2 — pending
+
+### SIM-3 — pending
+
+### SIM-4 — pending
+
+### SIM-5 — pending

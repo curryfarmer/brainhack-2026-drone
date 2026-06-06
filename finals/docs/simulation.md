@@ -125,14 +125,27 @@ world (PX4-gazebo-models) is the smoke test; then the convoy world.
   ≥800 px sources avoid texture blur. One model dir per ID; `GZ_SIM_RESOURCE_PATH` points at
   them. Landing pads = the same model with pad IDs and real pad `<size>`. Avoid
   Gazebo-Classic marker repos — their OGRE `<script>` materials don't render in Harmonic.
-- **Convoy motion** (5 robots driving a loop), three working options:
-  1. **VelocityControl plugin** (recommended, zero runtime code): copy gz-sim's own
+  **Marker-type update (2026-06-06)**: organizer intel says **QR codes, 20×20 cm** —
+  literal-QR vs loosely-said-ArUco UNCONFIRMED (module_map open questions). The generator
+  supports BOTH (`cv2.QRCodeEncoder` / `qrcode` pip fallback for QR), world `<size>` defaults
+  to 0.2 m, and the detection check reports px-vs-distance PER TYPE — a true QR needs far
+  more px/module than ArUco, so its decode standoff is much shorter (~1–2.5 m at 20 cm on
+  640 px vs ~4–8 m for ArUco), which is exactly why the table feeds the sentry-altitude
+  decision.
+- **Convoy motion** (5 robots driving a loop), four working options:
+  1. **ros_gz + rclpy waypoint driver** (preferred IF the VM has ROS 2 + ros_gz — probed in
+     SIM-0, see [`sim_sessions.md`](sim_sessions.md)): spawn via `ros2 run ros_gz_sim create`,
+     bridge `/model/<n>/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist` with
+     `ros_gz_bridge parameter_bridge`, and drive all 5 robots along arbitrary waypoint routes
+     from one small rclpy node. Most flexible routes; only worth a fresh ROS 2 install if the
+     VM lacks it — otherwise use option 2.
+  2. **VelocityControl plugin** (zero runtime code, no middleware): copy gz-sim's own
      `velocity_control.sdf` vehicle, `<initial_linear>/<initial_angular>` → endless circle;
      5 phase-offset spawn poses = a convoy. Runtime speed changes via Twist on
      `/model/<name>/cmd_vel` (we already have gz.transport13 code).
-  2. **Box `<actor>` waypoint trajectories** — these DO work in Harmonic (see Corrections);
+  3. **Box `<actor>` waypoint trajectories** — these DO work in Harmonic (see Corrections);
      kinematic + non-colliding, fine for marker targets, arbitrary polygon paths.
-  3. `/world/<w>/set_pose` scripting from Python at ~5–10 Hz — best when the convoy path
+  4. `/world/<w>/set_pose` scripting from Python at ~5–10 Hz — best when the convoy path
      must be test-harness-controlled and seeded (deterministic pytest scenarios).
 - **Cameras**: stock `mono_cam` is 1280×960 @30 Hz, HFOV 1.74 rad — clone it and set
   **640×480** to match the pyhulax frame contract. Per-drone topics are deterministic:
