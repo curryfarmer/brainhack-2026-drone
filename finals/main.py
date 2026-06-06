@@ -211,20 +211,23 @@ def run(argv: Optional[List[str]] = None) -> int:
 # ============================================================
 # Mission execution (S4)
 # ============================================================
-def _build_adapter(cfg: FinalsConfig, drone_id: str):
-    """One adapter per drone. Bench is the documented special case: build
-    the inner backend FIRST, then wrap (BenchAdapter docstring)."""
+def _build_adapter(cfg: FinalsConfig, drone: DroneConfig):
+    """One adapter per drone, from (FinalsConfig, DroneConfig) — NEVER bare
+    flight_cls(drone_id): BenchAdapter wraps an inner backend (special case
+    below, see its docstring), and MavsdkSitlAdapter will need per-drone
+    (sitl_address, mavsdk_grpc_port) from here in S6/SIM-1
+    (sim_sessions.md "Notes to roadmap sessions")."""
     if cfg.flight_backend == "bench":
         from finals.flight.adapter import BenchAdapter
         from finals.flight.pyhulax_adapter import PyhulaxAdapter   # S9
-        return BenchAdapter(PyhulaxAdapter(drone_id))
+        return BenchAdapter(PyhulaxAdapter(drone.id))
     flight_cls = resolve_flight_adapter_cls(cfg.flight_backend)
     if flight_cls is None:      # 'none' is guarded before we get here
         raise ConfigError(
             f"profile {cfg.profile!r} has flight_backend 'none' — nothing "
             f"to fly; this path should have been routed to the no-drone "
             f"branch (wiring bug)")
-    return flight_cls(drone_id)
+    return flight_cls(drone.id)
 
 
 def _build_phases(drone_cfg: DroneConfig,
@@ -270,7 +273,7 @@ def _run_mission(cfg: FinalsConfig) -> int:
     with EventLog(run_dir) as events:
         bus = SightingBus()
         agents = [
-            DroneAgent(d.id, _build_adapter(cfg, d.id),
+            DroneAgent(d.id, _build_adapter(cfg, d),
                        _build_phases(d, cfg), events, bus=bus,
                        command_timeout_s=cfg.command_timeout_s)
             for d in cfg.drones

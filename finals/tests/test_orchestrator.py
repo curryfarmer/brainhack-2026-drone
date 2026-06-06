@@ -389,7 +389,7 @@ def test_main_exit_code_1_when_a_drone_fails(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         fmain, "_build_adapter",
-        lambda cfg, drone_id: MockAdapter(drone_id, fail_at="move:2"))
+        lambda cfg, drone: MockAdapter(drone.id, fail_at="move:2"))
     code = fmain.main(["--profile", "mock", "--phases", "takeoff_demo",
                        "--budget", "30"])
     assert code == 1
