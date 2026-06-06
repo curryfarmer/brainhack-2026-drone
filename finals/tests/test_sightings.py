@@ -380,6 +380,34 @@ def test_bus_reads_race_concurrent_publishes(make_sighting):
     assert total_seen == n_threads * n_each       # lossless cursor: every publish seen
 
 
+def test_bus_all_methods_share_one_mutex(make_sighting):
+    """Deterministic mutual-exclusion pin. The concurrent race test above is
+    probabilistic (a removed lock survives lucky interleavings); this one
+    kills it on EVERY run: while the bus's lock is held, every method must
+    block, and must complete once it is released."""
+    bus = SightingBus()
+    bus.publish(make_sighting(ts=1.0))
+
+    assert bus._lock.acquire(timeout=5.0)         # a no-op lock dies right here
+    results: list = []
+    worker = threading.Thread(
+        target=lambda: (bus.publish(make_sighting(ts=2.0)),
+                        bus.drain_after(0),
+                        bus.drain_since(0.0),
+                        bus.latest("alpha"),
+                        results.append("done")),
+        daemon=True)
+    try:
+        worker.start()
+        worker.join(timeout=0.25)
+        # Lock held => the worker must still be stuck on its FIRST bus call.
+        assert not results, "bus method ran while the lock was held — no mutual exclusion"
+    finally:
+        bus._lock.release()
+    worker.join(timeout=10.0)
+    assert results == ["done"]                    # and it completes after release
+
+
 def test_bus_drain_after_is_lossless_for_out_of_order_publishes(make_sighting):
     """The exact race a ts cursor loses: a slow detector publishes an OLDER
     frame-ts AFTER a faster one. The seq cursor must still deliver it."""
