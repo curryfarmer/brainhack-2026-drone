@@ -1,3 +1,4 @@
+# Edited by Claude — udpin:// scheme in connect-progress log. See docs/AUTHORSHIP.md.
 import asyncio
 from mavsdk import System, telemetry
 from mavsdk.action import ActionError
@@ -7,7 +8,7 @@ async def run():
     drone = System()
 
     # 2. Listen for drone to broadcast and then connect to PX4 SITL over UDP (default SITL port)
-    print("Connecting to PX4 SITL on udp://:14540 ...")
+    print("Connecting to PX4 SITL on udpin://0.0.0.0:14540 ...")
     await drone.connect(system_address="udpin://0.0.0.0:14540")
 
     # 3. Wait until reports a successful connection
