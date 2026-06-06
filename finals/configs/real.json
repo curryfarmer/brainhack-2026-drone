@@ -1,0 +1,24 @@
+{
+  "_comment": "REAL FLIGHT. Requires the --i-know-this-arms-real-drones CLI gate AND preflight P0-P10 passing AND the operator typing GO. Every value here is re-validated onsite (gates A-E) before any mission. camera_hfov_deg is bench-measured; until set, sightings carry bearing_deg=null.",
+  "profile": "real",
+  "flight_backend": "pyhulax",
+  "frame_backend": "pyhulax",
+  "video_channel_order": "rgb",
+  "camera_hfov_deg": null,
+  "mission_budget_s": 600.0,
+  "command_timeout_s": 15.0,
+  "min_battery_pct": 20.0,
+  "use_uwb": false,
+  "detector": {
+    "_comment": "Replace with RoboMaster-trained weights before a scored run; best.pt (barrels) is a placeholder that at least exercises the real pipeline.",
+    "backend": "ultralytics",
+    "weights": "best.pt",
+    "conf": 0.4,
+    "device": "cpu"
+  },
+  "drones": [
+    { "id": "alpha",   "plane_id": 1, "led_rgb": [255, 0, 0],   "altitude_band_m": 1.2, "phases": ["takeoff_demo"] },
+    { "id": "bravo",   "plane_id": 2, "led_rgb": [0, 255, 0],   "altitude_band_m": 1.7, "phases": ["takeoff_demo"] },
+    { "id": "charlie", "plane_id": 3, "led_rgb": [0, 0, 255],   "altitude_band_m": 2.2, "phases": ["takeoff_demo"] }
+  ]
+}

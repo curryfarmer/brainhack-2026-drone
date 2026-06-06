@@ -1,0 +1,10 @@
+{
+  "_comment": "Pure-logic profile: MockAdapter, no video, no detector. The fastest full-mission smoke test — runs anywhere, zero deps beyond stdlib.",
+  "profile": "mock",
+  "flight_backend": "mock",
+  "frame_backend": "none",
+  "detector": { "backend": "none" },
+  "drones": [
+    { "id": "alpha", "phases": ["takeoff_demo"] }
+  ]
+}

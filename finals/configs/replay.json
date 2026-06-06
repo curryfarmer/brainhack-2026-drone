@@ -1,0 +1,9 @@
+{
+  "_comment": "Laptop-only dev: frames from disk -> detector -> sightings.csv. 0 drones, no flight. NOTE: best.pt is the qualifier BARREL model — fine for plumbing tests; RoboMaster weights replace it after retraining.",
+  "profile": "replay",
+  "flight_backend": "none",
+  "frame_backend": "replay",
+  "replay_dir": "finals/tests/fixtures/frames",
+  "detector": { "backend": "ultralytics", "weights": "best.pt", "conf": 0.4, "device": "cpu" },
+  "drones": []
+}

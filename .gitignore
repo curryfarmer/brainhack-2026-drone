@@ -12,6 +12,7 @@ venv/
 
 # Training artifacts (regenerable)
 runs/
+runs_finals/
 detected_images/
 
 # Data + models (large; share via separate channel)

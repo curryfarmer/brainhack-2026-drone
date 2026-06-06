@@ -2,6 +2,8 @@
 
 > Status 2026-06-06: the **hardware/software stack below is extracted from the official finals material**: [`example_code/`](example_code/) (12 scripts), [`UWBParserThread_Core_Documentation.pdf`](UWBParserThread_Core_Documentation.pdf), and the briefing images in [`reference_images/`](reference_images/). Detailed format/scoring/logistics still await the full briefing text — `context _dump.md` is reserved for it.
 
+> **Team scope decided 2026-06-06: SWARM CHALLENGE ONLY** (pre-U team — not the mapping challenge). All mission code runs on the **C2 laptop** via the **pyhulax SDK** over Wi-Fi (`hula_connection.py`/`dola.py` path) with detection on laptop-streamed frames; the onboard stack below (MAVSDK serial, RKNN NPU, RealSense, ROS 2 UWB) is **mapping-challenge reference material only**. The finals codebase lives in the **[`finals/` package](../../finals/docs/module_map.md)** at repo root — start every work session from `finals/docs/module_map.md` (status table, session roadmap, binding conventions). pyhulax SDK reference: https://pyhulax.xenops.ae
+
 ## 1. Format & scoring
 
 From the briefing images in [`reference_images/`](reference_images/):

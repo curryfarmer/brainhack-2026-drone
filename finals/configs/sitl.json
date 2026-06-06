@@ -1,0 +1,11 @@
+{
+  "_comment": "Qualifier PX4 SITL + Gazebo VM: 1 drone over MAVSDK UDP. VM gate V1 = takeoff_demo here. Detection stays off until S8 wires gazebo_video (then: detector backend ultralytics + weights best.pt).",
+  "profile": "sitl",
+  "flight_backend": "mavsdk_sitl",
+  "frame_backend": "gazebo",
+  "sitl_address": "udpin://0.0.0.0:14540",
+  "detector": { "backend": "none" },
+  "drones": [
+    { "id": "alpha", "phases": ["takeoff_demo"] }
+  ]
+}

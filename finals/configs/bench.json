@@ -1,0 +1,19 @@
+{
+  "_comment": "Real drones ON THE GROUND, props-off validation: discovery + connect + telemetry + video + detector. Flight commands are REFUSED by BenchAdapter. plane_ids/LEDs/bands are placeholders — set from the real fleet at gate A.",
+  "profile": "bench",
+  "flight_backend": "bench",
+  "frame_backend": "pyhulax",
+  "video_channel_order": "rgb",
+  "detector": {
+    "_comment": "best.pt is BARREL-trained (interim plumbing only). For the COCO car-class proxy use yolo11n.pt + allow_coco_weights:true. Retrain on RoboMaster imagery ASAP (bench B4 captures the corpus).",
+    "backend": "ultralytics",
+    "weights": "best.pt",
+    "conf": 0.4,
+    "device": "cpu"
+  },
+  "drones": [
+    { "id": "alpha",   "plane_id": 1, "led_rgb": [255, 0, 0],   "altitude_band_m": 1.2, "phases": ["takeoff_demo"] },
+    { "id": "bravo",   "plane_id": 2, "led_rgb": [0, 255, 0],   "altitude_band_m": 1.7, "phases": ["takeoff_demo"] },
+    { "id": "charlie", "plane_id": 3, "led_rgb": [0, 0, 255],   "altitude_band_m": 2.2, "phases": ["takeoff_demo"] }
+  ]
+}
