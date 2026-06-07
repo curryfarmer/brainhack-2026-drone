@@ -454,11 +454,18 @@ scipy PyYAML Pillow pymavlink`) — torch/ultralytics/jupyter deliberately defer
 config-off, CannedDetector is torch-free, disk at 78%; decision OK'd by user). NOTE: pytest
 is NOT in requirements.txt — the venv recipe in `sim/README.md` adds it explicitly.
 
-**Pytest gate (VM, 3.11 venv)**: first-ever run `1 failed, 424 passed` —
-`test_orchestrator.py::test_budget_expiry_lands_all_and_exits_clean`, wall-clock-sensitive;
-passed in isolation (`1 passed in 0.18s`) and on immediate full re-run: **`425 passed in
-15.11s`**. Recorded as a 2-vCPU first-run flake (recap §8's wall-clock theme applies to the
-test suite too — watch it, config-fix if it recurs). Windows: `425 passed in 23.72s`.
+**Pytest gate (VM, 3.11 venv)**: 424/425 stable; **one PRE-EXISTING platform-timing race
+found** (not a SIM-0 regression — first failure occurred on the unmodified `5539c5c` clone;
+SIM-0 changes zero finals/ code):
+`test_orchestrator.py::test_budget_expiry_lands_all_and_exits_clean` — **Windows 10/10 pass
+(isolation), VM Linux/3.11 0/10 fail (isolation)**, though it DID pass twice on the VM early
+in the session (full run `425 passed in 15.11s` + one isolation pass) — flaky-then-sticky.
+Failure mode: with `budget=0s` the Mock mission completes in ~0.2 s and agents reach DONE
+before the orchestrator emits `budget_expired` (`ticks=7`, event list has the full
+phase/action sequence, no `budget_expired`) — an agent-completion vs budget-evaluation
+ordering race that faster Linux asyncio timing exposes. **→ owner: S4/orchestrator** (fix
+the loop ordering or the test's race assumption; do NOT band-aid by widening budget).
+Windows full suite: `425 passed in 23.72s`.
 
 **Smoke matrix** (all on the VM):
 
