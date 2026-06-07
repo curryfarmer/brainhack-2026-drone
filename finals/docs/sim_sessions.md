@@ -288,6 +288,31 @@ DRILLS (paste evidence):
 
 DONE WHEN: "HEADLESS SIM DONE" recorded in the evidence log with all of the above, PNG +
 fixture-based test committed, module_map + ladder flipped, review + mutation check, pushed.
+
+▎ ADDENDUM (facts from SIM-0/SIM-1 — supersede stale assumptions):
+▎ - BEFORE STARTING: bump the VM to 4+ vCPUs (currently 2 — power it off in VMware, change
+▎   settings, boot; NAT IP may drift: if `ssh bhvm` fails, read `hostname -I` in the VM
+▎   console and update HostName in ~/.ssh/config). Record nproc in the evidence.
+▎ - The VM is driven directly over `ssh bhvm` (key auth + passwordless sudo). Repo at
+▎   ~/brainhack-2026-drone, venv `.venv` on python3.11 (lean set + hypothesis + matplotlib
+▎   installed). Run pattern: `source .venv/bin/activate` then `./run.sh -m finals.main ...`.
+▎ - PLOTTER MUST SEED DR FROM THE origin EVENT — EKF boot yaw is NOT 0 (the committed
+▎   fixture's origin has yaw_deg=-95.97). Assuming yaw 0 renders the square rotated; the
+▎   fixture test must still assert closure, which is yaw-invariant.
+▎ - sitl3.json schema is ALREADY validated + tested: THREE_DRONES in
+▎   finals/tests/test_sitl_adapter.py is the exact template (distinct addresses/ports/bands
+▎   enforced). Carry command_timeout_s 30 over from sitl.json (recap §8).
+▎ - The 'q' abort drill NEEDS A TTY: over plain ssh the AbortListener logs "stdin EOF —
+▎   abort key disabled". Run that drill via `ssh -t bhvm` (or the VM console).
+▎ - Kill-drill physics (SIM-1-proven): killing a px4 leaves its mavsdk_server ALIVE → the
+▎   adapter's STALENESS detector fires (~1.2 s typed FlightError); killing the mavsdk_server
+▎   instead → stream-END dead-flag path (the "optional flavor" drill). Killing px4_0 may
+▎   take the gz server down with it — `start N` recovers state-aware.
+▎ - VM pytest shows 1 pre-existing failure: test_budget_expiry_lands_all_and_exits_clean
+▎   (S4-owned platform race, SIM-0/SIM-1 evidence) — the gate is "no NEW failures".
+▎ - In ssh one-shot cleanliness checks use the bracket form `pgrep -fa 'p[x]4|g[z] sim'`
+▎   (the plain pattern self-matches your own wrapper shell — sim/README.md documents it).
+▎ - finals/docs/evidence/ does not exist yet — create it for sim2_3drone.png.
 ```
 
 ### SIM-3 — convoy world assets + detection check (= S8 assets; ∥ with S4–S7)
