@@ -1,0 +1,17 @@
+{
+  "_comment": "SIM-2: 3 concurrent PX4 SITL instances, headless. sim/launch_sitl.sh start 3 spawns x500_0/1/2 at PX4_GZ_MODEL_POSE '0,0' / '0,1' / '0,2' (x=0, y=i in the Gazebo ENU world: 1 m NORTH spacing) — documentation only: replay_plot renders per-drone subplots and never merges frames, because each drone's DR north is its own EKF boot heading. Endpoints: PX4 instance i sends MAVLink to udpin 1454<i>; one mavsdk_server per drone on gRPC 5005<i+1> (distinctness of address/port/band is config.py-validated; template test_sitl_adapter.py THREE_DRONES). altitude_band_m doubles as the takeoff height 120/170/220 cm (takeoff_demo.from_config: the band IS the height — vertical separation is the swarm's primary collision guarantee). command_timeout_s 30 carried from sitl.json: EKF health-settle on a fresh instance is 10-25 s and takeoff includes it (SIM-1 evidence; sim_sessions.md recap 8 — sizing timeouts is config, never code). frame_backend none until S8/SIM-5 wires gazebo frames (then: configs/sitl3_vision.json adds detector + camera).",
+  "profile": "sitl",
+  "flight_backend": "mavsdk_sitl",
+  "frame_backend": "none",
+  "sitl_address": "udpin://0.0.0.0:14540",
+  "command_timeout_s": 30,
+  "detector": { "backend": "none" },
+  "drones": [
+    { "id": "alpha",   "phases": ["takeoff_demo"], "altitude_band_m": 1.2,
+      "sitl_address": "udpin://0.0.0.0:14540", "mavsdk_grpc_port": 50051 },
+    { "id": "bravo",   "phases": ["takeoff_demo"], "altitude_band_m": 1.7,
+      "sitl_address": "udpin://0.0.0.0:14541", "mavsdk_grpc_port": 50052 },
+    { "id": "charlie", "phases": ["takeoff_demo"], "altitude_band_m": 2.2,
+      "sitl_address": "udpin://0.0.0.0:14542", "mavsdk_grpc_port": 50053 }
+  ]
+}
