@@ -48,8 +48,26 @@ after SIM-2; full sim after SIM-5.
 
 ## VM access + sync (single source — every prompt points here)
 
-- VM: Ubuntu 24.04; `~/PX4-Autopilot` with `make px4_sitl` already built (recently flew the
-  qualifier); Gazebo Harmonic; Python venv per `docs/quali/deployment.md`.
+- **VERIFIED VM FACTS (probed over SSH, 2026-06-07 — supersede the stale "24.04 /
+  recently flew the qualifier" assumption):** VMware guest on the C2 dev laptop;
+  **Ubuntu 22.04.5**, kernel 6.8; user `drone`; **2 vCPU / 7.7 GiB** (bump to 4+ cores in
+  VMware settings before SIM-2's 3× swarm — recap §8's RTF-trips-timeouts risk is real at
+  2 cores); `~/PX4-Autopilot` built (`build/px4_sitl_default/bin/px4` exists); **Gazebo
+  Harmonic 8.11**; GitHub reachable anonymously (repo is public — clone needs no
+  credentials); repo NOT yet cloned (SIM-0 does it); passwordless sudo enabled for
+  automation.
+- **SSH access (Model B — sessions drive the VM directly):** from the C2 laptop,
+  `ssh bhvm` (key-auth `Host bhvm` entry in `~/.ssh/config` → `drone@192.168.174.128`).
+  NAT/DHCP means the guest IP can drift across VM reboots — if `ssh bhvm` stops resolving,
+  re-read `hostname -I` in the VM console and update the HostName line. Keep the VM RUNNING
+  (not suspended) during sim sessions.
+- **PYTHON GOTCHA (blocks running finals/ on the VM until fixed in SIM-0):** system Python
+  is **3.10**, but `finals/guards.py` uses `asyncio.timeout()` (3.11+) — pytest and
+  `--profile sitl` crash on 3.10. SIM-0 must install `python3.11` + `python3.11-venv`
+  (deadsnakes PPA on 22.04) and build the repo venv on it. Known wrinkle deferred to
+  SIM-4: the apt gz Python bindings (`gz.transport13`) are compiled for system 3.10 and
+  will NOT import inside a 3.11 venv — irrelevant for headless SIM-0…2; SIM-4
+  (gazebo_video) must solve it and record the solution here.
 - Sync: **clone once in SIM-0** (`git clone <repo-url> ~/brainhack-2026-drone`), then per
   iteration push from Windows → `git -C ~/brainhack-2026-drone pull` on the VM. Fallback if
   VM git/credentials fail: the ZIP drop-in workflow in `docs/quali/deployment.md`.
