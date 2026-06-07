@@ -108,6 +108,13 @@ class DroneConfig:
     led_rgb: Optional[Tuple[int, int, int]] = None    # identity colour (bench/real)
     altitude_band_m: Optional[float] = None     # swarm vertical separation (1.2/1.7/2.2)
     zone: Dict[str, Any] = field(default_factory=dict)  # per-drone search params (briefing-shaped)
+    # SITL multi-instance endpoints (S6/SIM-1): instance i listens on UDP
+    # 14540+i and its mavsdk_server takes gRPC 50051+i. REQUIRED (and
+    # distinct) on every drone when a sitl profile has >1 drone; a single
+    # drone may omit both and falls back to the top-level sitl_address +
+    # 50051 (resolve_sitl_endpoint below).
+    sitl_address: Optional[str] = None          # e.g. "udpin://0.0.0.0:14541"
+    mavsdk_grpc_port: Optional[int] = None      # e.g. 50052
 
 
 @dataclass
@@ -131,6 +138,20 @@ class FinalsConfig:
     use_uwb: bool = False
     uwb_serial_port: Optional[str] = None
     guards: GuardsConfig = field(default_factory=GuardsConfig)
+
+
+def resolve_sitl_endpoint(cfg: "FinalsConfig",
+                          drone: "DroneConfig") -> Tuple[str, int]:
+    """(sitl_address, mavsdk_grpc_port) for one drone: the per-drone fields
+    when set, else the single-drone fallback (top-level sitl_address +
+    gRPC 50051). Multi-drone sitl configs are validated to carry BOTH fields
+    on every drone, so the fallback can only serve a single-drone config.
+    Pure — unit-tested without mavsdk; main._build_adapter is the consumer."""
+    address = drone.sitl_address if drone.sitl_address is not None \
+        else cfg.sitl_address
+    port = drone.mavsdk_grpc_port if drone.mavsdk_grpc_port is not None \
+        else 50051
+    return address, port
 
 
 # ============================================================
@@ -199,7 +220,8 @@ def _build_drone(raw: Dict[str, Any], index: int) -> DroneConfig:
     data = _check_keys(
         raw,
         required=("id", "phases"),
-        optional=("plane_id", "led_rgb", "altitude_band_m", "zone"),
+        optional=("plane_id", "led_rgb", "altitude_band_m", "zone",
+                  "sitl_address", "mavsdk_grpc_port"),
         where=where,
     )
     phases = data["phases"]
@@ -215,6 +237,19 @@ def _build_drone(raw: Dict[str, Any], index: int) -> DroneConfig:
                 or not all(isinstance(c, int) and 0 <= c <= 255 for c in led)):
             raise ConfigError(f"{where}.led_rgb must be [r, g, b] ints 0-255 — got {led!r}")
         led = tuple(led)
+    sitl_address = data.get("sitl_address")
+    if sitl_address is not None and (
+            not isinstance(sitl_address, str) or not sitl_address):
+        raise ConfigError(
+            f"{where}.sitl_address must be a non-empty string like "
+            f'"udpin://0.0.0.0:14541" — got {sitl_address!r}')
+    grpc_port = data.get("mavsdk_grpc_port")
+    if grpc_port is not None and (
+            not isinstance(grpc_port, int) or isinstance(grpc_port, bool)
+            or not 1024 <= grpc_port <= 65535):
+        raise ConfigError(
+            f"{where}.mavsdk_grpc_port must be an int in [1024, 65535] "
+            f"(instance i uses 50051+i) — got {grpc_port!r}")
     return DroneConfig(
         id=str(data["id"]),
         plane_id=data.get("plane_id"),
@@ -222,6 +257,8 @@ def _build_drone(raw: Dict[str, Any], index: int) -> DroneConfig:
         led_rgb=led,
         altitude_band_m=data.get("altitude_band_m"),
         zone=dict(data.get("zone", {})),
+        sitl_address=sitl_address,
+        mavsdk_grpc_port=grpc_port,
     )
 
 
@@ -385,6 +422,48 @@ def _validate(cfg: FinalsConfig, config_dir: str) -> None:
     ids = [d.id for d in cfg.drones]
     if len(ids) != len(set(ids)):
         raise ConfigError(f"duplicate drone ids: {ids}")
+
+    if cfg.profile == "sitl" and any(d.sitl_address is None
+                                     for d in cfg.drones):
+        # At least one drone will fall back to the top-level address — it
+        # must be usable, and dying HERE beats a ValueError at adapter
+        # construction minutes later (same philosophy as the weights guard).
+        if not isinstance(cfg.sitl_address, str) or not cfg.sitl_address:
+            raise ConfigError(
+                f"profile 'sitl': top-level sitl_address must be a non-empty "
+                f"string (drones without a per-drone sitl_address fall back "
+                f"to it) — got {cfg.sitl_address!r}")
+
+    if cfg.profile == "sitl" and len(cfg.drones) > 1:
+        # S6/SIM-1: every concurrent SITL drone needs its OWN MAVLink udpin
+        # port + mavsdk_server gRPC port (instance i -> 14540+i / 50051+i;
+        # no auto-selection exists), and the altitude bands are the swarm's
+        # primary collision guarantee — same rule as bench/real below.
+        missing = [d.id for d in cfg.drones
+                   if d.sitl_address is None or d.mavsdk_grpc_port is None]
+        if missing:
+            raise ConfigError(
+                f"profile 'sitl' with {len(cfg.drones)} drones requires "
+                f"sitl_address AND mavsdk_grpc_port on EVERY drone "
+                f"(instance i: udpin://0.0.0.0:1454<i> + 5005<i+1>) — "
+                f"missing on: {missing}")
+        addresses = [d.sitl_address for d in cfg.drones]
+        if len(set(addresses)) != len(addresses):
+            raise ConfigError(
+                f"profile 'sitl' multi-drone sitl_address values must be "
+                f"DISTINCT (each PX4 instance sends to its own 14540+i) — "
+                f"got {addresses}")
+        ports = [d.mavsdk_grpc_port for d in cfg.drones]
+        if len(set(ports)) != len(ports):
+            raise ConfigError(
+                f"profile 'sitl' multi-drone mavsdk_grpc_port values must be "
+                f"DISTINCT (one mavsdk_server per drone) — got {ports}")
+        bands = [d.altitude_band_m for d in cfg.drones]
+        if None in bands or len(set(bands)) != len(bands):
+            raise ConfigError(
+                f"profile 'sitl' with {len(cfg.drones)} drones requires a "
+                f"DISTINCT altitude_band_m per drone (vertical separation is "
+                f"the primary collision guarantee) — got {bands}")
 
     if cfg.profile in ("bench", "real"):
         missing = [d.id for d in cfg.drones if d.plane_id is None]

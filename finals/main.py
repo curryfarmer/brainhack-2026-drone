@@ -242,6 +242,15 @@ def _build_adapter(cfg: FinalsConfig, drone: DroneConfig):
         from finals.flight.adapter import BenchAdapter
         from finals.flight.pyhulax_adapter import PyhulaxAdapter   # S9
         return BenchAdapter(PyhulaxAdapter(drone.id))
+    if cfg.flight_backend == "mavsdk_sitl":
+        # S6/SIM-1: per-drone (sitl_address, grpc_port) — instance i listens
+        # on udpin 14540+i with its own mavsdk_server on gRPC 50051+i;
+        # single-drone configs fall back to the top-level sitl_address+50051.
+        from finals.config import resolve_sitl_endpoint
+        from finals.flight.sitl_adapter import MavsdkSitlAdapter
+        address, grpc_port = resolve_sitl_endpoint(cfg, drone)
+        return MavsdkSitlAdapter(drone.id, sitl_address=address,
+                                 grpc_port=grpc_port)
     flight_cls = resolve_flight_adapter_cls(cfg.flight_backend)
     if flight_cls is None:      # 'none' is guarded before we get here
         raise ConfigError(

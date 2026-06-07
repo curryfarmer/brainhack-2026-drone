@@ -37,10 +37,15 @@ SIM-1/2 execute S6; SIM-3/4/5 execute S8.
 
 1. **No bare `except`.** `except Exception` ONLY in `guards.py` (SafetyController
    safe-down, guard-evaluation wrapper), `mission/orchestrator.py` (top
-   loop), and — widened S7, reviewed — `vision/detector.py` (the vendored
+   loop), — widened S7, reviewed — `vision/detector.py` (the vendored
    worker pool must survive ARBITRARY model/callback exceptions; the root
-   Detector.py worker died SILENTLY on them) — always logged with traceback
-   + a counter. Enforced by `tests/test_conventions.py`.
+   Detector.py worker died SILENTLY on them), and — widened S6/SIM-1,
+   reviewed — `flight/sitl_adapter.py` (three sites: emergency_land
+   per-step + disconnect teardown, whose never-raise contracts a typed
+   tuple cannot honor, and the telemetry-stream wrapper — MAVSDK streams
+   END SILENTLY when PX4 dies and the wrapper converts that into a loud
+   dead-flag) — always logged with traceback. Enforced by
+   `tests/test_conventions.py`.
 2. Every blocking/awaited op takes `timeout_s` and raises a typed
    `finals.errors` exception with an ACTIONABLE message (what, which drone,
    how long, what to check).

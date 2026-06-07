@@ -33,10 +33,19 @@ FINALS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # increment a loud counter; threading.excepthook is not covered by
 # install_crash_hooks, so these guards are the only thing keeping worker
 # death observable.
+# S6/SIM-1 widening (reviewed, user-approved): flight/sitl_adapter.py — its
+# never-raise contract paths cannot be honored by a typed tuple (a RuntimeError
+# from a closing loop or a non-RpcError grpc surprise would escape mid-safe-
+# down), and MAVSDK telemetry streams END SILENTLY when PX4 dies, so the
+# stream-task wrapper must catch-anything to convert death into a loud
+# dead-flag. Exactly three sites, each logging the full traceback:
+# emergency_land per-step (the ABC names emergency_land the one sanctioned
+# swallow in the flight stack), disconnect teardown, the stream wrapper.
 EXCEPT_EXCEPTION_WHITELIST = {
     os.path.join("finals", "guards.py"),
     os.path.join("finals", "mission", "orchestrator.py"),
     os.path.join("finals", "vision", "detector.py"),
+    os.path.join("finals", "flight", "sitl_adapter.py"),
 }
 
 # Modules that may import SDK/heavy-I/O packages at module top level.

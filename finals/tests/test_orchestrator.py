@@ -406,12 +406,9 @@ def test_main_bench_builds_inner_backend_first(tmp_path, monkeypatch):
         main(["--profile", "bench"])
 
 
-def test_main_sitl_points_at_s6(tmp_path, monkeypatch):
-    from finals.main import main
-
-    monkeypatch.chdir(tmp_path)
-    with pytest.raises(NotImplementedError, match="S6"):
-        main(["--profile", "sitl"])
+# (test_main_sitl_points_at_s6 was deleted in S6/SIM-1: MavsdkSitlAdapter is
+# now real — wiring/endpoint coverage lives in tests/test_sitl_adapter.py and
+# the flight path is the VM gate V1, sim_sessions.md SIM-1 evidence.)
 
 
 def test_main_real_points_at_s9(tmp_path, monkeypatch):

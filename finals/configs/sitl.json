@@ -1,9 +1,10 @@
 {
-  "_comment": "Qualifier PX4 SITL + Gazebo VM: 1 drone over MAVSDK UDP. VM gate V1 = takeoff_demo here. Detection stays off until S8 wires gazebo_video (then: detector backend ultralytics + weights best.pt).",
+  "_comment": "Qualifier PX4 SITL + Gazebo VM: 1 drone over MAVSDK UDP (VM gate V1 = takeoff_demo here). Single drone falls back to the top-level sitl_address + gRPC 50051; multi-drone sitl configs must set per-drone sitl_address ('udpin://0.0.0.0:1454<i>') AND mavsdk_grpc_port (50051+i) plus distinct altitude_band_m — SIM-2 ships configs/sitl3.json. command_timeout_s 30: EKF health-settle on a freshly booted instance is 10-25 s and takeoff includes it (SIM-1 evidence block has the measured number; sizing timeouts is config, never code — sim_sessions.md recap 8). Detection stays off until S8 wires gazebo_video (then: detector backend ultralytics + weights best.pt).",
   "profile": "sitl",
   "flight_backend": "mavsdk_sitl",
   "frame_backend": "gazebo",
   "sitl_address": "udpin://0.0.0.0:14540",
+  "command_timeout_s": 30,
   "detector": { "backend": "none" },
   "drones": [
     { "id": "alpha", "phases": ["takeoff_demo"] }

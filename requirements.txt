@@ -22,6 +22,9 @@ scipy
 matplotlib
 PyYAML
 
+# --- Test-only ---
+hypothesis       # property tests (finals/tests/test_sitl_adapter.py, SIM-1)
+
 # --- Notebooks (Train_YOLO_Models*.ipynb local runs) ---
 jupyter
 ipykernel
