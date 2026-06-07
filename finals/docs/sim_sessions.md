@@ -92,7 +92,7 @@ after SIM-2; full sim after SIM-5.
 
 | Part | = roadmap | One-line scope | Prereqs | Status |
 |---|---|---|---|---|
-| SIM-0 | env | VM bring-up: launch/stop scripts, raw smoke 1×+3×, rendering/ros2/resource probes | — | ⬜ |
+| SIM-0 | env | VM bring-up: launch/stop scripts, raw smoke 1×+3×, rendering/ros2/resource probes | — | ✅ 2026-06-07 |
 | SIM-1 | **S6** | `MavsdkSitlAdapter` (vendored-with-fixes) + per-drone config schema; **VM V1** + kill drill | SIM-0, S4 (S5 recommended) | ⬜ |
 | SIM-2 | S6 stretch | `replay_plot.py` (proven on the SIM-1 fixture) → `sitl3.json` → 3× headless swarm + drills — **HEADLESS SIM DONE** | SIM-1, S5 | ⬜ |
 | SIM-3 | S8 assets | Convoy world: markers (ArUco+QR), robots, pads, band-altitude cams; detection check — **∥ with S4–S7** | SIM-0 | ⬜ |
@@ -164,6 +164,10 @@ SMOKE (paste everything into sim_sessions.md → Evidence log → SIM-0):
 
 DONE WHEN: evidence appended to sim_sessions.md, its ladder Status flipped, module_map
 `sim/` row flipped, committed + pushed. finals/ untouched (pytest proves it).
+
+▎ ADDENDUM: the VM is reachable as ssh bhvm from this laptop (key auth + passwordless sudo — drive it directly; verified facts and the
+  ▎ Python-3.10 gotcha are in sim_sessions.md "VM access + sync"). SIM-0 must also: install python3.11 + python3.11-venv (deadsnakes PPA,
+  ▎ Ubuntu 22.04) and build the repo venv on 3.11 before the on-VM pytest gate.
 ```
 
 ### SIM-1 — MavsdkSitlAdapter + VM gate V1 (= roadmap S6)
@@ -436,7 +440,114 @@ module_map flipped, review + mutation check, pushed.
 
 ## Evidence log (each session appends under its heading; this doc is the logbook)
 
-### SIM-0 — pending
+### SIM-0 — DONE 2026-06-07
+
+**Deliverables**: `.gitattributes` (`*.sh text eol=lf`), `sim/README.md` (runbook),
+`sim/launch_sitl.sh` (`start N [--world W] [--model M] | stop | status`; state-aware start =
+the solo-relaunch path), `sim/sitl_smoke.py` (raw-MAVSDK, SIM-0-only per recap §5),
+`sim/run/` gitignored. finals/ untouched — suite green on both OSes, zero finals/ code diff.
+
+**VM env (one-time)**: deadsnakes PPA → python3.11.15 + python3.11-venv (jammy archive only
+carries 3.11.0~rc1 — PPA mandatory) + mesa-utils. Repo cloned to `~/brainhack-2026-drone`;
+venv `.venv` on 3.11 with the LEAN set (`pytest mavsdk "numpy<2" opencv-python matplotlib
+scipy PyYAML Pillow pymavlink`) — torch/ultralytics/jupyter deliberately deferred (YOLO is
+config-off, CannedDetector is torch-free, disk at 78%; decision OK'd by user). NOTE: pytest
+is NOT in requirements.txt — the venv recipe in `sim/README.md` adds it explicitly.
+
+**Pytest gate (VM, 3.11 venv)**: first-ever run `1 failed, 424 passed` —
+`test_orchestrator.py::test_budget_expiry_lands_all_and_exits_clean`, wall-clock-sensitive;
+passed in isolation (`1 passed in 0.18s`) and on immediate full re-run: **`425 passed in
+15.11s`**. Recorded as a 2-vCPU first-run flake (recap §8's wall-clock theme applies to the
+test suite too — watch it, config-fix if it recurs). Windows: `425 passed in 23.72s`.
+
+**Smoke matrix** (all on the VM):
+
+```text
+bash sim/launch_sitl.sh start 1
+  gz server ready after 6s; instance 0 mavlink up (UDP 14580 bound)
+python sim/sitl_smoke.py --instance 0
+  instance 0: connected on 14540 (gRPC 50051) / health ready / altitude >= 1.2 m
+  PASS instance 0                                              EXIT=0
+
+DRILL stop-cleanliness:
+bash sim/launch_sitl.sh stop                                   STOP_EXIT=0
+pgrep -fa 'p[x]4|g[z] sim'  ->  (empty — clean); restart works (start 1 again: 5s)
+
+bash sim/launch_sitl.sh start 3
+  PX4-bound ports: 14580 14581 14582 18570 18571 18572
+python sim/sitl_smoke.py --all 3
+  PASS instance 0 + PASS instance 1 + PASS instance 2 (concurrent, gather)
+  ALL 3 instances PASS                                         SMOKE_ALL3_EXIT=0
+ss -uapn mid-run: UNCONN 0.0.0.0:1454x users:(("mavsdk_server",pid=...)) — the 1454x
+  ports are bound by mavsdk_server for the whole client session (see port correction below)
+
+DRILL kill instance 1:
+kill -9 "$(cat sim/run/px4_1.pid)"
+  python sim/sitl_smoke.py --instance 0  ->  PASS (EXIT=0)
+  python sim/sitl_smoke.py --instance 2  ->  PASS (EXIT=0)
+bash sim/launch_sitl.sh start 3            # the solo relaunch
+  instance 0 already running — skipping
+  model x500_1 already in the world — attaching instead of spawning   <- PX4_GZ_MODEL_NAME
+  instance 1 mavlink up (UDP 14581 bound) after 4s
+  instance 2 already running — skipping
+  python sim/sitl_smoke.py --instance 1  ->  PASS (EXIT=0)
+```
+
+**Drill-earned fixes** (the drills caught both — they are the tests for `sim/`):
+1. A name-based `pkill -9 -f "gz sim"` sweep in `stop` killed the operator's own ssh shell
+   (any `bash -c` wrapper quoting the pattern matches it). `stop` now kills strictly by
+   recorded PIDs; leftover checks use process-specific patterns (`bin/px4 -i|gz sim --`);
+   one-shot ssh checks use the bracket form `pgrep -fa 'p[x]4|g[z] sim'` (README documents).
+2. Solo relaunch must ATTACH, not respawn: a killed px4 leaves its `x500_<i>` model in the
+   world; `start` now detects live gz + surviving model and uses `PX4_GZ_MODEL_NAME` (attach)
+   instead of `PX4_GZ_MODEL_POSE` (spawn would name-collide).
+
+**Probe verdicts** (consumed by later parts):
+
+- **a. GL**: `DISPLAY=:0 glxinfo -B` → VMware SVGA3D, **OpenGL 4.3 core, Mesa 23.2.1,
+  Accelerated: no** (LLVM-backed paravirt — software-class either way). Clears ogre2's
+  GL 3.3 floor.
+- **b. Camera rendering (rendering-ladder verdict: TOP RUNG HOLDS — VM "real GL"/SVGA3D)**:
+  `start 1 --model gz_x500_vision --world roboverse` (the proven qualifier combo; world at
+  `~/PX4-Autopilot/Tools/simulation/gz/worlds/roboverse.sdf`):
+  IMX214 topic `/world/roboverse/model/x500_vision_0/link/camera_link/sensor/IMX214/image` →
+  **29.8 FPS @ 1920×1080**, RTF 1.00 while rendering. Under `LIBGL_ALWAYS_SOFTWARE=1`
+  (llvmpipe rung): **26.5 FPS @ 1920×1080**, RTF 0.94–1.18. Both rungs hold a 1080p camera at
+  ~sensor rate with 1 drone; 3×640×480 (SIM-3's static-cam world) should be comfortably
+  cheaper per-frame — SIM-3 measures it per rung as planned.
+- **c. ros2 + ros_gz: PRESENT** (corrects the handover's "probably absent" guess —
+  `which ros2` fails only unsourced): ROS 2 **Humble** at `/opt/ros/humble` (+ `~/ros2_ws`
+  with open_vins), `ros-humble-ros-gzharmonic{,-bridge,-image,-interfaces,-sim}` 0.244.12
+  installed; sourced `ros2 pkg list | grep ros_gz` → ros_gz, ros_gz_bridge, ros_gz_image,
+  ros_gz_interfaces, ros_gz_sim(+demos). **SIM-3 convoy driver verdict: rclpy waypoint node
+  via ros_gz** (the gzharmonic variant packages — note the names).
+- **d. Resources**: nproc 2; RAM 7.7 GiB (1.2 used / 6.2 available with 3 instances —
+  headless RAM is a non-issue); disk 11 GB free (78% used). **RTF ≈ 0.99–1.02 during the 3×
+  concurrent flight** (from `/world/default/stats`; px4 logs carry no RTF lines), at load
+  average 4.5–5.0 on 2 vCPU — lockstep absorbed the oversubscription headless. Still bump to
+  4+ vCPU before SIM-2 (margin for orchestrator + 3 mission loops + plotting).
+
+**Environment corrections pinned by SIM-0** (supersede earlier assumptions):
+1. **Port scheme**: PX4 BINDS `14580+i` (offboard-local) + `18570+i` (GCS); it SENDS to
+   `14540+i` — `udpin` clients (mavsdk_server) bind 1454x, so `ss -ulpn | grep 1454` is
+   only non-empty while a client session runs. Verified in
+   `~/PX4-Autopilot/ROMFS/px4fmu_common/init.d-posix/px4-rc.mavlink:4-5`. The smoke-matrix
+   line "ss shows 14540/41/42" is satisfied DURING `--all 3` (mavsdk_server UNCONN sockets).
+2. **gz python on system 3.10 needs `PYTHONNOUSERSITE=1`**: a pip-user protobuf 7.34.1 in
+   `~/.local` shadows apt protobuf 3.12 and breaks the apt-generated `_pb2` modules
+   ("Descriptors cannot be created directly"). Binding for SIM-3's `check_detection.py`.
+3. **IMX214 (x500_vision) is 1920×1080@30**, not 640×480 — SIM-3's `mono_cam_640` clone
+   remains the right move for the pyhulax frame contract.
+4. Stock worlds on the VM include `aruco.sdf` and `roboverse.sdf` (PX4 worlds dir);
+   `~/worlds/` additionally has `aprilworld.sdf`/`apriltag.sdf` from the quali era.
+5. System pip3 (3.10) already carries mavsdk 3.15.3 / numpy 1.26.4 / pytest 6.2.5 — that is
+   how the qualifier flew (no venv existed). The finals stack ignores it; the 3.11 venv is
+   the only sanctioned interpreter for repo code on the VM.
+
+**Review bar**: adversarial self-review done on both scripts (every wait deadlined; failures
+name WHAT/WHICH/CHECK; stop never touches mavsdk_server; PID lifecycle clean after kill -9 —
+the two drill-earned fixes above came out of it). Mutation kill-check N/A: no new
+pytest-covered code (sim/ is validated by the live drills, by design).
 
 ### SIM-1 — pending
 
