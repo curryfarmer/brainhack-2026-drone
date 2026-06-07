@@ -1,0 +1,32 @@
+{"ts": 1780814602.0848541, "mono": 8701.970485762, "drone": "mission", "event": "preflight", "data": {"status": "skipped", "reason": "profile 'sitl' has no preflight gate (P0-P10 applies to bench/real; arrives S10)"}}
+{"ts": 1780814602.0854084, "mono": 8701.971040508, "drone": "mission", "event": "run_start", "data": {"drones": ["alpha"], "budget_s": 600.0, "settle_grace_s": 60.0, "heartbeat_period_s": 1.0, "run_dir": "/home/drone/brainhack-2026-drone/runs_finals/20260607_134322"}}
+{"ts": 1780814602.0868773, "mono": 8701.972509315, "drone": "alpha", "event": "agent_connect", "data": {"timeout_s": 30.0}}
+{"ts": 1780814603.8114698, "mono": 8703.697101723, "drone": "alpha", "event": "origin", "data": {"position_m": [0.02517550438642502, -0.04198383167386055, 0.012403085827827454], "altitude_m": 0.012403085827827454, "yaw_deg": -95.9705810546875, "position_quality": "MEASURED", "is_flying": false, "frame": "north/east/up, yaw CCW+ from boot heading — see finals/flight/dead_reckon.py (binding)"}}
+{"ts": 1780814603.8116055, "mono": 8703.697237416, "drone": "alpha", "event": "phase_enter", "data": {"phase": "takeoff_demo", "index": 0}}
+{"ts": 1780814603.8116717, "mono": 8703.69730356, "drone": "alpha", "event": "action_start", "data": {"action": "Takeoff", "timeout_s": 30.0, "outer_deadline_s": 32.0, "height_cm": 80}}
+{"ts": 1780814616.6981163, "mono": 8716.583748339, "drone": "alpha", "event": "action_complete", "data": {"action": "Takeoff", "elapsed_s": 12.886406630001147, "height_cm": 80}}
+{"ts": 1780814616.698294, "mono": 8716.583925992, "drone": "alpha", "event": "action_start", "data": {"action": "Hover", "timeout_s": 30.0, "outer_deadline_s": 34.0, "duration_s": 2.0}}
+{"ts": 1780814618.7002056, "mono": 8718.58583744, "drone": "alpha", "event": "action_complete", "data": {"action": "Hover", "elapsed_s": 2.001876157000879, "duration_s": 2.0}}
+{"ts": 1780814618.7004337, "mono": 8718.586065548, "drone": "alpha", "event": "action_start", "data": {"action": "Move", "timeout_s": 30.0, "outer_deadline_s": 32.0, "direction": "FORWARD", "distance_cm": 100}}
+{"ts": 1780814620.440258, "mono": 8720.325889783, "drone": "alpha", "event": "action_complete", "data": {"action": "Move", "elapsed_s": 1.7397877630010044, "direction": "FORWARD", "distance_cm": 100}}
+{"ts": 1780814620.4404318, "mono": 8720.326063668, "drone": "alpha", "event": "action_start", "data": {"action": "Rotate", "timeout_s": 30.0, "outer_deadline_s": 32.0, "angle_deg": 90.0}}
+{"ts": 1780814621.467038, "mono": 8721.352669687, "drone": "alpha", "event": "action_complete", "data": {"action": "Rotate", "elapsed_s": 1.0265050420002808, "angle_deg": 90.0}}
+{"ts": 1780814621.467257, "mono": 8721.352888884, "drone": "alpha", "event": "action_start", "data": {"action": "Move", "timeout_s": 30.0, "outer_deadline_s": 32.0, "direction": "FORWARD", "distance_cm": 100}}
+{"ts": 1780814623.4177814, "mono": 8723.303413172, "drone": "alpha", "event": "action_complete", "data": {"action": "Move", "elapsed_s": 1.9504911880012514, "direction": "FORWARD", "distance_cm": 100}}
+{"ts": 1780814623.4179811, "mono": 8723.303613405, "drone": "alpha", "event": "action_start", "data": {"action": "Rotate", "timeout_s": 30.0, "outer_deadline_s": 32.0, "angle_deg": 90.0}}
+{"ts": 1780814625.159698, "mono": 8725.045329827, "drone": "alpha", "event": "action_complete", "data": {"action": "Rotate", "elapsed_s": 1.7416458450006758, "angle_deg": 90.0}}
+{"ts": 1780814625.1598597, "mono": 8725.045491595, "drone": "alpha", "event": "action_start", "data": {"action": "Move", "timeout_s": 30.0, "outer_deadline_s": 32.0, "direction": "FORWARD", "distance_cm": 100}}
+{"ts": 1780814627.0103147, "mono": 8726.895946773, "drone": "alpha", "event": "action_complete", "data": {"action": "Move", "elapsed_s": 1.850421926999843, "direction": "FORWARD", "distance_cm": 100}}
+{"ts": 1780814627.0104814, "mono": 8726.896113248, "drone": "alpha", "event": "action_start", "data": {"action": "Rotate", "timeout_s": 30.0, "outer_deadline_s": 32.0, "angle_deg": 90.0}}
+{"ts": 1780814628.7480354, "mono": 8728.633667221, "drone": "alpha", "event": "action_complete", "data": {"action": "Rotate", "elapsed_s": 1.7375265119990217, "angle_deg": 90.0}}
+{"ts": 1780814628.7481818, "mono": 8728.633813613, "drone": "alpha", "event": "action_start", "data": {"action": "Move", "timeout_s": 30.0, "outer_deadline_s": 32.0, "direction": "FORWARD", "distance_cm": 100}}
+{"ts": 1780814630.5934765, "mono": 8730.479108338, "drone": "alpha", "event": "action_complete", "data": {"action": "Move", "elapsed_s": 1.8452678199992079, "direction": "FORWARD", "distance_cm": 100}}
+{"ts": 1780814630.5936863, "mono": 8730.479318113, "drone": "alpha", "event": "action_start", "data": {"action": "Rotate", "timeout_s": 30.0, "outer_deadline_s": 32.0, "angle_deg": 90.0}}
+{"ts": 1780814631.6216958, "mono": 8731.507327503, "drone": "alpha", "event": "action_complete", "data": {"action": "Rotate", "elapsed_s": 1.0279784700014716, "angle_deg": 90.0}}
+{"ts": 1780814631.6218982, "mono": 8731.507530224, "drone": "alpha", "event": "action_start", "data": {"action": "Land", "timeout_s": 30.0, "outer_deadline_s": 183.0, "route": "safety"}}
+{"ts": 1780814636.1218078, "mono": 8736.007439631, "drone": "alpha", "event": "action_complete", "data": {"action": "Land", "elapsed_s": 4.499878230999457}}
+{"ts": 1780814636.122061, "mono": 8736.007692823, "drone": "alpha", "event": "phase_done", "data": {"phase": "takeoff_demo", "reason": "takeoff_demo complete: takeoff 80 cm, hover 2 s, 4 x (forward 100 cm, rotate 90 deg), landed"}}
+{"ts": 1780814636.1220875, "mono": 8736.007719155, "drone": "alpha", "event": "agent_landing", "data": {"airborne": false}}
+{"ts": 1780814636.1221325, "mono": 8736.007764294, "drone": "alpha", "event": "agent_done", "data": {"phases_completed": 1, "stopped_reason": null}}
+{"ts": 1780814636.1231809, "mono": 8736.008812556, "drone": "alpha", "event": "agent_disconnect", "data": {}}
+{"ts": 1780814636.1274369, "mono": 8736.013068789, "drone": "mission", "event": "run_end", "data": {"exit_code": 0, "states": {"alpha": "DONE"}, "sightings_drained": 0}}

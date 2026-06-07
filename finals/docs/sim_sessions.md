@@ -93,7 +93,7 @@ after SIM-2; full sim after SIM-5.
 | Part | = roadmap | One-line scope | Prereqs | Status |
 |---|---|---|---|---|
 | SIM-0 | env | VM bring-up: launch/stop scripts, raw smoke 1×+3×, rendering/ros2/resource probes | — | ✅ 2026-06-07 |
-| SIM-1 | **S6** | `MavsdkSitlAdapter` (vendored-with-fixes) + per-drone config schema; **VM V1** + kill drill | SIM-0, S4 (S5 recommended) | ⬜ |
+| SIM-1 | **S6** | `MavsdkSitlAdapter` (vendored-with-fixes) + per-drone config schema; **VM V1** + kill drill | SIM-0, S4 (S5 recommended) | ✅ 2026-06-07 |
 | SIM-2 | S6 stretch | `replay_plot.py` (proven on the SIM-1 fixture) → `sitl3.json` → 3× headless swarm + drills — **HEADLESS SIM DONE** | SIM-1, S5 | ⬜ |
 | SIM-3 | S8 assets | Convoy world: markers (ArUco+QR), robots, pads, band-altitude cams; detection check — **∥ with S4–S7** | SIM-0 | ⬜ |
 | SIM-4 | **S8** core | `gazebo_video.py` + `search.py`; **V2a**: single drone logs sightings of MOVING markers | SIM-1, SIM-3, S7, S5 | ⬜ |
@@ -556,7 +556,91 @@ name WHAT/WHICH/CHECK; stop never touches mavsdk_server; PID lifecycle clean aft
 the two drill-earned fixes above came out of it). Mutation kill-check N/A: no new
 pytest-covered code (sim/ is validated by the live drills, by design).
 
-### SIM-1 — pending
+### SIM-1 — DONE 2026-06-07 (commit 5ee2bde + this evidence commit)
+
+**Deliverables**: `finals/flight/sitl_adapter.py` (vendored-with-fixes, recap §2 honored — no
+drone_control wrapping; every fix in the module docstring), `finals/config.py` per-drone
+`sitl_address`/`mavsdk_grpc_port` + sitl multi-drone validation + `resolve_sitl_endpoint`,
+`main._build_adapter` mavsdk_sitl branch, `configs/sitl.json` `command_timeout_s: 30`,
+`tests/test_sitl_adapter.py` (52 tests), `hypothesis` in requirements.txt, whitelist widening
+(conventions bullet 1 + test_conventions.py — reviewed), fixture
+`finals/tests/fixtures/sim1_v1_square.jsonl` committed (SIM-2's plotter gate input).
+
+**Design decisions (user-approved deviations from this handover)**: rotate() via
+position-setpoint YAW, not the velocity PID (single setpoint type; PX4 slews yaw
+MPC_YAWRAUTO_MAX; shortest-arc caveat documented; the vendored PID re-subscribed telemetry
+every 0.1 s); verified fact that reshaped the design: **mavsdk_server auto-resends the last
+setpoint at 20 Hz** → NO background streamer task; idle gaps cannot trip offboard-loss while
+the server lives.
+
+**Review bar**: adversarial review found 2 MAJORs, fixed pre-commit (unbounded
+`System.connect()` could hang past the adapter's own deadline; takeoff returning at the 0.9×
+poll threshold let the NEXT move re-anchor to the shortfall and fly the mission below band)
++ 8 minors (fixed: reconnect state reset, land-loop staleness, rate-setter deadline clamps,
+stream-end fallthroughs, top-level sitl_address validation, emergency-land budget fit,
+`_bounded` on every unary SDK await, NED-negation snapshot test). Mutation kill-check:
+6/6 KILLED in a HEAD-cut worktree (sin flip, RIGHT/LEFT swap, cm→m drop, rotate sign,
+fallback port, deleted distinct-ports validation).
+
+**Pytest**: Windows 478 passed (no mavsdk installed — proves method-local imports).
+VM 477 passed + the KNOWN pre-existing budget-expiry race (SIM-0 evidence; S4-owned;
+no new failures). The race also reproduced ONCE on Windows under session load —
+strengthens the S4 flag.
+
+**V1 gate (VM)** — `bash sim/launch_sitl.sh start 1` →
+`./run.sh -m finals.main --profile sitl --phases takeoff_demo`:
+
+```text
+[MavsdkSitlAdapter] alpha: connected in 1.7 s (gRPC 50051)
+[MavsdkSitlAdapter] alpha: health ready in 1.2 s
+[MavsdkSitlAdapter] alpha: airborne at 0.75 m in 12.9 s, offboard active
+4 x [ move(FORWARD, 100 cm) 1.7-2.0 s | rotate(90 deg) 1.0-1.7 s ]
+[MavsdkSitlAdapter] alpha: landed + disarmed in 4.5 s
+MISSION SUMMARY  elapsed=34.0s  ticks=34   alpha DONE 1/1   exit 0
+```
+
+mission.jsonl: full action_start/action_complete stream (enums by NAME), Land routed
+`route="safety"` (S5 controller), `agent_done` → `run_end exit_code 0`; fault.txt empty.
+Run dir 20260607_134322 = the committed fixture. Health-ready was 1.2 s here (instance had
+settled during launcher startup); the 30 s `command_timeout_s` covers the
+freshly-booted-instance case (EKF settle 10–25 s) per recap §8 — keep, do not shrink.
+
+**Battery scale verified**: heartbeat `battery_pct: 52.0` → mavsdk 3.15 `remaining_percent`
+is 0–100 (not 0–1). SITL battery drains fast (52 % after ~3 missions) — irrelevant for
+gates, relevant for long soak runs.
+
+**Drift (DR honesty calibration)**: origin (measured) N=0.025 E=-0.042 yaw=-95.97° (EKF
+boot heading ≠ 0 — the contract frame is per-boot; DR seeded from the origin event). DR
+final == origin (the square closes exactly); passive one-shot MAVSDK read after the run
+(measuring tape, not flight validation — recap §5): N=0.010 E=-0.030 →
+**|measured − DR| = 0.019 m horizontal** over 11 actions. Final measured yaw −90.06° vs
+−95.97° boot: ≈6° EKF heading shift across the flight (4 rotates at 2° tolerance + EKF) —
+the number to beat in SIM-2's 3× runs.
+
+**Kill drill (kill -9 px4_0 at the 2nd Move)**:
+- Typed failure in **1.22 s** (≪ the 30 s timeout): `FlightError: move(FORWARD, 100 cm)
+  aborted — telemetry is STALE (age 1.09 s > 1.00 s) — stream stalled; check ...` — the
+  STALENESS detector, exactly as designed: killing PX4 leaves mavsdk_server alive, so
+  streams go QUIET (no end, no exception); the dead-flag path covers server death instead.
+- emergency_land EXACTLY ONCE (`grep -c` = 1), `hung: false`; its offboard.stop/land/disarm
+  refusals each traceback-logged by the whitelisted swallows (mavsdk `TIMEOUT` ActionError —
+  PX4 is gone). kill→exit 17.4 s (the bounded emergency tail), **exit code 1**, no hang.
+- Observed: the gz server died with the px4_0 kill on this stack; the launcher's
+  state-aware `start 1` took the fresh-server path and recovered cleanly.
+
+**Stale-server drill (manufactured, run WITHOUT run.sh so the ADAPTER's cleanup is what's
+proven)**: planted a squatter `mavsdk_server -p 50051 udpin://0.0.0.0:14540` (alpha's
+ports) + a dummy `-p 50052`. Rerun V1 → connect()'s targeted
+`pkill -9 -f "mavsdk_server.*-p 50051( |$)"` EVICTED the squatter (observed SIGKILL),
+mission **DONE 1/1**; the 50052 dummy **SURVIVED** → targeting proven (recap §3 honored).
+Also observed: after any finals process exit (clean or exit-1), its own mavsdk_server child
+does NOT persist — the natural-stale case needs a SIGKILLed parent; the manufactured drill
+covers it more strictly anyway.
+
+**Notes for SIM-2**: bump VM to 4+ vCPU first (SIM-0 note stands); sitl3.json fields are
+validated + tested already (THREE_DRONES shape in test_sitl_adapter.py is the template);
+expect per-drone gRPC 50051/52/53 and spawn poses "0,0"/"0,1"/"0,2" documented in the
+sitl.json _comment; the budget-expiry race remains S4's.
 
 ### SIM-2 — pending
 
