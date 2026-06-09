@@ -246,14 +246,18 @@ _clock_sim_ms() {
 probe3() {
   local secs="${1:-15}"
   launch3 || return $?
-  echo "[probe3] measuring over ${secs}s (3 cams, llvmpipe)..."
+  echo "[probe3] measuring RTF + per-cam fps over ${secs}s (3 cams, llvmpipe)..."
 
+  # RTF from /clock (tiny messages); per-cam fps from 3 count-mode bridges — the
+  # SAME gz subscriber stageB3 runs, so this loads the render exactly like the
+  # real flight (NOT `gz topic -e`, which would stream full 640x480 frames as
+  # text and itself starve the box).
   local m0 w0; m0="$(_clock_sim_ms)"; w0=$SECONDS
-  # per-cam message counts over the window (background counters)
-  local i; declare -a cnt
-  local tmp="$RUN/probe3.$$"
+  local i
   for i in 0 1 2; do
-    ( timeout "$secs" gz topic -e -t "$(cam_topic_n "$i")" 2>/dev/null | grep -c 'header {' > "$tmp.$i" ) &
+    ( PYTHONNOUSERSITE=1 python3 "$REPO/sim/gz_camera_bridge.py" \
+        --topic "$(cam_topic_n "$i")" --count-secs "$secs" \
+        > "$RUN/probe3_cam$i.log" 2>&1 ) &
   done
   wait
   local m1 w1; m1="$(_clock_sim_ms)"; w1=$SECONDS
@@ -263,17 +267,22 @@ probe3() {
   if [ -n "$m0" ] && [ -n "$m1" ]; then
     rtf="$(awk -v a="$m0" -v b="$m1" -v w="$wall" 'BEGIN{printf "%.2f", (b-a)/1000.0/w}')"
   fi
-  echo "[probe3] --- RTF=${rtf} (sim ${m0}->${m1} ms over ${wall}s wall) ---"
-  local verdict="PASS" f
+  echo "[probe3] --- RTF=${rtf} (sim ${m0:-?}->${m1:-?} ms over ${wall}s wall) ---"
+  local verdict="PASS"
   for i in 0 1 2; do
-    local c; c="$(cat "$tmp.$i" 2>/dev/null || echo 0)"; rm -f "$tmp.$i"
-    local fps; fps="$(awk -v c="$c" -v w="$wall" 'BEGIN{printf "%.1f", c/w}')"
-    echo "[probe3] cam $i: ${c} frames -> ${fps} fps"
-    awk -v f="$fps" 'BEGIN{exit !(f < 8.0)}' && verdict="WARN"
+    local line fps
+    line="$(grep -m1 'BRIDGE FPS' "$RUN/probe3_cam$i.log" 2>/dev/null)"
+    if [ -z "$line" ]; then
+      echo "[probe3] cam $i: NO FRAMES — $(tail -1 "$RUN/probe3_cam$i.log" 2>/dev/null)"
+      verdict="WARN"; continue
+    fi
+    fps="$(echo "$line" | sed -n 's/.*fps=\([0-9.]*\).*/\1/p')"
+    echo "[probe3] cam $i: ${line#BRIDGE FPS }"
+    awk -v f="${fps:-0}" 'BEGIN{exit !(f < 8.0)}' && verdict="WARN"
   done
-  awk -v r="$rtf" 'BEGIN{exit !(r != "n/a" && r+0 < 0.9)}' 2>/dev/null && verdict="WARN"
+  awk -v r="$rtf" 'BEGIN{ if (r=="n/a") exit 1; exit !(r+0 < 0.9) }' && verdict="WARN"
   echo "[probe3] VERDICT: $verdict"
-  [ "$verdict" = "WARN" ] && echo "[probe3]  -> a cam <8 fps or RTF<0.9: drop x500_mono_cam_640 update_rate 15->10 and re-probe; size command_timeout_s/mission_budget_s in sitl3_vision.json from the RTF (slow != broken)." >&2
+  [ "$verdict" = "WARN" ] && echo "[probe3]  -> a cam <8 fps / no frames / RTF<0.9: drop x500_mono_cam_640 update_rate 15->10 and re-probe; size command_timeout_s + mission_budget_s in sitl3_vision.json from the RTF (slow != broken)." >&2
   stageB3_stop
 }
 
