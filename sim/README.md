@@ -140,3 +140,47 @@ real-time factor — physics stays correct, but slow runs trip wall-clock `timeo
 spuriously (recap §8): fix by config, never code. **Bump the VM to 4+ vCPUs in VMware
 settings before SIM-2's 3× swarm work.** RTF baseline numbers live in the SIM-0
 evidence block in `finals/docs/sim_sessions.md`.
+
+## SIM-3 — convoy world (gz-only; NO PX4, NO flight)
+
+A Gazebo-Harmonic world (`worlds/convoy.sdf`) with 5 marker-carrying robots orbiting a
+2 m circle through the origin, a 3-camera down-tower at the origin (1.2 / 1.7 / 2.2 m
+sentry bands), and 2 landing-pad markers. Proves markers render and are readable at the
+altitude bands → a px-vs-distance table **per marker type** that sets the sentry-altitude
+/ ArUco-vs-QR decision. Assets + scripts live under `sim/` (outside the conventions scan):
+`gen_markers.py`, `models/{convoy_robot_*,pad_*,mono_cam_640}`, `convoy_driver.py`
+(rclpy), `check_detection.py` (gz.transport13).
+
+**VM render gotcha (verified):** camera SENSOR geometry only renders under llvmpipe
+(`LIBGL_ALWAYS_SOFTWARE=1`) or ogre1 on this VM — the default ogre2+SVGA3D path emits
+BLANK camera frames (std 0 even on the stock `camera_sensor.sdf`). `run_convoy.sh`
+defaults to llvmpipe + `DISPLAY=:0`. The apt system cv2 4.5.4 also lacks QUIRC, so QR is
+LOCATED but not DECODED on the VM (QR non-viability at sentry altitude is shown by the
+located px being far below the decode floor; see the SIM-3 evidence block).
+
+Three interpreter contexts — **never crossed**: gz launch (any shell) · convoy_driver
+(ROS sourced, system 3.10) · check_detection (`PYTHONNOUSERSITE=1 python3`, system 3.10
+— gz bindings + apt cv2 4.5.4; NOT the .venv). Marker assets are generated on the
+**.venv** (cv2 ≥4.7 for `generateImageMarker`/`QRCodeEncoder`) and committed (ArUco skin).
+
+```bash
+# one shot: start gz -> ros_gz bridge + rclpy driver -> detection check -> stop
+bash sim/run_convoy.sh all 40             # 40 s capture at the top GL rung
+bash sim/run_convoy.sh all 40 --sw        # the REAL llvmpipe rung (LIBGL_ALWAYS_SOFTWARE=1)
+
+# QR pass (reskin the SAME model dirs, then restore the committed ArUco skin):
+source .venv/bin/activate
+python sim/gen_markers.py --type qr --kind robot --ids 7 11 23 42 88 --size-cm 20
+python sim/gen_markers.py --type qr --kind plane --prefix pad --ids 100 101 --size-cm 40
+deactivate
+bash sim/run_convoy.sh start
+bash sim/run_convoy.sh drive 65
+PYTHONNOUSERSITE=1 python3 sim/check_detection.py --secs 40 --allow-empty   # QR=finding, not fault
+bash sim/run_convoy.sh stop
+git checkout -- sim/models                # restore the committed ArUco textures
+```
+
+`GZ_SIM_RESOURCE_PATH` is set by `run_convoy.sh` to `sim/models` (so `model://` albedo
+paths and `<include>` resolve). `stop` uses the `pgrep -fa 'g[z] sim'` bracket form (the
+ssh-wrapper self-match trap). Convoy motion is the SIM-0-sanctioned rclpy→ros_gz→cmd_vel
+path into the VelocityControl plugins (kinematic, deterministic; two runs → same ID set).

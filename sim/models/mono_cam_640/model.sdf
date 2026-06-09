@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<sdf version="1.9">
+  <model name="mono_cam_640">
+    <!-- Stock gz `mono_cam` is 1280x960 @30Hz, HFOV 1.74 rad. This clone keeps the
+         HFOV and drops the resolution to 640x480 to match the pyhulax frame contract.
+
+         SIM-4 CONTRACT: horizontal_fov is KEPT at the stock value 1.74 rad.
+           camera_hfov_deg = 1.74 rad * 180/pi = 99.69 deg
+         SIM-4 copies 99.69 into the finals config `camera_hfov_deg` for bearing math.
+
+         Down-pointing is set by the spawn <pose> in the world (pitch +pi/2 -> +X optical
+         axis looks at -Z). The sensor publishes on the structural topic
+           /world/<world>/model/<model>/link/camera_link/sensor/camera/image  -->
+    <static>true</static>
+    <link name="camera_link">
+      <pose>0 0 0 0 0 0</pose>
+      <sensor name="camera" type="camera">
+        <camera>
+          <horizontal_fov>1.74</horizontal_fov>
+          <image>
+            <width>640</width>
+            <height>480</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.05</near>
+            <far>50.0</far>
+          </clip>
+        </camera>
+        <always_on>1</always_on>
+        <!-- 15 Hz (not 30): 4 simultaneous renders on a 4-vCPU VM; 15 Hz is ample for
+             marker detection and keeps RTF/first-frame warmup healthy (measured). -->
+        <update_rate>15</update_rate>
+        <visualize>true</visualize>
+      </sensor>
+    </link>
+  </model>
+</sdf>
