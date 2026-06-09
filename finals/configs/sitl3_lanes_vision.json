@@ -1,0 +1,26 @@
+{
+  "_comment": "S11 Workstream A (the strong-pipeline photo demo): = sitl3_vision.json but over the convoy_3lane world (3 cars in 3 DIVERGING straight lanes) with save_marker_frames ON. Each drone hovers (sentry_scan) over ONE lane, reads ONLY its car's unique ArUco id, and saves an annotated JPEG of it to runs_finals/<run>/marker_frames/<drone>/. Run via sim/run_vision.sh lanes3 (sets PX4_GZ_WORLD=convoy_3lane + LANES3_POSES + a straight convoy on ids 7/23/88 @ 0.2 m/s). DRONE<->CAR<->LANE: alpha (band 1.2, over car_7 @ ~(4.2,0)), bravo (band 1.7, over car_23 @ ~(-2,3.5)), charlie (band 2.2, over car_88 @ ~(-2,-3.5)). Spawns >=1.2 m from each car start and lanes >~5 m apart so the nadir footprints (r ~= 1.18*band) never overlap = clean 1-drone->1-car->1-id. Endpoints/ports identical to sitl3_vision.json: PX4 instance i -> udpin 1454<i>, mavsdk_server gRPC 5005<i+1>, onboard cam x500_mono_cam_640_<i> bridged to TCP gazebo_video_port 560<i>. Timeouts sized from the SIM-5 measured RTF (~0.86 at cam update_rate 5; clock is wall time.monotonic): command_timeout_s 90, mission_budget_s 500. camera_hfov_deg 99.69. detector none: ArUco (marker_backend) is the primary detector. VM-TUNE the LANES3_POSES + CONVOY_LINEAR so each car dwells under its drone during the scan.",
+  "profile": "sitl",
+  "flight_backend": "mavsdk_sitl",
+  "frame_backend": "gazebo",
+  "sitl_address": "udpin://0.0.0.0:14540",
+  "command_timeout_s": 90,
+  "mission_budget_s": 500,
+  "camera_hfov_deg": 99.69,
+  "marker_backend": "aruco",
+  "save_marker_frames": true,
+  "gazebo_video_host": "127.0.0.1",
+  "gazebo_video_port": 5600,
+  "detector": { "backend": "none" },
+  "drones": [
+    { "id": "alpha",   "phases": ["sentry_scan"], "altitude_band_m": 1.2,
+      "sitl_address": "udpin://0.0.0.0:14540", "mavsdk_grpc_port": 50051,
+      "gazebo_video_port": 5600, "zone": { "sentry_scan": { "revolutions": 2 } } },
+    { "id": "bravo",   "phases": ["sentry_scan"], "altitude_band_m": 1.7,
+      "sitl_address": "udpin://0.0.0.0:14541", "mavsdk_grpc_port": 50052,
+      "gazebo_video_port": 5601, "zone": { "sentry_scan": { "revolutions": 2 } } },
+    { "id": "charlie", "phases": ["sentry_scan"], "altitude_band_m": 2.2,
+      "sitl_address": "udpin://0.0.0.0:14542", "mavsdk_grpc_port": 50053,
+      "gazebo_video_port": 5602, "zone": { "sentry_scan": { "revolutions": 2 } } }
+  ]
+}

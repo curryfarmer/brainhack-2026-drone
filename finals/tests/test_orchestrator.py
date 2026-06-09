@@ -418,7 +418,8 @@ def _inject_fake_fleet(monkeypatch):
         pf, "_default_discover",
         lambda plane_ids, timeout_s: {p: f"10.0.0.{p}" for p in plane_ids})
     monkeypatch.setattr(aruco, "make_marker_detector",
-                        lambda backend: (lambda frame, source_id: []))
+                        lambda backend, save_dir=None:
+                        (lambda frame, source_id: []))
 
 
 def test_main_bench_preflight_only_runs_the_gate(tmp_path, monkeypatch):

@@ -20,6 +20,12 @@ Design (binding):
 - Detectors emit MINIMAL Sightings (ts/source/class_name/marker_id/bbox/
   confidence/frame_shape/frame_number); yaw/alt/bearing enrichment is the
   perception loop's job (dataclasses.replace — Sighting is frozen).
+- frame_path is the ONE exception (S11, config-gated by save_marker_frames):
+  the ArUco detector has the frame AND the corners in hand, so when main wires
+  a save_dir it draws cv2.aruco.drawDetectedMarkers + imwrites an annotated
+  JPEG and stamps Sighting.frame_path — mirroring the YOLO path, where the
+  DETECTOR (not perception) computes the saved path. Off by default: no
+  save_dir -> frame_path None, perception stays pure (no cv2).
 - Every numeric leaving cv2 is explicitly cast (int()/float()): numpy
   scalars otherwise leak into class_name (f"aruco_[17]") and into the
   SightingLog CSV codec, which dispatches on declared types.
@@ -49,7 +55,9 @@ cv2.aruco.generateImageMarker fixtures (finals/tests/fixtures/frames).
 """
 from __future__ import annotations
 
-from typing import Callable, List
+import os
+import sys
+from typing import Callable, List, Optional
 
 import cv2
 
@@ -81,8 +89,38 @@ def detect_aruco(frame: FrameStamped, drone_id: str) -> List[Sighting]:
     return make_marker_detector("aruco")(frame, drone_id)
 
 
+def _save_marker_frame(frame: FrameStamped, corners, ids, drone_id: str,
+                       save_dir: str) -> Optional[str]:
+    """Draw the detected markers on a copy of the frame and write it as an
+    annotated JPEG; return the path, or None on any write failure. Frame-save
+    is best-effort OBSERVABILITY: a failed write NEVER kills a detection — the
+    Sightings still flow, just with frame_path None. Mirrors
+    finals/vision/detector.py::_save_annotated (the YOLO save path)."""
+    annotated = frame.image.copy()
+    cv2.aruco.drawDetectedMarkers(annotated, corners, ids)
+    # frame_number + ts make the name unique without a counter (no module
+    # global — convention 4); frame_number may be None (some sources).
+    path = os.path.join(
+        save_dir,
+        f"aruco_{drone_id}_{frame.frame_number}_{int(frame.ts * 1000)}.jpg")
+    try:
+        ok = cv2.imwrite(path, annotated)
+    except cv2.error as e:
+        print(f"[aruco:{drone_id}] WARNING: imwrite({path!r}) raised: {e} — "
+              f"annotated frame not saved; detection unaffected",
+              file=sys.stderr, flush=True)
+        return None
+    if not ok:
+        print(f"[aruco:{drone_id}] WARNING: imwrite({path!r}) returned False — "
+              f"annotated frame not saved; check disk space / the .jpg "
+              f"extension; detection unaffected", file=sys.stderr, flush=True)
+        return None
+    return path
+
+
 def _detect_aruco_with(detector: "cv2.aruco.ArucoDetector",
-                       frame: FrameStamped, drone_id: str) -> List[Sighting]:
+                       frame: FrameStamped, drone_id: str,
+                       save_dir: Optional[str] = None) -> List[Sighting]:
     gray = cv2.cvtColor(frame.image, cv2.COLOR_BGR2GRAY)
     # THREE return values — the official example's syntax error dropped
     # `rejected` and would not even parse (see module docstring).
@@ -90,6 +128,11 @@ def _detect_aruco_with(detector: "cv2.aruco.ArucoDetector",
     if ids is None:
         return []
     shape = _frame_shape(frame.image)
+    # One annotated frame per detection pass (drawDetectedMarkers draws ALL
+    # markers); every Sighting on this frame shares the path. save_dir None
+    # (default) -> frame_path None, the minimal-Sighting behavior.
+    saved_path = (_save_marker_frame(frame, corners, ids, drone_id, save_dir)
+                  if save_dir is not None else None)
     sightings: List[Sighting] = []
     for marker_corners, marker_id in zip(corners, ids.flatten()):
         pts = marker_corners.reshape(4, 2)
@@ -105,6 +148,7 @@ def _detect_aruco_with(detector: "cv2.aruco.ArucoDetector",
             confidence=1.0,
             frame_shape=shape,
             frame_number=frame.frame_number,
+            frame_path=saved_path,
         ))
     return sightings
 
@@ -156,17 +200,31 @@ def _detect_qr_with(detector: "cv2.QRCodeDetector",
 # ============================================================
 # The pluggable seam
 # ============================================================
-def make_marker_detector(backend: str) -> MarkerDetector:
+def make_marker_detector(backend: str, *,
+                         save_dir: Optional[str] = None) -> MarkerDetector:
     """marker_backend name -> a detector closure holding ONE cv2 detector
     instance (built once, reused every frame). ConfigError on unknown names
-    — same loud-loader convention as the other backend resolvers."""
+    — same loud-loader convention as the other backend resolvers.
+
+    save_dir (S11 save_marker_frames, ArUco only): when set, the ArUco detector
+    writes an annotated JPEG per frame-with-markers and stamps frame_path. The
+    directory is created HERE, fail-loud, before any flight (mirrors
+    DetectorPool). None (default) keeps the minimal-Sighting behavior."""
     if backend == "aruco":
+        if save_dir is not None:
+            try:
+                os.makedirs(save_dir, exist_ok=True)
+            except OSError as e:
+                raise ConfigError(
+                    f"make_marker_detector('aruco'): cannot create save_dir "
+                    f"{save_dir!r} — errno {e.errno} ({e.strerror}) — check "
+                    f"the path / permissions (save_marker_frames)") from e
         detector = cv2.aruco.ArucoDetector(
             cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250),
             cv2.aruco.DetectorParameters())
 
         def _aruco(frame: FrameStamped, drone_id: str) -> List[Sighting]:
-            return _detect_aruco_with(detector, frame, drone_id)
+            return _detect_aruco_with(detector, frame, drone_id, save_dir)
         return _aruco
     if backend == "qr":
         detector = cv2.QRCodeDetector()

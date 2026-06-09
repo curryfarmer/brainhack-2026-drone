@@ -145,3 +145,49 @@ def test_make_marker_detector_seam():
     assert qr(frame, "a") == []                 # no QR on an aruco frame
     with pytest.raises(ConfigError, match="apriltag"):
         make_marker_detector("apriltag")
+
+
+# ============================================================
+# S11 — save_marker_frames (the photo demo)
+# ============================================================
+def test_no_save_dir_leaves_frame_path_none(tmp_path):
+    """The default (save_marker_frames off): minimal Sightings, no files."""
+    detector = make_marker_detector("aruco")            # save_dir omitted
+    sightings = detector(load_frame("000.png"), "alpha")
+    assert sightings and all(s.frame_path is None for s in sightings)
+    assert list(tmp_path.iterdir()) == []               # nothing written
+
+
+def test_save_marker_frames_writes_annotated_and_stamps_path(tmp_path):
+    """save_dir set -> one annotated JPEG per frame-with-markers, and EVERY
+    Sighting on that frame carries its path (drawDetectedMarkers draws all)."""
+    save_dir = str(tmp_path / "marker_frames" / "alpha")
+    detector = make_marker_detector("aruco", save_dir=save_dir)
+    assert os.path.isdir(save_dir), "save_dir is created at build time"
+    frame = load_frame("000.png", frame_number=5, ts=12.0)
+    sightings = detector(frame, "alpha")
+    assert len(sightings) == 3
+    paths = {s.frame_path for s in sightings}
+    assert len(paths) == 1                              # all share the one frame
+    path = paths.pop()
+    assert path is not None and os.path.isfile(path)
+    assert os.path.basename(path) == "aruco_alpha_5_12000.jpg"   # id_fnum_tsms
+    saved = cv2.imread(path)
+    assert saved is not None and saved.shape == frame.image.shape
+
+
+def test_save_marker_frames_blank_frame_writes_nothing(tmp_path):
+    """No markers -> no Sightings AND no file (we only save frames with reads)."""
+    save_dir = str(tmp_path / "frames")
+    detector = make_marker_detector("aruco", save_dir=save_dir)
+    assert detector(load_frame("002.png"), "alpha") == []
+    assert list(os.scandir(save_dir)) == []
+
+
+def test_save_marker_frames_bad_dir_fails_loudly(tmp_path):
+    """A save_dir that cannot be created dies on the ground (fail-loud), not
+    silently mid-flight — mirrors DetectorPool's save_dir guard."""
+    clash = tmp_path / "afile"
+    clash.write_text("not a dir")
+    with pytest.raises(ConfigError, match="save_dir"):
+        make_marker_detector("aruco", save_dir=str(clash / "frames"))

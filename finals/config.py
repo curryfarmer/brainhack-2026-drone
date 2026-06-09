@@ -139,6 +139,7 @@ class FinalsConfig:
     camera_hfov_deg: Optional[float] = None     # needed for Sighting.bearing_deg; bench-measured
     sitl_address: str = "udpin://0.0.0.0:14540"
     marker_backend: str = "aruco"               # "aruco" | "qr" — the primary detector seam (S7)
+    save_marker_frames: bool = False            # S11: aruco path saves an annotated JPEG per sighting (run_dir/marker_frames/<drone>)
     replay_dir: Optional[str] = None            # REQUIRED whenever frame_backend=replay
     replay_fps: float = 10.0                    # ReplaySource pacing (frames/s from disk)
     gazebo_video_host: str = "127.0.0.1"        # GazeboRgbSource <- sim/gz_camera_bridge endpoint
@@ -315,7 +316,8 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
             "run_dir", "tick_hz", "mission_budget_s", "command_timeout_s",
             "discovery_timeout_s",
             "min_battery_pct", "video_channel_order", "camera_hfov_deg",
-            "sitl_address", "marker_backend", "replay_dir", "replay_fps",
+            "sitl_address", "marker_backend", "save_marker_frames",
+            "replay_dir", "replay_fps",
             "gazebo_video_host", "gazebo_video_port",
             "use_uwb", "uwb_serial_port", "guards",
         ),
@@ -357,7 +359,8 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
             "run_dir", "tick_hz", "mission_budget_s", "command_timeout_s",
             "discovery_timeout_s",
             "min_battery_pct", "video_channel_order", "camera_hfov_deg",
-            "sitl_address", "marker_backend", "replay_dir", "replay_fps",
+            "sitl_address", "marker_backend", "save_marker_frames",
+            "replay_dir", "replay_fps",
             "gazebo_video_host", "gazebo_video_port",
             "use_uwb", "uwb_serial_port",
         ) if k in top},
