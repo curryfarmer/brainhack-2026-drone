@@ -41,11 +41,22 @@ FINALS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # dead-flag. Exactly three sites, each logging the full traceback:
 # emergency_land per-step (the ABC names emergency_land the one sanctioned
 # swallow in the flight stack), disconnect teardown, the stream wrapper.
+# S9 widening (reviewed, user-approved): flight/pyhulax_adapter.py — same
+# justification as sitl_adapter on the real backend. The blocking pyhulax SDK
+# raises an OPEN set (CommandTimeout/Rejected/NotReady/LowBattery/
+# DroneConnectionError + undocumented Wi-Fi-dropout surprises), so a typed
+# tuple cannot honor the never-raise/never-silent paths. Exactly three sites,
+# each logging the full traceback: the 2 Hz telemetry-poller tick (a poller
+# dying silently is the mapping_drone.py bug class — it sets a loud dead-flag
+# instead), emergency_land (the one sanctioned swallow in the flight stack),
+# and disconnect teardown. flight/discovery.py and vision/pyhulax_video.py stay
+# OFF this list by design — both are typed-only.
 EXCEPT_EXCEPTION_WHITELIST = {
     os.path.join("finals", "guards.py"),
     os.path.join("finals", "mission", "orchestrator.py"),
     os.path.join("finals", "vision", "detector.py"),
     os.path.join("finals", "flight", "sitl_adapter.py"),
+    os.path.join("finals", "flight", "pyhulax_adapter.py"),
 }
 
 # Modules that may import SDK/heavy-I/O packages at module top level.

@@ -397,23 +397,30 @@ def test_main_exit_code_1_when_a_drone_fails(tmp_path, monkeypatch):
 
 def test_main_bench_builds_inner_backend_first(tmp_path, monkeypatch):
     """The BenchAdapter special case: generic flight_cls(drone_id) would die
-    with BenchAdapter's TypeError; reaching the PyhulaxAdapter S9 stub
-    pointer proves the wiring builds the INNER backend first."""
+    with BenchAdapter's TypeError. Now that PyhulaxAdapter is real (S9), the
+    bench path builds BenchAdapter(PyhulaxAdapter) + phases cleanly and reaches
+    the preflight gate — the S10 stub pointer here proves the wiring got PAST
+    adapter construction (the inner backend built first). The direct
+    BenchAdapter(PyhulaxAdapter) wrap + flight-refusal coverage lives in
+    tests/test_pyhulax_adapter.py."""
     from finals.main import main
 
     monkeypatch.chdir(tmp_path)
-    with pytest.raises(NotImplementedError, match="S9"):
+    with pytest.raises(NotImplementedError, match="S10"):
         main(["--profile", "bench"])
 
 
 # (test_main_sitl_points_at_s6 was deleted in S6/SIM-1: MavsdkSitlAdapter is
 # now real — wiring/endpoint coverage lives in tests/test_sitl_adapter.py and
-# the flight path is the VM gate V1, sim_sessions.md SIM-1 evidence.)
+# the flight path is the VM gate V1, sim_sessions.md SIM-1 evidence.
+# test_main_real_points_at_s9 became _at_s10 in S9: PyhulaxAdapter is now real
+# too — its leaf coverage lives in tests/test_pyhulax_adapter.py, and both
+# bench and real now reach the S10 preflight stub.)
 
 
-def test_main_real_points_at_s9(tmp_path, monkeypatch):
+def test_main_real_points_at_s10(tmp_path, monkeypatch):
     from finals.main import main
 
     monkeypatch.chdir(tmp_path)
-    with pytest.raises(NotImplementedError, match="S9"):
+    with pytest.raises(NotImplementedError, match="S10"):
         main(["--profile", "real", "--i-know-this-arms-real-drones"])
