@@ -1,5 +1,5 @@
 {
-  "_comment": "S11 Workstream B (the moonshot active tracker): = sitl3_lanes_vision.json geometry (convoy_3lane world, 3 diverging straight lanes, save_marker_frames ON) but each drone runs the track_convoy phase instead of sentry_scan — it locks ONE car's unique ArUco id (track_marker_ids) and bearing-pursues the moving car, keeping it under the nadir camera, then gives up cleanly on budget and lands. DRONE<->CAR: alpha->7, bravo->23, charlie->88 (per-drone zone.track_convoy.track_marker_ids). approach_enabled true: sim is exactly where open-loop translation is PROVEN (gate-E discipline keeps it OFF on real HULA until move/rotate accuracy is measured onsite). Pursuit is bearing-based (Rotate to center on bearing_deg, then Move FORWARD), bounded by max_chase_cm (open-loop runaway cap) and investigate_budget_s (wall-clock give-up). Run via sim/run_vision.sh track3 (PX4_GZ_WORLD=convoy_3lane + a straight slow convoy on 7/23/88). Endpoints/ports/timeouts identical to sitl3_lanes_vision.json. VM-TUNE on the box: CONVOY_LINEAR (car speed vs the drone's chase rate), approach_cm/max_step_deg/track_dwell_s (chase aggression vs lockstep RTF ~0.86), max_chase_cm (arena size). lead_gain stays 0 (azimuth lead needs onsite calibration); core is fixed-step bearing pursuit.",
+  "_comment": "S11 Workstream B (the moonshot active tracker): = sitl3_lanes_vision.json geometry (convoy_3lane world, 3 diverging straight lanes, save_marker_frames ON) but each drone runs the track_convoy phase instead of sentry_scan — it locks ONE car's unique ArUco id (track_marker_ids) and bearing-pursues the moving car, keeping it under the nadir camera, then gives up cleanly on budget and lands. DRONE<->CAR: alpha->7, bravo->23, charlie->88 (per-drone zone.track_convoy.track_marker_ids). approach_enabled true: sim is exactly where open-loop translation is PROVEN (gate-E discipline keeps it OFF on real HULA until move/rotate accuracy is measured onsite). Pursuit is bearing-based (Rotate to center on bearing_deg, then Move FORWARD), bounded by max_chase_cm (open-loop runaway cap) and investigate_budget_s (wall-clock give-up). Run via sim/run_vision.sh track3 (PX4_GZ_WORLD=convoy_3lane + a straight slow convoy on 7/23/88). Endpoints/ports/timeouts identical to sitl3_lanes_vision.json. TUNED (2026-06-10, after the first VM run lost bravo's car ~16s into the chase): bravo band 1.7->2.2 to match charlie's bigger forgiving footprint (the 1.7 footprint walked off its still car under the open-loop FORWARD steps); approach_cm 40->25 + track_dwell_s 1.0 (gentler steps, re-observe more between moves) + lost_timeout_s 4->8 (a brief blip no longer drops the lock) on all 3. VM-TUNE on the box: CONVOY_LINEAR (car speed vs the drone's chase rate), approach_cm/max_step_deg/track_dwell_s (chase aggression vs lockstep RTF ~0.86), max_chase_cm (arena size). lead_gain stays 0 (azimuth lead needs onsite calibration); core is fixed-step bearing pursuit.",
   "profile": "sitl",
   "flight_backend": "mavsdk_sitl",
   "frame_backend": "gazebo",
@@ -17,19 +17,22 @@
       "sitl_address": "udpin://0.0.0.0:14540", "mavsdk_grpc_port": 50051,
       "gazebo_video_port": 5600,
       "zone": { "track_convoy": { "track_marker_ids": [7],
-        "approach_enabled": true, "approach_cm": 40, "max_step_deg": 25,
+        "approach_enabled": true, "approach_cm": 25, "max_step_deg": 25,
+        "track_dwell_s": 1.0, "lost_timeout_s": 8.0,
         "max_chase_cm": 800, "investigate_budget_s": 120.0 } } },
-    { "id": "bravo",   "phases": ["track_convoy"], "altitude_band_m": 1.7,
+    { "id": "bravo",   "phases": ["track_convoy"], "altitude_band_m": 2.2,
       "sitl_address": "udpin://0.0.0.0:14541", "mavsdk_grpc_port": 50052,
       "gazebo_video_port": 5601,
       "zone": { "track_convoy": { "track_marker_ids": [23],
-        "approach_enabled": true, "approach_cm": 40, "max_step_deg": 25,
+        "approach_enabled": true, "approach_cm": 25, "max_step_deg": 25,
+        "track_dwell_s": 1.0, "lost_timeout_s": 8.0,
         "max_chase_cm": 800, "investigate_budget_s": 120.0 } } },
     { "id": "charlie", "phases": ["track_convoy"], "altitude_band_m": 2.2,
       "sitl_address": "udpin://0.0.0.0:14542", "mavsdk_grpc_port": 50053,
       "gazebo_video_port": 5602,
       "zone": { "track_convoy": { "track_marker_ids": [88],
-        "approach_enabled": true, "approach_cm": 40, "max_step_deg": 25,
+        "approach_enabled": true, "approach_cm": 25, "max_step_deg": 25,
+        "track_dwell_s": 1.0, "lost_timeout_s": 8.0,
         "max_chase_cm": 800, "investigate_budget_s": 120.0 } } }
   ]
 }
