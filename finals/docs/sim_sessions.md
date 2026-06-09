@@ -94,7 +94,7 @@ after SIM-2; full sim after SIM-5.
 |---|---|---|---|---|
 | SIM-0 | env | VM bring-up: launch/stop scripts, raw smoke 1×+3×, rendering/ros2/resource probes | — | ✅ 2026-06-07 |
 | SIM-1 | **S6** | `MavsdkSitlAdapter` (vendored-with-fixes) + per-drone config schema; **VM V1** + kill drill | SIM-0, S4 (S5 recommended) | ✅ 2026-06-07 |
-| SIM-2 | S6 stretch | `replay_plot.py` (proven on the SIM-1 fixture) → `sitl3.json` → 3× headless swarm + drills — **HEADLESS SIM DONE** | SIM-1, S5 | ⬜ |
+| SIM-2 | S6 stretch | `replay_plot.py` (proven on the SIM-1 fixture) → `sitl3.json` → 3× headless swarm + drills — **HEADLESS SIM DONE** | SIM-1, S5 | ✅ 2026-06-09 |
 | SIM-3 | S8 assets | Convoy world: markers (ArUco+QR), robots, pads, band-altitude cams; detection check — **∥ with S4–S7** | SIM-0 | ⬜ |
 | SIM-4 | **S8** core | `gazebo_video.py` + `search.py`; **V2a**: single drone logs sightings of MOVING markers | SIM-1, SIM-3, S7, S5 | ⬜ |
 | SIM-5 | S8 full | 3 camera-drones, full mission, all drills — **FULL SIM DONE** + residual-gaps list for S10 | SIM-2, SIM-4 | ⬜ |
@@ -667,7 +667,133 @@ validated + tested already (THREE_DRONES shape in test_sitl_adapter.py is the te
 expect per-drone gRPC 50051/52/53 and spawn poses "0,0"/"0,1"/"0,2" documented in the
 sitl.json _comment; the budget-expiry race remains S4's.
 
-### SIM-2 — pending
+### SIM-2 — DONE 2026-06-09 (commit 2b5904c [tool/config] + this evidence commit [adapter fix + docs])
+
+**Deliverables**: `finals/tools/replay_plot.py` + `finals/tools/__init__.py` + `finals/tests/test_replay_plot.py`
+(34 tests) + `finals/configs/sitl3.json` (all in 2b5904c); `finals/docs/evidence/sim2_3drone.png`
+(this commit); **`finals/flight/sitl_adapter.py` offboard-start race fix** + 6 new constructor tests
+(this commit — see below).
+
+**replay_plot design (reviewed + fixture-pinned)**: origin-seeded DR (EKF boot yaw ≠ 0 — the SIM-1
+fixture booted −95.97°; assuming 0 renders every track rotated); per-drone subplots NEVER merged
+(each drone's "north" is its OWN boot heading — overlaying frames is geometrically false; spawn-pose
+offsets in the config `_comment` are documentation only); exact-field-set schema firewall
+(`reconstruct_action` re-builds typed Actions via the real `DeadReckoner`, never reimplements the math —
+unknown action/Direction/field-set → typed `ReplayPlotError`); null-origin leniency (PositionQuality.NONE
+seeds 0 with a LOUD stderr warning, never errors — must still render real-hardware logs); signed shoelace
+area **+1.0 m²** is the chirality+scale pin (CCW square, yaw-invariant). matplotlib lazy-imported with
+`Agg` before pyplot when `--save` given (headless). All 34 tests + the conventions scan green.
+
+**sitl3.json**: alpha/bravo/charlie, udpin 14540/41/42, gRPC 50051/52/53, bands 1.2/1.7/2.2 m
+(= takeoff 120/170/220 cm via `takeoff_demo.from_config`), `command_timeout_s 30`,
+`frame_backend "none"` (deliberate until SIM-5 wires gazebo frames). Schema THREE_DRONES-validated
+(`test_sitl_adapter.py`). Spawn poses `0,i` = 1 m north apart (launcher PX4_GZ_MODEL_POSE).
+
+**VM**: nproc **4** (bumped from 2 in VMware before this session — RTF margin per recap §8), reachable
+`ssh bhvm` (192.168.174.128 unchanged), venv `.venv` (py3.11 + matplotlib). `git pull` → 2b5904c.
+
+**Pytest**: Windows **512 passed** (deterministic, no mavsdk). VM: the full suite shows the
+**S4-owned budget-expiry race** (`test_budget_expiry_lands_all_and_exits_clean`, SIM-0/SIM-1 evidence)
+PLUS a **second newly-observed platform race**, `test_agent.py::test_stale_telemetry_fails_loud_before_acting`
+— deterministic FakeClock test, passes **5/5 isolated** and 3/4 full-suite runs; fails only under full-suite
+asyncio load. `agent.py` is UNTOUCHED by SIM-2 (the commit added only tool/test/config files → extra
+collection load merely exposed a latent race). Same class as budget-expiry → **owner: S4**. Gate
+("no NEW regressions") met. Post-fix `test_sitl_adapter.py` **58 passed** both OSes (52 + 6 new).
+
+**⚠ THE 3× GATE FOUND A REAL BUG (the gate working as designed)** — `OffboardError: NO_SETPOINT_SET`
+on takeoff. First fresh-instance 3× run: **all three FAILED** at `offboard.start()`; a re-run: alpha+bravo
+DONE, charlie failed — intermittent + per-drone. Root cause: PX4 accepts `offboard.start()` only while
+receiving a fresh setpoint stream; the 20 Hz mavsdk_server auto-resend covers an ALREADY-active session,
+but before `start()` there is just the one priming setpoint, and under 3-instance gRPC contention it is not
+always registered in time. Single-drone V1 (SIM-1) always had the headroom; the 3× swarm reliably tripped
+≥1 drone. **Fix** (`sitl_adapter.py` takeoff offboard-entry): re-prime the hold setpoint + retry `start()`
+on NO_SETPOINT_SET only, bounded by `offboard_start_tries` (default 5) AND the command deadline; every
+other OffboardError/RpcError still fails loud on the first hit. Module docstring updated (convention 7).
+Adversarial review + mutation kill-check: default-5 and the int≥1 validation killed by the 6 new
+constructor tests; the "remove retry" mutant killed by the live gate (pre-fix all-3 NO_SETPOINT_SET vs
+post-fix re-prime recovery). **No leak above the FlightAdapter — sim-only PX4 stand-in, pinned to SITL
+mavsdk 3.15.3** (recap §1).
+
+**3× gate (VM, fresh batteries, post-fix)** — `start 3` → `time ./run.sh -m finals.main --profile sitl
+--config finals/configs/sitl3.json` (run dir `20260609_114513`):
+
+```text
+charlie/bravo/alpha: connected 1.5–1.8 s, health ready 0.6–1.0 s
+[MavsdkSitlAdapter] charlie: offboard start NO_SETPOINT_SET — re-priming (attempt 1/5)
+[MavsdkSitlAdapter] charlie: airborne at 2.05 m in 11.2 s, offboard active      <- 220 cm band
+[MavsdkSitlAdapter] alpha:   offboard start NO_SETPOINT_SET — re-priming (attempt 1/5)
+[MavsdkSitlAdapter] alpha:   airborne at 1.11 m ...                              <- 120 cm band
+[MavsdkSitlAdapter] bravo:   airborne at 1.56 m ... (clean, no retry)            <- 170 cm band
+4× [ move(FORWARD,100) | rotate(90) ] per drone, then land+disarm
+MISSION SUMMARY  elapsed=42.4s  ticks=43   alpha DONE 1/1  bravo DONE 1/1  charlie DONE 1/1   EXIT=0
+```
+
+The log is the fix's own proof: the race STILL occurs under contention (charlie + alpha each hit it once)
+and is transparently recovered on retry attempt 1. Takeoff `height_cm` 120/170/220 one drone each;
+`grep -c '"event": "emergency_land"'` = **0**; wall **43.1 s**. **RTF ≈ 0.86–1.02** (mostly ~1.00,
+one transient dip) from `/stats` during the flight — matches the SIM-0 baseline at the new 4 vCPU.
+
+**Replay PNG** (`finals/docs/evidence/sim2_3drone.png`, generated ON the VM = headless Agg in situ,
+scp'd as bytes): three per-drone subplots, each a CLOSED ~1 m square, CCW yaw quivers tangent to travel,
+start/end markers coincident (closure), tilted ≈ −96° boot yaw, finals N±0.04 E±0.03 alt 0.00, 11 actions
+each. Eyeballed ✓.
+
+**Drill A — kill bravo's PX4 mid-mission** (`kill -9 $(cat sim/run/px4_1.pid)` after bravo's 2nd Move;
+run dir `20260609_115711`):
+
+```text
+bravo FAILED: "Rotate failed: bravo: rotate(90 deg) aborted — telemetry is STALE (age 1.08 s > 1.00 s)
+              — stream stalled; check the PX4 instance for udpin://0.0.0.0:14541 ..."
+bravo events: action_start → action_failed → emergency_land → agent_failed → agent_disconnect
+emergency_land  grep -c '"event": "emergency_land"'  = 1  (drone_bravo.jsonl AND mission.jsonl)
+run_end exit_code 1  states {alpha DONE, bravo FAILED, charlie DONE}  (2 ok / 1 failed)
+```
+
+The STALENESS detector (kill px4 → mavsdk_server lives → streams go QUIET) fired at age 1.08 s, exactly
+the SIM-1 physics. emergency_land's offboard.stop / land / disarm each TIMEOUT (PX4 gone) — traceback-logged
+by the whitelisted swallows, latched exactly once, no hang. (First attempt at this drill was INVALID — a
+stale-run-dir race in the harness killed px4 before bravo connected, yielding a connect-failure instead;
+re-run parsing the run dir from run.sh's own stdout gave the clean mid-move kill above.)
+
+**Drill B — 'q' abort, headless** (needs a TTY: driven via a Python `pty.openpty()` harness so
+`isatty` is true and the AbortListener arms — `expect` is not installed; plain ssh gives "stdin EOF —
+abort key disabled"):
+
+```text
+[AbortListener] abort key armed: press 'q' + Enter to LAND ALL drones
+(all 3 airborne) → inject 'q\n'
+[AbortListener] OPERATOR ABORT ('q'): landing ALL drones
+[Orchestrator] OPERATOR ABORT (abort key): landing all drones cleanly
+charlie/alpha/bravo: landed + disarmed
+MISSION SUMMARY  elapsed=29.7s  alpha DONE 0/1  bravo DONE 0/1  charlie DONE 0/1   EXIT=0
+```
+
+Clean operator abort = land-all → all three DONE (phases incomplete, as expected — abort interrupts
+mid-square), exit 0.
+
+**Drill C — kill bravo's mavsdk_server** (`pkill -9 -f 'mavsdk_server.*-p 50052'`, targeted per recap §3,
+at bravo's 2nd Move; run dir `20260609_120214`) — the DISTINCT dead-flag path (SIM-1 never exercised it
+in a swarm):
+
+```text
+bravo FAILED: "Rotate failed: bravo: rotate(90 deg) aborted — in_air stream DIED: see stderr
+              — PX4 instance dead? ..."   (poller_dead='in_air stream DIED', NOT the staleness message)
+emergency_land = 1   run_end exit_code 1   {alpha DONE, bravo FAILED, charlie DONE}
+```
+
+Killing the server (not PX4) ENDS the gRPC streams → the adapter's stream-wrapper sets the dead-flag →
+typed FlightError on the next command poll. Different trigger, same fail-loud outcome, no hang.
+
+**Cleanliness**: `bash sim/launch_sitl.sh stop` → "no px4/gz processes remain";
+`pgrep -fa 'p[x]4|g[z] sim'` → **CLEAN** (bracket form, recap §3 / sim/README self-match trap).
+
+**Notes for SIM-3/4/5**: SITL battery drains across consecutive flights on the SAME instances
+(SIM-1-known: ~52% after ~3 missions) → a 4th/5th back-to-back run trips "Battery unhealthy →
+not armable → EKF-health timeout" on the most-flown instance. ALWAYS `stop` + `start 3` (fresh PX4 =
+full battery) before each drill/run; never reuse instances across many missions. World stats topic is
+`/stats`. The budget-expiry AND stale-telemetry full-suite races remain S4-owned (no NEW SIM-2 failures).
+
+**HEADLESS SIM DONE**
 
 ### SIM-3 — pending
 

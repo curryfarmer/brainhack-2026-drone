@@ -197,6 +197,13 @@ def test_constructor_holds_endpoint_without_mavsdk():
     assert a.degraded is False
 
 
+def test_offboard_start_tries_default_and_custom():
+    # The SIM-2 NO_SETPOINT_SET re-prime budget — must default >1 (one shot is
+    # the very bug the retry fixes) and stay tunable.
+    assert make_adapter()._offboard_start_tries == 5
+    assert make_adapter(offboard_start_tries=3)._offboard_start_tries == 3
+
+
 @pytest.mark.parametrize("kw, match", [
     (dict(sitl_address=""), "sitl_address"),
     (dict(sitl_address=14540), "sitl_address"),
@@ -208,6 +215,9 @@ def test_constructor_holds_endpoint_without_mavsdk():
     (dict(fresh_s=float("inf")), "fresh_s"),
     (dict(yaw_tol_deg=-1.0), "yaw_tol_deg"),
     (dict(poll_period_s=0), "poll_period_s"),
+    (dict(offboard_start_tries=0), "offboard_start_tries"),
+    (dict(offboard_start_tries=2.0), "offboard_start_tries"),
+    (dict(offboard_start_tries=True), "offboard_start_tries"),
 ])
 def test_constructor_rejects_bad_args(kw, match):
     with pytest.raises(ValueError, match=match):

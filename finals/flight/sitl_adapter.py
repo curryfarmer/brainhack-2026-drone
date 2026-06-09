@@ -52,6 +52,16 @@ streamer task exists here on purpose. The arrival loops still re-send their
 setpoint each poll tick (the field-proven qualifier pattern, belt and
 suspenders). Server death is detected via the dead-flag/staleness paths.
 
+Offboard-start race (SIM-2 3x gate, fixed): offboard.start() is accepted only
+once PX4 is receiving a fresh setpoint stream. The 20 Hz auto-resend covers an
+ALREADY-active session; before start() there is just the priming setpoint.
+Under 3-instance gRPC contention that lone setpoint is not always registered
+before start() and PX4 rejects NO_SETPOINT_SET (V1 single-drone always had the
+headroom; the 3x swarm reliably tripped >= 1 drone). takeoff() now re-primes +
+retries start() (bounded by offboard_start_tries AND the command deadline) on
+NO_SETPOINT_SET only; every other OffboardError/RpcError still fails loud on
+the first hit.
+
 mavsdk imports are METHOD-LOCAL: this module must import and construct on the
 Windows dev venv where mavsdk is not installed (the pure helpers below are
 unit-tested there against DeadReckoner — the hypothesis property gate).
@@ -199,7 +209,8 @@ class MavsdkSitlAdapter(FlightAdapter):
                  arrival_m: float = 0.15,
                  yaw_tol_deg: float = 2.0,
                  fresh_s: float = 1.0,
-                 poll_period_s: float = 0.1):
+                 poll_period_s: float = 0.1,
+                 offboard_start_tries: int = 5):
         if not isinstance(drone_id, str) or not drone_id:
             raise ValueError(
                 f"MavsdkSitlAdapter: drone_id must be a non-empty str, got "
@@ -226,6 +237,12 @@ class MavsdkSitlAdapter(FlightAdapter):
                 raise ValueError(
                     f"MavsdkSitlAdapter({drone_id!r}): {name} must be finite "
                     f"and > 0, got {value!r}")
+        if (not isinstance(offboard_start_tries, int)
+                or isinstance(offboard_start_tries, bool)
+                or offboard_start_tries < 1):
+            raise ValueError(
+                f"MavsdkSitlAdapter({drone_id!r}): offboard_start_tries must "
+                f"be an int >= 1, got {offboard_start_tries!r}")
 
         self._sitl_address = sitl_address
         self._grpc_port = grpc_port
@@ -233,6 +250,7 @@ class MavsdkSitlAdapter(FlightAdapter):
         self._yaw_tol_deg = float(yaw_tol_deg)
         self._fresh_s = float(fresh_s)
         self._poll_period_s = float(poll_period_s)
+        self._offboard_start_tries = int(offboard_start_tries)
 
         self._system = None                       # mavsdk System, set in connect
         self._state = _TelemetryState()
@@ -617,21 +635,47 @@ class MavsdkSitlAdapter(FlightAdapter):
                     f"{height_m:.2f} m)")
             await asyncio.sleep(self._poll_period_s)
 
-        # Offboard entry: ONE hold setpoint at the current heading, target
+        # Offboard entry: prime a hold setpoint at the current heading, target
         # altitude = the COMMANDED height (not the 0.9x poll threshold —
         # offboard finishes the climb). Then start offboard. The yaw-snap fix
         # (module docstring) lives exactly here.
+        #
+        # PX4 accepts offboard.start() only while it is receiving a fresh
+        # setpoint stream (>= 2 Hz). mavsdk_server auto-resends the last
+        # setpoint at 20 Hz, but that stream only spins up AROUND the first
+        # set_position_ned — under 3-instance gRPC contention (SIM-2) the lone
+        # pre-start setpoint is not always registered before start(), and PX4
+        # rejects NO_SETPOINT_SET. Re-prime + retry start() within the command
+        # deadline kills that race; ANY other OffboardError / RpcError still
+        # fails loud on the first hit. V1 single-drone never raced — it
+        # succeeds on attempt 1, so the retry is dormant there.
         hold = (self._state.north_m, self._state.east_m,
                 home_down_m - height_m, self._state.psi_deg)
-        try:
-            await self._bounded(
-                self._system.offboard.set_position_ned(PositionNedYaw(*hold)),
-                deadline, t0, detail, "hold setpoint")
-            await asyncio.sleep(0.3)   # a few auto-resent frames pre-start
-            await self._bounded(self._system.offboard.start(),
-                                deadline, t0, detail, "offboard start")
-        except (OffboardError, grpc.RpcError) as e:
-            raise self._flight_error(f"{detail} offboard start", e) from e
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                await self._bounded(
+                    self._system.offboard.set_position_ned(
+                        PositionNedYaw(*hold)),
+                    deadline, t0, detail, "hold setpoint")
+                await asyncio.sleep(0.3)   # a few auto-resent frames pre-start
+                await self._bounded(self._system.offboard.start(),
+                                    deadline, t0, detail, "offboard start")
+                break
+            except OffboardError as e:
+                result = getattr(e, "_result", None)
+                no_setpoint = (result is not None
+                               and result.result.name == "NO_SETPOINT_SET")
+                if (no_setpoint and attempt < self._offboard_start_tries
+                        and time.monotonic() < deadline):
+                    self._log(
+                        f"offboard start NO_SETPOINT_SET — re-priming "
+                        f"(attempt {attempt}/{self._offboard_start_tries})")
+                    continue
+                raise self._flight_error(f"{detail} offboard start", e) from e
+            except grpc.RpcError as e:
+                raise self._flight_error(f"{detail} offboard start", e) from e
         self._last_setpoint = hold
         self._offboard_active = True
 
