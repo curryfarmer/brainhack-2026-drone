@@ -36,9 +36,10 @@ after SIM-2; full sim after SIM-5.
 6. **Fail-loud applies in `sim/` too**: every wait has a deadline; scripts exit nonzero with
    WHAT / WHICH instance / WHAT-TO-CHECK messages. (And remember for `finals/` work: the
    conventions test greps RAW source — banned phrases stay out of docstrings/comments too.)
-7. **Marker duality**: organizer intel says **QR, 20×20 cm**, but literal-QR vs
-   loosely-said-ArUco is UNCONFIRMED (module_map open questions). All marker assets and
-   detection checks support BOTH types; the px-vs-distance table is reported PER TYPE.
+7. **Marker type — RESOLVED (user, 2026-06-09): ArUco, NOT QR** (the earlier "QR, 20×20 cm"
+   was loose phrasing). `marker_backend` stays "aruco" (default); the QR path is a dormant
+   seam. SIM-3 built+tested both and confirmed ArUco decodes at all sentry altitudes (QR did
+   not) — so SIM-4/5 run the ArUco skin (`gen_markers.py --type aruco`, the committed default).
 8. **Lockstep RTF vs wall-clock**: an overloaded VM slows sim time but physics stays correct
    — slow runs trip `timeout_s` SPURIOUSLY. Record RTF in every evidence block; the fix is
    config (`command_timeout_s`), never code.
