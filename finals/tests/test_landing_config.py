@@ -87,26 +87,32 @@ def test_safety_carries_bounded_launch_slot():
 # ============================================================
 # 2. Fail-loud on a duplicate pad / an invalid pad / a missing arena
 # ============================================================
-def test_duplicate_pad_target_is_caught(tmp_path):
-    """Two drones aimed at the SAME pad is a collision waiting to happen —
-    the schema must not silently accept it. (Here we assert the navigate
-    phase resolves it but distinctness is the operator's contract; we pin
-    that pointing two drones at one pad is at least detectable.)"""
+def test_duplicate_pad_target_is_refused(tmp_path):
+    """Two drones aimed at the SAME pad cannot both score it (they fight for
+    one physical pad / one scores zero) — the loader must REFUSE it LOUD, not
+    silently accept it. (Was test_duplicate_pad_target_is_caught, which only
+    asserted observability and passed with or without a guard — batch-2 NAV
+    review R1-MED-1/2.)"""
     raw = _raw()
+    dup = raw["drones"][0]["zone"]["navigate"]["pad_id"]
     # Point bravo at alpha's pad.
-    raw["drones"][1]["zone"]["navigate"]["pad_id"] = \
-        raw["drones"][0]["zone"]["navigate"]["pad_id"]
+    raw["drones"][1]["zone"]["navigate"]["pad_id"] = dup
     p = tmp_path / "dup.json"
     p.write_text(json.dumps(raw), encoding="utf-8")
-    cfg = load_config(str(p))   # load itself is fine (per-drone valid)
-    targets = [d.zone["navigate"]["pad_id"] for d in cfg.drones]
-    assert len(set(targets)) < 3, "duplicate pad target must be observable"
+    with pytest.raises(ConfigError) as ei:
+        load_config(str(p))
+    msg = str(ei.value)
+    # Names BOTH colliding drones + the pad (actionable WHICH).
+    assert "alpha" in msg and "bravo" in msg and dup in msg
+    assert "duplicate" in msg.lower()
 
 
-def test_invalid_pad_target_is_caught_by_land_on_pad(tmp_path):
-    """Navigating to a pad is geometric; the SAFETY net is land_on_pad's
-    valid_marker_ids. Aim a drone's navigate at a RED pad and assert it is a
-    red pad (so the operator knows land_on_pad will refuse it / score zero)."""
+def test_invalid_red_pad_target_is_refused(tmp_path):
+    """A drone whose navigate target is a RED (valid=false) decoy pad would
+    never acquire a valid marker (land_on_pad refuses it / scores zero) — the
+    loader must REFUSE it LOUD at load time, not plan blindly to it. (Was
+    test_invalid_pad_target_is_caught_by_land_on_pad, which only asserted the
+    pad was red — batch-2 NAV review R2 LOW BUG.)"""
     cfg = load_config(_PATH)
     reds = [p.id for p in cfg.arena.pads if not p.valid]
     assert reds, "sample arena should have red pads to test against"
@@ -114,9 +120,63 @@ def test_invalid_pad_target_is_caught_by_land_on_pad(tmp_path):
     raw["drones"][0]["zone"]["navigate"]["pad_id"] = reds[0]
     p = tmp_path / "red.json"
     p.write_text(json.dumps(raw), encoding="utf-8")
-    cfg2 = load_config(str(p))    # navigate to a red pad still PLANS (geometry)
-    pads_by_id = {pad.id: pad for pad in cfg2.arena.pads}
-    assert pads_by_id[reds[0]].valid is False
+    with pytest.raises(ConfigError) as ei:
+        load_config(str(p))
+    msg = str(ei.value)
+    assert "alpha" in msg and reds[0] in msg
+    assert "red" in msg.lower() or "valid=false" in msg.lower()
+
+
+def test_too_few_valid_pads_for_drones_is_refused(tmp_path):
+    """Case (c): if the arena holds FEWER valid (green) pads than the number of
+    drones navigating to a pad, distinct valid targets cannot be satisfied —
+    refuse LOUD. We mutate two of the three GREEN sample pads to red so the
+    arena holds only 1 valid pad for 3 navigating drones (and give the 3 drones
+    distinct, valid-at-write-time targets so it is the CAPACITY guard, not the
+    dup/red guard, that fires)."""
+    # Copy the real config + a mutated arena into tmp so arena_name resolves to
+    # the mutated map (config.py looks for <arena_name>.json beside the config).
+    raw = _raw()
+    arena_path = os.path.join(_CONFIG_DIR, "arenas", "sample.json")
+    with open(arena_path, "r", encoding="utf-8") as f:
+        arena_raw = json.load(f)
+    greens = [pad for pad in arena_raw["pads"] if pad.get("valid")]
+    assert len(greens) >= 3, "sample arena should ship >= 3 green pads"
+    # Flip all but ONE green pad to red -> only 1 valid pad remains.
+    for pad in greens[1:]:
+        pad["valid"] = False
+    only_valid = greens[0]["id"]
+    # Isolate the (c) CAPACITY guard from (a) dup + (b) red: drone 0 keeps the
+    # one surviving green pad (valid, distinct), drones 1 + 2 navigate to an
+    # explicit goal_ne_m coord (EXEMPT from (a)/(b) but still COUNTED toward
+    # (c)). So: 1 valid pad < 3 navigating drones -> (c) fires.
+    raw["drones"][0]["zone"]["navigate"]["pad_id"] = only_valid
+    for i in (1, 2):
+        del raw["drones"][i]["zone"]["navigate"]["pad_id"]
+        raw["drones"][i]["zone"]["navigate"]["goal_ne_m"] = [3.0, 3.0]
+    arena_dir = tmp_path / "arenas"
+    arena_dir.mkdir()
+    (arena_dir / "sample.json").write_text(json.dumps(arena_raw),
+                                           encoding="utf-8")
+    p = tmp_path / "fewpads.json"
+    p.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ConfigError) as ei:
+        load_config(str(p))
+    msg = str(ei.value)
+    assert "valid" in msg.lower() and "pad" in msg.lower()
+    assert "3" in msg          # 3 navigating drones named
+
+
+def test_shipped_config_pad_targets_load_clean():
+    """Regression guard: landing_real.json's 3 pad targets are DISTINCT +
+    VALID, so the new cross-drone pad-target guard does NOT reject the shipped
+    config."""
+    cfg = load_config(_PATH)
+    targets = [d.zone["navigate"]["pad_id"] for d in cfg.drones]
+    assert len(set(targets)) == 3
+    valid_ids = {pad.id for pad in cfg.arena.pads if pad.valid}
+    for t in targets:
+        assert t in valid_ids
 
 
 def test_nonexistent_pad_id_fails_loud(tmp_path):

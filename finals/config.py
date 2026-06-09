@@ -626,6 +626,98 @@ def _validate(cfg: FinalsConfig, config_dir: str) -> None:
     _validate_detector(cfg.detector, config_dir)
     _validate_guards(cfg)
     _resolve_arena(cfg, config_dir)
+    # AFTER the arena is resolved (cfg.arena populated): cross-drone landing-pad
+    # target guard (NAV-8). When a drone's navigate phase names a pad_id, that
+    # pad is its scored landing target. Two drones on ONE pad, a drone aimed at a
+    # RED (valid=false) decoy, or more pad-navigating drones than the arena has
+    # VALID pads are all guaranteed mission/score failures the per-drone build
+    # (Navigate.from_config) is structurally blind to — it sees one drone + the
+    # global cfg and only checks the pad EXISTS. We cross-check the whole drone
+    # list HERE, on the ground, loudly (the weights-guard philosophy). Drones
+    # whose goal is an explicit goal_ne_m coord (NOT a pad_id) are EXEMPT from the
+    # distinct/valid checks (a coord cannot be matched against a pad) but still
+    # count toward the (c) drone-vs-valid-pads tally.
+    _validate_pad_targets(cfg)
+
+
+def _navigate_pad_id(drone: "DroneConfig") -> Optional[str]:
+    """The pad_id a drone's navigate phase targets, or None when the drone has
+    no navigate phase OR its navigate goal is an explicit goal_ne_m coord (not a
+    pad). Only a present navigate phase + a present pad_id counts (the guard
+    enforces ONLY when both are actually there — no silent skip otherwise)."""
+    if "navigate" not in drone.phases:
+        return None
+    nav = drone.zone.get("navigate")
+    if not isinstance(nav, dict):
+        return None
+    pad_id = nav.get("pad_id")
+    # A non-string pad_id (or a missing one) is not a pad target HERE — the
+    # per-phase Navigate.from_config validates the pad_id's shape/existence; this
+    # cross-drone guard only reasons about real pad-id strings.
+    return pad_id if isinstance(pad_id, str) and pad_id else None
+
+
+def _validate_pad_targets(cfg: FinalsConfig) -> None:
+    """Cross-drone landing-pad target guard (NAV-8). Refuses LOUD when:
+      (a) two drones target the SAME pad_id (they cannot both score one pad);
+      (b) a drone's navigate pad_id names a pad with valid==False (a red pad is
+          never a scored landing target — land_on_pad would never acquire it);
+      (c) the arena has FEWER valid pads than the number of drones navigating to
+          a pad (distinct valid targets cannot be satisfied).
+    Drones whose navigate goal is goal_ne_m (a coord, not a pad_id) are EXEMPT
+    from (a)/(b) but still counted toward (c)'s navigating-drone tally. Enforced
+    only when the arena is present (no arena -> navigate refuses at phase-build,
+    a separate guard)."""
+    arena = cfg.arena
+    if arena is None:
+        return
+    # Drones whose navigate goal is a pad_id (the ones (a)/(b) apply to)...
+    pad_targets = [(d.id, _navigate_pad_id(d)) for d in cfg.drones]
+    pad_targets = [(did, pid) for did, pid in pad_targets if pid is not None]
+    # ...and the full count of drones that navigate to ANY goal (pad OR coord),
+    # for the (c) capacity check. A coord-goal drone still consumes a slot.
+    navigating = [d for d in cfg.drones
+                  if "navigate" in d.phases
+                  and isinstance(d.zone.get("navigate"), dict)]
+
+    pads_by_id = {p.id: p for p in arena.pads}
+    valid_pad_ids = {p.id for p in arena.pads if p.valid}
+
+    # (b) red-pad target — a drone aimed at a known invalid (red) pad.
+    for did, pid in pad_targets:
+        pad = pads_by_id.get(pid)
+        if pad is not None and not pad.valid:
+            raise ConfigError(
+                f"navigate pad target invalid: drone {did!r} targets pad "
+                f"{pid!r} but that pad is RED (valid=false) in arena "
+                f"{cfg.arena_name!r} — a red pad is never a scored landing "
+                f"target, so land_on_pad would never acquire it. CHECK: drone "
+                f"{did!r} zone[\"navigate\"][\"pad_id\"] (point it at a GREEN/"
+                f"valid pad: {sorted(valid_pad_ids)}).")
+
+    # (a) duplicate pad target — two drones cannot both land on one pad.
+    seen: Dict[str, str] = {}
+    for did, pid in pad_targets:
+        if pid in seen:
+            raise ConfigError(
+                f"duplicate navigate pad target: drones {seen[pid]!r} and "
+                f"{did!r} both target pad {pid!r} — two drones cannot score one "
+                f"physical pad (they would fight for it / one scores zero). "
+                f"CHECK: give each drone a DISTINCT zone[\"navigate\"]"
+                f"[\"pad_id\"] (valid pads in arena {cfg.arena_name!r}: "
+                f"{sorted(valid_pad_ids)}).")
+        seen[pid] = did
+
+    # (c) capacity — the arena must hold >= one valid pad per navigating drone.
+    if len(valid_pad_ids) < len(navigating):
+        raise ConfigError(
+            f"too few valid landing pads: arena {cfg.arena_name!r} has only "
+            f"{len(valid_pad_ids)} VALID (green) pad(s) {sorted(valid_pad_ids)} "
+            f"but {len(navigating)} drone(s) "
+            f"{[d.id for d in navigating]} navigate to a pad — distinct valid "
+            f"targets cannot be satisfied (some drone would have no green pad to "
+            f"land on). CHECK: add valid pads to the arena or drop a navigate "
+            f"phase.")
 
 
 def _resolve_arena(cfg: FinalsConfig, config_dir: str) -> None:

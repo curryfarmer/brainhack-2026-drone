@@ -198,6 +198,39 @@ def test_center_marker_lost_returns_to_acquire():
     assert isinstance(a, (Rotate, Hover))   # acquire scan resumes
 
 
+def test_center_decoy_only_frame_treated_as_lost():
+    """A frame carrying ONLY a non-valid (decoy/red) marker id during PAD_CENTER
+    must be treated as LOST (the valid-id filter drops it) -> back to
+    PAD_ACQUIRE, NOT centered on the decoy. Kills the valid-id-filter-drop
+    mutant (dropping `marker_id in valid_marker_ids` at _valid_sightings) in
+    CENTER (batch-2 LAND review R1-7a)."""
+    p = _phase(valid_marker_ids=[7])
+    _force_center(p)
+    p._center_streak = 2
+    a = p.step(make_ctx(sightings=[_sighting(99, cx=600.0)]))   # decoy only
+    assert p._sub is _SubState.PAD_ACQUIRE       # treated as lost, not centered
+    assert p._center_streak == 0
+    assert not (isinstance(a, Move) and a.direction in (Direction.LEFT,
+                                                        Direction.RIGHT))
+
+
+def test_center_decoy_plus_valid_centers_on_valid_only():
+    """A decoy + a valid pad in the SAME frame: the phase centres on the VALID
+    id, NEVER the decoy. Kills the valid-id-filter-drop mutant in CENTER (it
+    would otherwise let the decoy drive _pick_target / centering) — batch-2 LAND
+    review R1-7b. The decoy (id 99, far right) and the valid pad (id 7, centred)
+    differ in position so a wrong pick would also move the wrong way."""
+    p = _phase(valid_marker_ids=[7])
+    _force_center(p)
+    p._center_streak = 0
+    # decoy far right (would drive a big RIGHT move); valid pad dead-centre.
+    a = p.step(make_ctx(sightings=[_sighting(99, cx=620.0, half=40.0),
+                                   _sighting(7, cx=320.0, half=10.0)]))
+    assert p._target_marker_id == 7              # locked onto the VALID id only
+    # centred on the valid pad -> no lateral chase of the decoy.
+    assert not (isinstance(a, Move) and a.direction is Direction.RIGHT)
+
+
 # ============================================================
 # PAD_DESCEND
 # ============================================================
@@ -243,6 +276,34 @@ def test_descend_holds_when_centered_but_not_persistently_seen():
     a = p.step(make_ctx(sightings=[_sighting(7, cx=320.0)]))
     # the new centred frame appends another hit -> 2 hits < 3 -> still holds
     assert not isinstance(a, Move)
+    assert p._sub is _SubState.PAD_DESCEND
+
+
+def test_descend_gate_at_exactly_persist_frames_descends():
+    """The descend gate `_recent_hits() >= descend_persist_frames` is INCLUSIVE:
+    when the recent window holds EXACTLY descend_persist_frames hits (after this
+    frame's centred-valid hit is appended), the phase must issue the DOWN move.
+    Kills the `>=`->`>` mutant at the descend gate (batch-2 LAND review R1-5): a
+    `>` mutant would Hover at the boundary instead of descending."""
+    p = _phase(descend_persist_frames=2, acquire_window_frames=5)
+    p._sub = _SubState.PAD_DESCEND
+    p._recent.clear()
+    p._recent.append(True)        # 1 prior hit; this step appends a 2nd -> 2 == gate
+    a = p.step(make_ctx(sightings=[_sighting(7, cx=320.0)]))
+    assert isinstance(a, Move) and a.direction == Direction.DOWN
+    assert a.distance_cm == p.descend_step_cm
+
+
+def test_descend_gate_one_below_persist_frames_holds():
+    """Paired with the boundary test: EXACTLY descend_persist_frames-1 hits ->
+    NOT enough confirmation -> Hover (do not descend). Together with the
+    boundary test this pins the gate exactly on descend_persist_frames."""
+    p = _phase(descend_persist_frames=3, acquire_window_frames=5)
+    p._sub = _SubState.PAD_DESCEND
+    p._recent.clear()
+    p._recent.append(True)        # 1 prior hit; this step appends a 2nd -> 2 < 3
+    a = p.step(make_ctx(sightings=[_sighting(7, cx=320.0)]))
+    assert not isinstance(a, Move)        # holds, does NOT descend
     assert p._sub is _SubState.PAD_DESCEND
 
 
@@ -310,6 +371,22 @@ def test_budget_exceeded_in_center_fallback_blind_land():
     assert p._sub is _SubState.FALLBACK
 
 
+def test_budget_exceeded_in_descend_fallback_blind_land():
+    """The whole-phase budget gate is centralized ABOVE the substate dispatch,
+    so it must bound PAD_DESCEND too. Force the phase into PAD_DESCEND with a
+    healthy recent window, prime the phase clock, then step past total_budget_s
+    and assert Fallback blind Land. Regression-guards the centralized budget
+    gate against a future per-substate refactor (batch-2 LAND review R1-6)."""
+    p = _phase(total_budget_s=10.0, acquire_timeout_s=10.0)
+    p.step(make_ctx(sightings=[_sighting(7, cx=320.0)], elapsed_s=0.0))  # prime t0
+    p._sub = _SubState.PAD_DESCEND
+    p._recent.extend([True, True, True])
+    a = p.step(make_ctx(sightings=[_sighting(7, cx=320.0)], elapsed_s=11.0))
+    assert isinstance(a, Land)
+    assert p._sub is _SubState.FALLBACK
+    assert "total landing budget" in (p._fallback_reason or "")
+
+
 def test_acquire_timeout_fallback_blind_land():
     """No acquire by acquire_timeout_s -> Fallback (distinct from total
     budget; the timeout fires first)."""
@@ -360,6 +437,17 @@ def test_commit_not_triggered_above_floor():
     _force_descend(p)
     a = p.step(make_ctx(sightings=[_sighting(7, cx=320.0)], altitude_m=1.0))
     assert not isinstance(a, (Land, Done))
+
+
+def test_commit_at_exactly_commit_alt_lands():
+    """Altitude EXACTLY == commit_alt_m must COMMIT (the depth-floor gate is
+    INCLUSIVE, `alt_m <= commit_alt_m`). Kills the `<=`->`<` mutant at the
+    commit gate (batch-2 LAND review R1-4): a `<` mutant would NOT land at the
+    boundary."""
+    p = _phase(commit_alt_m=0.5)
+    _force_descend(p)
+    a = p.step(make_ctx(sightings=[_sighting(7, cx=320.0)], altitude_m=0.5))
+    assert isinstance(a, Land)
 
 
 # ============================================================

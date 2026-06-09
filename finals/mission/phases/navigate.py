@@ -46,7 +46,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 from finals.errors import ConfigError
 from finals.mission.phase import AgentContext, MissionPhase
 from finals.mission.phases import register_phase
-from finals.mission.phases._servo import bearing_error_to_rotate
+from finals.mission.phases._servo import bearing_error_to_rotate, wrap180
 from finals.mission.planning.types import Leg
 from finals.mission.planning.visibility_graph import plan
 from finals.types import Abort, Action, Direction, Done, Move
@@ -267,16 +267,12 @@ class Navigate(MissionPhase):
             self._leg_idx += 1
             self._substep = "rotate"
 
-        if self._leg_idx >= len(self._legs):
-            return Done(
-                f"navigate complete: {len(self._legs)} leg(s) flown to "
-                f"{self.goal_desc} (open-loop, per-leg compass re-orient)")
-
-        leg = self._legs[self._leg_idx]
-
         # 3) The trusted compass is the ONE input this open-loop phase cannot
         # fly without. A None yaw means no heading reference — refuse rather
-        # than re-orient against a fabricated heading.
+        # than re-orient against a fabricated heading. Hoisted ABOVE the
+        # leg-advance loop below: yaw is constant for this ctx, so checking it
+        # once is behaviorally identical to re-checking per skipped leg, and the
+        # loop must never re-orient against a fabricated heading.
         yaw = ctx.telemetry.yaw_deg
         if yaw is None:
             return Abort(
@@ -286,41 +282,63 @@ class Navigate(MissionPhase):
                 f"and cannot fly without a yaw feed. CHECK: the compass / "
                 f"telemetry source.")
 
-        if self._substep == "rotate":
-            # Re-orient to the leg's ABSOLUTE heading using the trusted compass.
-            # error = wrap180(heading_deg - yaw): this re-zeroes accumulated yaw
-            # creep every leg instead of compounding a relative delta.
-            rot = bearing_error_to_rotate(
-                leg.heading_deg, yaw, self.heading_tol_deg, self.max_step_deg)
-            if rot is not None:
-                self._rot_count += 1
-                if self._rot_count > self._rot_cap:
-                    residual = leg.heading_deg - yaw
-                    return Abort(
-                        f"navigate[{ctx.drone_id}]: leg {self._leg_idx + 1}/"
-                        f"{len(self._legs)} re-orient did NOT converge within "
-                        f"{self._rot_cap} Rotate steps — target heading "
-                        f"{leg.heading_deg:.1f} deg vs yaw {yaw:.1f} deg "
-                        f"(residual ~{residual:.1f} deg > tol "
-                        f"{self.heading_tol_deg:g} deg). CHECK: a stuck/"
-                        f"oscillating compass feed or a too-small max_step_deg "
-                        f"vs heading_tol_deg.")
-                return rot
-            # Inside the deadband -> the nose is on the leg heading; fly it.
-            self._rot_count = 0
+        # Advance past any zero-distance (sub-cm, rounds-to-0) legs in a BOUNDED
+        # loop instead of recursing: each iteration handles one leg's rotate +
+        # forward Move, and a leg whose distance rounds to 0 cm (REFUSED by the
+        # adapter) is skipped — treated as already flown (the inflation margin
+        # absorbs the sub-cm shortfall). The loop is bounded by the finite leg
+        # list (each iteration either returns OR advances _leg_idx by one toward
+        # len(self._legs)); the budget / last_action_ok / yaw guards stay ABOVE
+        # it. Done only after the FINAL leg resolves.
+        while True:
+            if self._leg_idx >= len(self._legs):
+                return Done(
+                    f"navigate complete: {len(self._legs)} leg(s) flown to "
+                    f"{self.goal_desc} (open-loop, per-leg compass re-orient)")
 
-        # Fly the current leg forward. round() because Move.distance_cm is an
-        # int (the FlightAdapter cm contract). A tiny final/sub leg rounding to
-        # 0 cm would be REFUSED by the adapter, so we never command it: treat
-        # the leg as already flown (the inflation margin absorbs that sub-cm
-        # shortfall), advance, and re-enter to handle the next leg / Done
-        # WITHOUT a wasted tick (bounded by the finite leg count).
-        dist_cm = int(round(leg.distance_cm))
-        if dist_cm <= 0:
-            self._leg_idx += 1
-            self._substep = "rotate"
-            return self.step(ctx)
-        # Mark the Move in flight; the NEXT step() (after it resolves OK)
-        # advances the leg index.
-        self._substep = "await_move"
-        return Move(direction=Direction.FORWARD, distance_cm=dist_cm)
+            leg = self._legs[self._leg_idx]
+
+            if self._substep == "rotate":
+                # Re-orient to the leg's ABSOLUTE heading using the trusted
+                # compass. error = wrap180(heading_deg - yaw): re-zeroes
+                # accumulated yaw creep every leg instead of compounding a
+                # relative delta.
+                rot = bearing_error_to_rotate(
+                    leg.heading_deg, yaw, self.heading_tol_deg,
+                    self.max_step_deg)
+                if rot is not None:
+                    self._rot_count += 1
+                    if self._rot_count > self._rot_cap:
+                        # WRAPPED residual: convergence is judged on
+                        # wrap180(target - yaw) (the deadband in
+                        # bearing_error_to_rotate), so the reported error must
+                        # be the SAME wrapped quantity — an unwrapped diff would
+                        # print e.g. "350 deg" for a true -10 deg error and
+                        # point the operator at the wrong CHECK clause.
+                        residual = wrap180(leg.heading_deg - yaw)
+                        return Abort(
+                            f"navigate[{ctx.drone_id}]: leg {self._leg_idx + 1}/"
+                            f"{len(self._legs)} re-orient did NOT converge "
+                            f"within {self._rot_cap} Rotate steps — target "
+                            f"heading {leg.heading_deg:.1f} deg vs yaw "
+                            f"{yaw:.1f} deg (residual ~{residual:.1f} deg > tol "
+                            f"{self.heading_tol_deg:g} deg). CHECK: a stuck/"
+                            f"oscillating compass feed or a too-small "
+                            f"max_step_deg vs heading_tol_deg.")
+                    return rot
+                # Inside the deadband -> the nose is on the leg heading; fly it.
+                self._rot_count = 0
+
+            # Fly the current leg forward. round() because Move.distance_cm is
+            # an int (the FlightAdapter cm contract). A tiny final/sub leg
+            # rounding to 0 cm would be REFUSED by the adapter, so we never
+            # command it: advance to the next leg and loop (no wasted tick).
+            dist_cm = int(round(leg.distance_cm))
+            if dist_cm <= 0:
+                self._leg_idx += 1
+                self._substep = "rotate"
+                continue
+            # Mark the Move in flight; the NEXT step() (after it resolves OK)
+            # advances the leg index.
+            self._substep = "await_move"
+            return Move(direction=Direction.FORWARD, distance_cm=dist_cm)

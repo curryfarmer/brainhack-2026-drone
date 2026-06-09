@@ -288,6 +288,62 @@ def test_non_converging_rotate_aborts_after_bound():
     assert i <= phase._rot_cap + 1                # aborted right after the cap
 
 
+def test_rotate_cap_aborts_on_the_correct_iteration_not_early_or_late():
+    """Pin the `rot_count > rot_cap` boundary so the `>`->`>=` mutant is killed:
+    the Abort must fire on the iteration AFTER the cap (rot_count == rot_cap+1),
+    not one early. We count the Rotates the phase emits before the Abort and
+    assert it equals exactly rot_cap (the cap-many Rotates are allowed; the
+    NEXT one trips). A `>=` mutant would trip one Rotate earlier (rot_cap-1
+    Rotates emitted)."""
+    phase = _phase_to_goal((5.0, 0.0), max_leg_cm=100000.0,
+                           heading_tol_deg=1.0, max_step_deg=45.0)
+    cap = phase._rot_cap                           # ceil(360/45)+4 = 12
+    rotates = 0
+    last = None
+    for _ in range(cap + 5):                        # bounded
+        a = phase.step(_ctx(yaw_deg=90.0, last_action=last,
+                            last_action_ok=None if last is None else True))
+        if isinstance(a, Abort):
+            # The cap-th Rotate is allowed; the (cap+1)-th trips. So exactly
+            # `cap` Rotates were emitted before this Abort (kills `>`->`>=`,
+            # which would Abort after cap-1 Rotates).
+            assert rotates == cap, (
+                f"expected the Abort after exactly {cap} Rotates (the cap+1-th "
+                f"step trips), got {rotates} — a `>`->`>=` mutant fires early")
+            assert "did NOT converge" in a.reason
+            return
+        assert isinstance(a, Rotate)
+        rotates += 1
+        last = a
+    pytest.fail("re-orient never aborted within the cap")
+
+
+def test_rotate_cap_residual_is_wrapped_not_raw():
+    """The non-converging rotate-cap Abort reports the WRAPPED residual
+    (wrap180(target - yaw)), the SAME quantity convergence is judged on — NOT
+    the raw unwrapped diff. Force target heading 180 with a constant yaw of
+    -170: raw `180 - (-170) = 350` (the lying value), wrapped `wrap180(350) =
+    -10` (the truth). Assert -10 appears and 350 does NOT. (Kills the unwrapped
+    residual — batch-2 NAV review R2 :298/:288: the only test that pins the
+    value, so the wrap fix is itself killable.)"""
+    # heading_deg comes from plan(); build the legs directly to pin heading=180.
+    phase = _bare_phase([Leg(heading_deg=180.0, distance_cm=500.0)],
+                        heading_tol_deg=1.0, max_step_deg=45.0)
+    last = None
+    for _ in range(phase._rot_cap + 5):             # bounded
+        a = phase.step(_ctx(yaw_deg=-170.0, last_action=last,
+                            last_action_ok=None if last is None else True))
+        if isinstance(a, Abort):
+            # wrap180(180 - (-170)) = wrap180(350) = -10.0 (the true error).
+            assert "-10.0 deg" in a.reason, (
+                f"expected the WRAPPED residual ~-10.0 deg, got: {a.reason}")
+            assert "350" not in a.reason, (
+                f"the raw unwrapped 350 deg must NOT appear: {a.reason}")
+            return
+        last = a
+    pytest.fail("re-orient never aborted — could not exercise the residual")
+
+
 # ============================================================
 # from_config goal resolution + errors
 # ============================================================

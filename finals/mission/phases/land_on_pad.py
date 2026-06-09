@@ -537,6 +537,15 @@ class LandOnPad(MissionPhase):
 
         # Centred AND the pad is in >= descend_persist_frames recent frames
         # (confirm-before-descend) -> step DOWN.
+        # BY DESIGN (S-LAND R1/R2 batch-2, accepted disposition): `_recent` is
+        # ONE shared bounded window, never reset on CENTER->DESCEND entry, so
+        # the center-hold (and acquire) frames count toward this FIRST descend
+        # confirm. When center_persist_frames >= descend_persist_frames (the
+        # common config) the first DOWN can fire immediately on entry — this is
+        # the SHARED center+descend confidence, not a descend-local count. Judged
+        # soft/bounded/not-a-hover-risk (still requires centred + a valid pad
+        # THIS tick, and the whole phase is bounded by total_budget_s); the
+        # descent LOGIC is deliberately NOT changed right before a SITL rehearsal.
         if self._recent_hits() >= self.descend_persist_frames:
             return Move(direction=Direction.DOWN,
                         distance_cm=self.descend_step_cm)
