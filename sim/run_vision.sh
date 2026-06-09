@@ -113,9 +113,14 @@ stageB() {
   export GZ_SIM_RESOURCE_PATH="$REPO/sim/models:$HOME/PX4-Autopilot/Tools/simulation/gz/models:${GZ_SIM_RESOURCE_PATH:-}"
 
   echo "[stageB] launching PX4 (convoy_px4, llvmpipe, lockstep) -> $RUN/px4_vision.log"
+  # Spawn the drone CLEAR of the convoy robot start poses (robot_7 starts at the
+  # origin) so they don't interpenetrate during the EKF settle and pin the drone
+  # (a t=0 overlap made takeoff reach 0.00 m). (1,0) is >=1 m from every robot
+  # start; at 1.7 m the camera footprint still covers the origin crossing.
   ( cd "$HOME/PX4-Autopilot" && \
     LIBGL_ALWAYS_SOFTWARE=1 HEADLESS=1 PX4_SYS_AUTOSTART=4001 \
       PX4_SIM_MODEL=gz_x500_mono_cam_640 PX4_GZ_WORLD=convoy_px4 \
+      PX4_GZ_MODEL_POSE="1.0,0,0.2,0,0,0" \
       setsid ./build/px4_sitl_default/bin/px4 -i 0 -d > "$RUN/px4_vision.log" 2>&1 & \
     echo $! > "$RUN/px4_vision.pid" )
 
@@ -127,11 +132,15 @@ stageB() {
     fi
     sleep 2
   done
-  echo "[stageB] camera topic up after $((SECONDS - t0))s; settling EKF 45s"
-  sleep 45
+  echo "[stageB] camera topic up after $((SECONDS - t0))s"
 
+  # Drive the convoy BEFORE the settle so robot_7 vacates the origin and the
+  # convoy is mid-lap by takeoff. Duration covers settle + flight.
   echo "[stageB] driving the convoy"
-  bash "$REPO/sim/run_convoy.sh" drive "$((secs + 30))" || echo "[stageB] WARN convoy drive failed — markers will be static" >&2
+  bash "$REPO/sim/run_convoy.sh" drive "$((secs + 90))" || echo "[stageB] WARN convoy drive failed — markers will be static" >&2
+
+  echo "[stageB] settling EKF 45s (convoy moving)"
+  sleep 45
 
   bridge --topic "$ONBOARD_TOPIC" --port 5600 || { stageB_stop; return 4; }
 
