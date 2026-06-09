@@ -88,11 +88,10 @@
     <include><uri>model://pad_100</uri><name>pad_100</name><pose>0.8 0.5 0 0 0 0</pose></include>
     <include><uri>model://pad_101</uri><name>pad_101</name><pose>-0.8 0.5 0 0 0 0</pose></include>
 
-    <!-- 3 SENTRY tower cameras at the origin, looking straight down (kept so the
-         static-cam fallback + SIM-3 parity hold; the drone flies its OWN camera). -->
-    <include><uri>model://mono_cam_640</uri><name>cam_band_120</name><pose>0 0 1.2 0 1.5707 0</pose></include>
-    <include><uri>model://mono_cam_640</uri><name>cam_band_170</name><pose>0 0 1.7 0 1.5707 0</pose></include>
-    <include><uri>model://mono_cam_640</uri><name>cam_band_220</name><pose>0 0 2.2 0 1.5707 0</pose></include>
+    <!-- NO static tower cameras here (unlike convoy.sdf): the drone flies its OWN
+         mono_cam_640. On this 4-vCPU VM llvmpipe renders ONE camera comfortably;
+         4 cameras (3 towers + onboard) starve the streams and crawl the EKF
+         (SIM-3 finding). The static-cam fallback path uses convoy.sdf instead. -->
 
   </world>
 </sdf>
