@@ -1,0 +1,11 @@
+{
+  "_comment": "Pure-logic profile (like mock.json) that ALSO loads the Challenge-2A arena map (NAV-2). `arena_name` points at finals/configs/arenas/sample.json, which config._resolve_arena loads into cfg.arena (an ArenaMap) at load time. Exercises the full arena-load + semantic-validation path under a real `--dry-run`. The arena is DERIVED, never set in JSON.",
+  "profile": "mock",
+  "flight_backend": "mock",
+  "frame_backend": "none",
+  "detector": { "backend": "none" },
+  "arena_name": "sample",
+  "drones": [
+    { "id": "alpha", "phases": ["takeoff_demo"] }
+  ]
+}
