@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from finals.errors import ConfigError
+from finals.mission.planning.types import ArenaMap
 
 VALID_PROFILES = ("mock", "sitl", "replay", "bench", "real")
 VALID_FRAME_BACKENDS = ("none", "gazebo", "pyhulax", "replay")
@@ -145,6 +146,12 @@ class FinalsConfig:
     gazebo_video_port: int = 5600               # localhost TCP port the bridge serves frames on
     use_uwb: bool = False
     uwb_serial_port: Optional[str] = None
+    # Challenge-2A landing navigation (S11/NAV-0): the optional arena_name names a
+    # finals/configs/arenas/<name>.json map (obstacles + pads + C2 frame). It is
+    # resolved into `arena` at load time; `arena` is DERIVED, never set in JSON.
+    # NAV-2 hardens the arena validation + ships configs/arenas/sample.json.
+    arena_name: Optional[str] = None
+    arena: Optional[ArenaMap] = None
     guards: GuardsConfig = field(default_factory=GuardsConfig)
 
 
@@ -317,7 +324,7 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
             "min_battery_pct", "video_channel_order", "camera_hfov_deg",
             "sitl_address", "marker_backend", "replay_dir", "replay_fps",
             "gazebo_video_host", "gazebo_video_port",
-            "use_uwb", "uwb_serial_port", "guards",
+            "use_uwb", "uwb_serial_port", "arena_name", "guards",
         ),
         where=path,
     )
@@ -359,7 +366,7 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
             "min_battery_pct", "video_channel_order", "camera_hfov_deg",
             "sitl_address", "marker_backend", "replay_dir", "replay_fps",
             "gazebo_video_host", "gazebo_video_port",
-            "use_uwb", "uwb_serial_port",
+            "use_uwb", "uwb_serial_port", "arena_name",
         ) if k in top},
     )
 
@@ -574,6 +581,41 @@ def _validate(cfg: FinalsConfig, config_dir: str) -> None:
 
     _validate_detector(cfg.detector, config_dir)
     _validate_guards(cfg)
+    _resolve_arena(cfg, config_dir)
+
+
+def _resolve_arena(cfg: FinalsConfig, config_dir: str) -> None:
+    """Load cfg.arena_name -> cfg.arena from a JSON map file (S11/NAV-0). No
+    arena_name -> arena stays None (the convoy configs don't navigate). Resolves
+    <name>.json under the config file's dir (so a profile + its arena travel
+    together), then the repo-root finals/configs/arenas/. Dies HERE on a missing
+    or malformed file — the weights-guard philosophy. NAV-2 hardens the SEMANTIC
+    arena validation (bounds ordering, pads within bounds, unique ids)."""
+    if cfg.arena_name is None:
+        return
+    name = cfg.arena_name
+    if not isinstance(name, str) or not name:
+        raise ConfigError(
+            f"arena_name must be a non-empty string (a map basename under "
+            f"finals/configs/arenas/), got {name!r}")
+    filename = name if name.endswith(".json") else f"{name}.json"
+    candidates = [
+        os.path.join(config_dir, "arenas", filename),
+        os.path.join(config_dir, filename),
+        os.path.join("finals", "configs", "arenas", filename),
+    ]
+    resolved = next((p for p in candidates if os.path.isfile(p)), None)
+    if resolved is None:
+        raise ConfigError(
+            f"arena_name {name!r}: map file not found (tried "
+            f"{[os.path.abspath(c) for c in candidates]}) — add "
+            f"finals/configs/arenas/{filename} (NAV-2 ships a sample)")
+    with open(resolved, "r", encoding="utf-8") as f:
+        try:
+            raw = json.load(f)
+        except json.JSONDecodeError as e:
+            raise ConfigError(f"{resolved}: invalid JSON — {e}") from e
+    cfg.arena = ArenaMap.from_dict(raw, name=name)
 
 
 def _validate_guards(cfg: FinalsConfig) -> None:
