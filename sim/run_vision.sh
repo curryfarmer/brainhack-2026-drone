@@ -183,6 +183,13 @@ LAUNCH_POSES=( "${SIM5_POSES[@]}" )
 
 stageB3_stop() {
   stop_bridge
+  # The optional live GUI client (GZ_GUI=1) first — it is render-only, but leave
+  # it and it survives the run holding a stale window. Bracket pattern = the
+  # killer shell's own argv ('g[z] sim -g') does NOT self-match (sim/README).
+  if [ -f "$RUN/gz_gui.pid" ]; then
+    kill -9 "$(cat "$RUN/gz_gui.pid")" 2>/dev/null; rm -f "$RUN/gz_gui.pid"
+  fi
+  pkill -9 -f 'g[z] sim -g' 2>/dev/null
   local i
   for i in 0 1 2; do
     if [ -f "$RUN/px4_vision_$i.pid" ]; then
@@ -299,11 +306,39 @@ probe3() {
   stageB3_stop
 }
 
+# Optional LIVE 3D GUI (GZ_GUI=1) — the gz-GUI-over-ssh workflow. Instance 0 runs
+# the gz server HEADLESS (no window). This attaches a SEPARATE gz GUI client to
+# that already-running server and paints it onto the VM's own :0 desktop, so the
+# VMware console window shows all 3 drones + the convoy in 3D, 3rd-person.
+#
+#   - The GUI is render-ONLY: it subscribes to the scene/pose stream, it is NOT a
+#     camera sensor and adds NO frames to the single-threaded gz lockstep (which
+#     is the SIM-5 RTF ceiling) — only desktop GL load. Safe to run during flight.
+#   - DISPLAY :0 = the VM's real GNOME/Wayland desktop (NOT forwarded to the
+#     laptop — you watch it in the VMware console window). Qt rides XWayland, so
+#     QT_QPA_PLATFORM=xcb. LIBGL_ALWAYS_SOFTWARE=1: the VM has no real GPU.
+#   - In-process inside ONE blocking run so stageB3_stop reaps it; setsid shields
+#     it from SIGHUP if the ssh session that launched the run drops.
+#   - SIM-ONLY: never onsite / in headless cron (no :0 there). gz must already be
+#     up (call AFTER launch3), else the client paints an empty world.
+gz_gui_start() {
+  [ "${GZ_GUI:-0}" = "1" ] || return 0
+  local disp="${GZ_GUI_DISPLAY:-:0}"
+  echo "[gui] attaching gz GUI client on DISPLAY=$disp (software GL, XWayland) -> $RUN/gz_gui.log"
+  DISPLAY="$disp" QT_QPA_PLATFORM=xcb LIBGL_ALWAYS_SOFTWARE=1 \
+    GZ_SIM_RESOURCE_PATH="$REPO/sim/models:$HOME/PX4-Autopilot/Tools/simulation/gz/models:${GZ_SIM_RESOURCE_PATH:-}" \
+    setsid gz sim -g > "$RUN/gz_gui.log" 2>&1 &
+  echo $! > "$RUN/gz_gui.pid"
+  echo "[gui] launched (wrapper PID $(cat "$RUN/gz_gui.pid")) — LOOK AT THE VMware CONSOLE WINDOW."
+  echo "[gui]   window blank? -> tail $RUN/gz_gui.log ; is the :0 desktop logged in?"
+}
+
 # stageB3 (gate V2 full): 3 PX4 camera-drones fly sentry_scan over the moving
 # convoy, each reading its OWN onboard cam via its OWN bridge (5600/5601/5602).
 stageB3() {
   local secs="${1:-180}" mode="${2:-normal}"   # mode: normal | abort | kill
   launch3 || return $?
+  gz_gui_start                                  # no-op unless GZ_GUI=1 (live 3D view)
 
   echo "[stageB3] driving the convoy"
   bash "$REPO/sim/run_convoy.sh" drive "$((secs + 150))" || echo "[stageB3] WARN convoy drive failed — markers static" >&2
@@ -377,8 +412,12 @@ track3() {                 # Workstream B: active chase (track_convoy)
   VWORLD=convoy_3lane
   VCONFIG=finals/configs/sitl3_track_vision.json
   LAUNCH_POSES=( "${LANES3_POSES[@]}" )
+  # CONVOY_LINEAR 0.08 (faster than lanes3's 0.05): track_convoy holds over a
+  # centred car (the nadir deadband), so a near-still car looks like 3 parked
+  # drones — the cars need to actually DRIVE for the chase to read as a chase,
+  # while staying slow enough to stay inside the smallest footprint (alpha 1.2).
   export CONVOY_IDS="7 23 88" CONVOY_ANGULAR=0 \
-         CONVOY_LINEAR="${CONVOY_LINEAR:-0.05}" CONVOY_DELAY="${CONVOY_DELAY:-150}"
+         CONVOY_LINEAR="${CONVOY_LINEAR:-0.08}" CONVOY_DELAY="${CONVOY_DELAY:-150}"
   stageB3 "${1:-360}" normal
 }
 
@@ -396,5 +435,7 @@ case "${1:-}" in
   stageB3-stop)  stageB3_stop ;;
   lanes3)        shift; lanes3 "${1:-300}" ;;
   track3)        shift; track3 "${1:-360}" ;;
-  *) echo "usage: $0 {install-model|bridge --topic T [--port P]|stop-bridge|stageA [secs]|stageB [secs]|probe3 [secs]|stageB3 [secs]|abort3 [secs]|kill3 [secs]|stageB3-stop|lanes3 [secs]|track3 [secs]}" >&2; exit 64 ;;
+  lanes3-gui)    shift; export GZ_GUI=1; lanes3 "${1:-300}" ;;   # +live 3D view on :0
+  track3-gui)    shift; export GZ_GUI=1; track3 "${1:-360}" ;;   # +live 3D view on :0
+  *) echo "usage: $0 {install-model|bridge --topic T [--port P]|stop-bridge|stageA [secs]|stageB [secs]|probe3 [secs]|stageB3 [secs]|abort3 [secs]|kill3 [secs]|stageB3-stop|lanes3 [secs]|track3 [secs]|lanes3-gui [secs]|track3-gui [secs]}" >&2; exit 64 ;;
 esac

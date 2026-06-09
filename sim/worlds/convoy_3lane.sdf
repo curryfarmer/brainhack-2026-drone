@@ -87,9 +87,14 @@
     <include><uri>model://convoy_robot_88</uri><name>convoy_robot_88</name><pose>-1.5 -2.6 0 0 0 4.189</pose></include>
 
     <!-- 2 landing-pad markers, static (kept for parity with convoy_px4 / the
-         land_on_pad future; clear of all 3 lanes). -->
-    <include><uri>model://pad_100</uri><name>pad_100</name><pose>0.6 0.6 0 0 0 0</pose></include>
-    <include><uri>model://pad_101</uri><name>pad_101</name><pose>-0.6 0.6 0 0 0 0</pose></include>
+         land_on_pad future). Parked in the empty WESTERN gap (between the NW +
+         SW lanes), ~4.7 m from every drone start and clear of all 3 car paths,
+         so their ArUco ids stop crowding a drone's frame: the first VM track run
+         had bravo (then over a pad-heavy +y region) seeing pad_101 165x vs its
+         own car 68x. Decorative here — track_convoy filters to track_marker_ids
+         and land_on_pad (the pad consumer) is still a stub. -->
+    <include><uri>model://pad_100</uri><name>pad_100</name><pose>-6.0 1.0 0 0 0 0</pose></include>
+    <include><uri>model://pad_101</uri><name>pad_101</name><pose>-6.0 -1.0 0 0 0 0</pose></include>
 
   </world>
 </sdf>

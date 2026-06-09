@@ -34,12 +34,21 @@ def ctx(now=100.0, yaw=0.0, is_flying=True, sightings=None,
         last_action_ok=last_action_ok, last_action_error=last_action_error)
 
 
-def sight(marker_id=7, bearing=None, ts=100.0):
+def sight(marker_id=7, bearing=None, ts=100.0, bbox=(0.0, 0.0, 10.0, 10.0)):
+    # Default bbox is the top-left CORNER of a 640x480 frame -> radial offset
+    # ~1.39 (well past any sane center_px_frac), so the steer tests that expect
+    # a Move are not silently swallowed by the deadband. Centre-frame tests pass
+    # an explicit centred bbox.
     return Sighting(
         drone_id="alpha", ts=ts, source="aruco",
         class_name=f"aruco_{marker_id}", marker_id=marker_id,
-        bbox_xyxy=(0.0, 0.0, 10.0, 10.0), confidence=1.0,
+        bbox_xyxy=bbox, confidence=1.0,
         frame_shape=(480, 640), bearing_deg=bearing)
+
+
+# A marker box centred in a 640x480 frame (radial offset 0 -> inside the
+# deadband): the car is directly under the drone.
+_CENTRED_BBOX = (310.0, 230.0, 330.0, 250.0)
 
 
 def _drone(zone=None, band=None):
@@ -119,6 +128,42 @@ def test_chase_cap_returns_done():
     assert isinstance(a2, Hover)                 # _just_moved
     a3 = p.step(ctx(sightings=[sight(7, 0.0, 102.0)], last_action_ok=True))
     assert isinstance(a3, Done) and "chase cap" in a3.reason
+
+
+# ============================================================
+# NADIR deadband — hold over a centred (under-drone) target, step when it drifts
+# ============================================================
+def test_centered_marker_holds_when_under_drone():
+    # Bearing centred AND the marker box is in the frame centre = car under us:
+    # HOLD (deadband). Without this the drone over-walks a near-stationary car
+    # out of its footprint — the VM failure where the small-band drones lost
+    # their cars while charlie's bigger footprint masked the over-walk.
+    p = TrackConvoy(acquire_hits=1, center_tol_deg=10.0, approach_enabled=True,
+                    approach_cm=50, center_px_frac=0.3)
+    a = p.step(ctx(yaw=0.0, sightings=[
+        sight(7, bearing=0.0, ts=100.0, bbox=_CENTRED_BBOX)]))
+    assert isinstance(a, Hover) and p._chase_used_cm == 0   # held, no chase used
+
+
+def test_offcenter_marker_steps_past_deadband():
+    # Same bearing-centred, but the marker has drifted to the frame corner
+    # (radial offset ~1.39 > the 0.3 deadband): the car left centre -> step.
+    p = TrackConvoy(acquire_hits=1, center_tol_deg=10.0, approach_enabled=True,
+                    approach_cm=50, center_px_frac=0.3)
+    a = p.step(ctx(yaw=0.0, sightings=[sight(7, bearing=0.0, ts=100.0)]))  # corner
+    assert isinstance(a, Move) and a.distance_cm == 50
+
+
+def test_deadband_degrades_to_move_on_missing_frame_geometry():
+    # off is None (no frame_shape) -> fall back to the prior always-step
+    # behavior, never freeze on bad data.
+    import dataclasses
+    p = TrackConvoy(acquire_hits=1, center_tol_deg=10.0, approach_enabled=True,
+                    approach_cm=50, center_px_frac=0.3)
+    s = dataclasses.replace(sight(7, bearing=0.0, ts=100.0, bbox=_CENTRED_BBOX),
+                            frame_shape=None)
+    a = p.step(ctx(yaw=0.0, sightings=[s]))
+    assert isinstance(a, Move) and a.distance_cm == 50
 
 
 # ============================================================
@@ -221,6 +266,8 @@ def test_locks_most_seen_id():
     {"acquire_window_s": 0}, {"acquire_window_s": math.inf},
     {"acquire_dwell_s": -1.0}, {"center_tol_deg": 0}, {"max_step_deg": -1},
     {"track_dwell_s": math.nan}, {"approach_cm": 0}, {"max_chase_cm": 0},
+    {"center_px_frac": 0}, {"center_px_frac": -0.1}, {"center_px_frac": 2.0},
+    {"center_px_frac": math.nan},
     {"approach_enabled": "yes"}, {"lead_gain": -1}, {"lead_gain": math.nan},
     {"track_marker_ids": 7}, {"track_marker_ids": [7, "x"]},
     {"track_marker_ids": [True]}, {"reacquire_dwell_s": 0},

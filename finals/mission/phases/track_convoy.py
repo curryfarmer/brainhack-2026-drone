@@ -17,6 +17,12 @@ position: pos_quality is NONE there, so this NEVER reads est_north/est_east):
 - Approach: the camera is NADIR, so rotating only spins the image — FOLLOWING a
   moving ground target requires TRANSLATION. Once centered, Move(FORWARD,
   approach_cm) closes the ground distance, then Hover(track_dwell_s) re-observes.
+  A centered BEARING only says the car is in our forward direction, not how far;
+  the marker's pixel offset from frame centre says how far. So a DEADBAND
+  (center_px_frac): while the marker sits near frame centre the car is
+  essentially UNDER us — HOLD, don't step, or a forward move over-walks a slow/
+  near-stationary car out of the footprint (the failure mode the small-footprint
+  drones hit on the VM). Step only once it drifts past the deadband.
   This is open-loop (no position feedback), so it is BOUNDED two ways: a
   cumulative max_chase_cm displacement cap (the runaway guard) and gated OFF by
   default (approach_enabled) — the same gate-E discipline as OpenLoopLawnmower
@@ -75,8 +81,8 @@ class TrackConvoy(MissionPhase):
     _TUNABLES = (
         "height_cm", "track_marker_ids", "acquire_hits", "acquire_window_s",
         "acquire_dwell_s", "acquire_budget_s", "center_tol_deg", "max_step_deg",
-        "track_dwell_s", "approach_enabled", "approach_cm", "max_chase_cm",
-        "lead_gain", "reacquire_dwell_s", "lost_timeout_s",
+        "track_dwell_s", "approach_enabled", "approach_cm", "center_px_frac",
+        "max_chase_cm", "lead_gain", "reacquire_dwell_s", "lost_timeout_s",
         "investigate_budget_s",
     )
 
@@ -86,7 +92,8 @@ class TrackConvoy(MissionPhase):
                  acquire_dwell_s: float = 0.5, acquire_budget_s: float = 30.0,
                  center_tol_deg: float = 8.0, max_step_deg: float = 30.0,
                  track_dwell_s: float = 0.5, approach_enabled: bool = False,
-                 approach_cm: int = 50, max_chase_cm: int = 1000,
+                 approach_cm: int = 50, center_px_frac: float = 0.30,
+                 max_chase_cm: int = 1000,
                  lead_gain: float = 0.0, reacquire_dwell_s: float = 0.5,
                  lost_timeout_s: float = 4.0,
                  investigate_budget_s: float = 90.0):
@@ -122,10 +129,16 @@ class TrackConvoy(MissionPhase):
                          ("center_tol_deg", center_tol_deg),
                          ("max_step_deg", max_step_deg),
                          ("track_dwell_s", track_dwell_s),
+                         ("center_px_frac", center_px_frac),
                          ("reacquire_dwell_s", reacquire_dwell_s),
                          ("lost_timeout_s", lost_timeout_s),
                          ("investigate_budget_s", investigate_budget_s)):
             _pos_num(key, val)
+        if center_px_frac > 1.5:                          # a frame corner is ~1.41
+            raise _bad("center_px_frac", center_px_frac,
+                       "must be <= 1.5 (a normalized radial offset from frame "
+                       "centre; 1 = a frame edge, a corner ~1.41 — a bigger "
+                       "deadband than the whole frame would never approach)")
         if not isinstance(approach_enabled, bool):
             raise _bad("approach_enabled", approach_enabled, "must be a bool")
         if (not isinstance(lead_gain, (int, float))
@@ -145,6 +158,7 @@ class TrackConvoy(MissionPhase):
         self.track_dwell_s = float(track_dwell_s)
         self.approach_enabled = approach_enabled
         self.approach_cm = approach_cm
+        self.center_px_frac = float(center_px_frac)
         self.max_chase_cm = max_chase_cm
         self.lead_gain = float(lead_gain)
         self.reacquire_dwell_s = float(reacquire_dwell_s)
@@ -289,6 +303,17 @@ class TrackConvoy(MissionPhase):
         if self._just_moved:
             self._just_moved = False
             return Hover(duration_s=self.track_dwell_s)     # look after a move
+        # NADIR DEADBAND: a centered bearing only says the car is in our FORWARD
+        # direction, not how far. The marker's pixel offset from frame centre
+        # does: near-centre = the car is essentially UNDER us, so a forward step
+        # would over-walk a slow/near-stationary car out of the footprint (how
+        # the small-band drones lost their cars on the VM). HOLD until it drifts
+        # past center_px_frac, then step. off is None (missing/degenerate frame
+        # geometry) -> keep the prior always-step behavior; never crash, never
+        # freeze on bad data.
+        off = self._offcenter(s)
+        if off is not None and off < self.center_px_frac:
+            return Hover(duration_s=self.track_dwell_s)     # car under us — hold
         remaining = self.max_chase_cm - self._chase_used_cm
         if remaining <= 0:
             return self._done(ctx, f"chase cap {self.max_chase_cm} cm reached")
@@ -336,6 +361,25 @@ class TrackConvoy(MissionPhase):
         self._prev_bearing = bearing
         self._prev_bearing_ts = ts
         return lead
+
+    @staticmethod
+    def _offcenter(s) -> Optional[float]:
+        """Radial offset of the marker from frame CENTRE, normalized so 0 = dead
+        centre and 1 = a frame edge (a corner ~1.41); None if the frame geometry
+        is missing or degenerate. This is the 'how far, not just which way'
+        signal the bearing discards: small = car is under us, large = car has
+        drifted toward the footprint edge (the deadband uses it in _steer)."""
+        shape = getattr(s, "frame_shape", None)
+        bbox = getattr(s, "bbox_xyxy", None)
+        if not shape or not bbox:
+            return None
+        h, w = shape[0], shape[1]
+        if not h or not w:
+            return None
+        cx = (bbox[0] + bbox[2]) / 2.0
+        cy = (bbox[1] + bbox[3]) / 2.0
+        return math.hypot((cx - w / 2.0) / (w / 2.0),
+                          (cy - h / 2.0) / (h / 2.0))
 
     def _done(self, ctx: AgentContext, why: str) -> Done:
         return Done(
