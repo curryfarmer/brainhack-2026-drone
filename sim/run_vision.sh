@@ -231,12 +231,14 @@ launch3() {
   echo "[launch3] all 3 instances up (cams 0/1/2)"
 }
 
-# Read sim-time milliseconds from one /clock message (sim block only).
+# Read sim-time milliseconds from one /clock message (the `sim` block only).
+# NB: anchor sec/nsec — an unanchored /sec:/ ALSO matches `nsec:` lines; and
+# print as a float (%.0f) so a large sec*1000 never overflows awk's 32-bit %d.
 _clock_sim_ms() {
   gz topic -e -t /clock -n 1 2>/dev/null | awk '
     /^sim \{/{insim=1; next}
-    insim && /sec:/ {s=$2}
-    insim && /nsec:/{printf "%d", s*1000 + int($2/1000000); exit}'
+    insim && /^[ \t]*sec:/  {s=$2}
+    insim && /^[ \t]*nsec:/ {printf "%.0f", s*1000 + $2/1000000; exit}'
 }
 
 # probe3: bring up 3 instances + 3 cams, measure RTF + per-cam fps over a window,
