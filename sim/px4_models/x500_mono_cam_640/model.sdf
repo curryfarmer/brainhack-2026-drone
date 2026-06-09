@@ -1,0 +1,65 @@
+<?xml version="1.0"?>
+<!-- SIM-4: PX4 x500 + a downward 640x480 mono camera, for gate V2a (vision-in-
+     the-loop SITL flight in the convoy world).
+
+     INSTALL: copy this dir to where PX4 finds models
+       cp -r sim/px4_models/x500_mono_cam_640 ~/PX4-Autopilot/Tools/simulation/gz/models/
+     then spawn with PX4_SIM_MODEL=gz_x500_mono_cam_640 (autostart 4001, the same
+     x500 airframe; the camera is sensor-only, no actuators). launch_sitl.sh
+     already passes the world/model through, e.g.:
+       bash sim/launch_sitl.sh start 1   (world=convoy, model=gz_x500_mono_cam_640)
+     The world must be started under llvmpipe/ogre1 FIRST and joined with
+     PX4_GZ_STANDALONE=1 (camera renders BLANK under ogre2 on this VM); set
+     GZ_SIM_RESOURCE_PATH to include sim/models for the convoy assets.
+
+     Spawned model name x500_mono_cam_640_<i> -> deterministic topic
+       /world/<w>/model/x500_mono_cam_640_<i>/link/camera_link/sensor/camera/image
+
+     Camera params COPIED from sim/models/mono_cam_640 (640x480, HFOV 1.74 rad =
+     99.69 deg, R8G8B8, 15 Hz -> config camera_hfov_deg 99.69). The sensor is
+     INLINED (not <include>d): the standalone mono_cam_640 model is <static>true>
+     and cannot mount on a flying body. -->
+<sdf version="1.9">
+  <model name="x500_mono_cam_640">
+    <!-- merge=true folds the x500's links/joints/plugins into THIS model's
+         namespace, so base_link is a direct link the camera joint can parent. -->
+    <include merge="true">
+      <uri>model://x500</uri>
+    </include>
+
+    <link name="camera_link">
+      <!-- at the body origin, pitched +pi/2 so the +X optical axis looks at -Z
+           (straight down) — same convention as the convoy.sdf tower cameras. -->
+      <pose relative_to="base_link">0 0 0 0 1.5707 0</pose>
+      <inertial>
+        <mass>0.005</mass>
+        <inertia>
+          <ixx>1e-6</ixx><iyy>1e-6</iyy><izz>1e-6</izz>
+          <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz>
+        </inertia>
+      </inertial>
+      <sensor name="camera" type="camera">
+        <camera>
+          <horizontal_fov>1.74</horizontal_fov>
+          <image>
+            <width>640</width>
+            <height>480</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.05</near>
+            <far>50.0</far>
+          </clip>
+        </camera>
+        <always_on>1</always_on>
+        <update_rate>15</update_rate>
+        <visualize>true</visualize>
+      </sensor>
+    </link>
+
+    <joint name="camera_joint" type="fixed">
+      <parent>base_link</parent>
+      <child>camera_link</child>
+    </joint>
+  </model>
+</sdf>

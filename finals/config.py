@@ -135,6 +135,8 @@ class FinalsConfig:
     marker_backend: str = "aruco"               # "aruco" | "qr" — the primary detector seam (S7)
     replay_dir: Optional[str] = None            # REQUIRED whenever frame_backend=replay
     replay_fps: float = 10.0                    # ReplaySource pacing (frames/s from disk)
+    gazebo_video_host: str = "127.0.0.1"        # GazeboRgbSource <- sim/gz_camera_bridge endpoint
+    gazebo_video_port: int = 5600               # localhost TCP port the bridge serves frames on
     use_uwb: bool = False
     uwb_serial_port: Optional[str] = None
     guards: GuardsConfig = field(default_factory=GuardsConfig)
@@ -285,6 +287,7 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
             "run_dir", "tick_hz", "mission_budget_s", "command_timeout_s",
             "min_battery_pct", "video_channel_order", "camera_hfov_deg",
             "sitl_address", "marker_backend", "replay_dir", "replay_fps",
+            "gazebo_video_host", "gazebo_video_port",
             "use_uwb", "uwb_serial_port", "guards",
         ),
         where=path,
@@ -325,6 +328,7 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
             "run_dir", "tick_hz", "mission_budget_s", "command_timeout_s",
             "min_battery_pct", "video_channel_order", "camera_hfov_deg",
             "sitl_address", "marker_backend", "replay_dir", "replay_fps",
+            "gazebo_video_host", "gazebo_video_port",
             "use_uwb", "uwb_serial_port",
         ) if k in top},
     )
@@ -491,6 +495,19 @@ def _validate(cfg: FinalsConfig, config_dir: str) -> None:
         # inf would make the pacing period 0 (busy spin); NaN poisons it.
         raise ConfigError(
             f"replay_fps must be finite and > 0, got {cfg.replay_fps!r}")
+    # gz_camera_bridge endpoint (frame_backend "gazebo"): same shape as a
+    # mavsdk_grpc_port — die HERE on a bad port, not minutes later when the
+    # GazeboRgbSource fails to connect (the weights-guard philosophy).
+    if (not isinstance(cfg.gazebo_video_port, int)
+            or isinstance(cfg.gazebo_video_port, bool)
+            or not 1024 <= cfg.gazebo_video_port <= 65535):
+        raise ConfigError(
+            f"gazebo_video_port must be an int in [1024, 65535] (the "
+            f"sim/gz_camera_bridge TCP endpoint), got {cfg.gazebo_video_port!r}")
+    if not isinstance(cfg.gazebo_video_host, str) or not cfg.gazebo_video_host:
+        raise ConfigError(
+            f'gazebo_video_host must be a non-empty string (e.g. "127.0.0.1"), '
+            f"got {cfg.gazebo_video_host!r}")
     if not 0 <= cfg.min_battery_pct <= 100:
         raise ConfigError(f"min_battery_pct {cfg.min_battery_pct} out of range [0, 100]")
     if cfg.video_channel_order not in ("rgb", "bgr"):

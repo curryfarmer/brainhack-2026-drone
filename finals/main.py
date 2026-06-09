@@ -279,11 +279,15 @@ def _build_phases(drone_cfg: DroneConfig,
 _HEARTBEAT_PERIOD_S = 1.0
 
 #: Frame backends with END-TO-END perception wiring (video source +
-#: PerceptionLoop + agent frame-ts). S8 adds "gazebo", S9 "pyhulax".
-#: DELIBERATELY narrower than `frame_backend != "none"` — see the VISION
-#: GATE wiring note in the module docstring (sitl.json declares "gazebo"
-#: today; wiring it before S8 would crash on the stub or false-DEGRADE).
-_WIRED_FRAME_BACKENDS = ("replay",)
+#: PerceptionLoop + agent frame-ts). S8 (SIM-4) added "gazebo"; S9/S10 adds
+#: "pyhulax". DELIBERATELY narrower than `frame_backend != "none"` — see the
+#: VISION GATE wiring note in the module docstring (a backend declared in a
+#: config but not yet wired would crash on its stub or false-DEGRADE).
+#: One backend per line so parallel sessions add theirs as an isolated hunk.
+_WIRED_FRAME_BACKENDS = (
+    "replay",
+    "gazebo",    # S8 (SIM-4): GazeboRgbSource <- sim/gz_camera_bridge (TCP)
+)
 
 
 def _frames_wired(cfg: FinalsConfig) -> bool:
@@ -369,16 +373,30 @@ def _build_perception(cfg: FinalsConfig, drone_id: str, bus: SightingBus,
                       slog: Optional[SightingLog], events: EventLog,
                       detector, csv_health=None) -> Tuple[object, object]:
     """One (VideoSource, PerceptionLoop) pair per drone. Called only when
-    _frames_wired(cfg) — today that means ReplaySource; S8 adds a gazebo
-    branch here (and "gazebo" to _WIRED_FRAME_BACKENDS)."""
+    _frames_wired(cfg). The VideoSource is chosen by cfg.frame_backend; the
+    PerceptionLoop wiring below is identical for every backend (S9/S10 adds a
+    pyhulax branch alongside the gazebo one)."""
     from finals.vision.aruco import make_marker_detector
     from finals.vision.perception import PerceptionLoop
-    from finals.vision.video import ReplaySource
-    source = ReplaySource(
-        drone_id, cfg.replay_dir, fps=cfg.replay_fps,
-        # The replay PROFILE ends when the frames do; a flight profile
-        # replaying frames (dev rig) loops the clip for the whole mission.
-        loop=(cfg.profile != "replay"))
+    if cfg.frame_backend == "gazebo":
+        # S8 (SIM-4): frames arrive over a localhost TCP socket from
+        # sim/gz_camera_bridge (a system-py3.10 gz subscriber) — finals/
+        # imports NO gz binding (the 3.11-venv constraint). The bridge must
+        # already be streaming before this source's start() (run-script gates
+        # on the first frame); a missing bridge -> SensorTimeout -> loud abort.
+        from finals.vision.gazebo_video import GazeboRgbSource
+        source = GazeboRgbSource(
+            drone_id,
+            host=cfg.gazebo_video_host, port=cfg.gazebo_video_port,
+            video_channel_order=cfg.video_channel_order,
+            stale_s=cfg.guards.video_stale_s)
+    else:
+        from finals.vision.video import ReplaySource
+        source = ReplaySource(
+            drone_id, cfg.replay_dir, fps=cfg.replay_fps,
+            # The replay PROFILE ends when the frames do; a flight profile
+            # replaying frames (dev rig) loops the clip for the whole mission.
+            loop=(cfg.profile != "replay"))
     perception = PerceptionLoop(
         drone_id, source, bus, events,
         detect_marker=make_marker_detector(cfg.marker_backend),

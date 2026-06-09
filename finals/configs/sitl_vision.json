@@ -1,0 +1,16 @@
+{
+  "_comment": "SIM-4 Stage B (gate V2a): ONE PX4 x500 with an onboard 640x480 downward camera (model x500_mono_cam_640) flying the convoy world over MAVSDK UDP, --phases sentry_scan, logging MOVING-marker ArUco sightings to sightings.csv. Frames arrive via sim/gz_camera_bridge (system py3.10 gz subscriber) -> GazeboRgbSource TCP; the bridge subscribes the onboard camera topic /world/convoy/model/x500_mono_cam_640_0/link/camera_link/sensor/camera/image and MUST be streaming before finals starts (the run-script gates on its first frame). Render under llvmpipe/ogre1 (ogre2 = blank). Single drone falls back to top-level sitl_address + gRPC 50051; SIM-5 ships configs/sitl3_vision.json for 3x. command_timeout_s 30: EKF settle on a fresh instance. altitude_band_m 1.7 = the middle sentry band where ArUco decodes (SIM-3). gazebo_video_port MUST match the bridge --port. camera_hfov_deg 99.69 = mono_cam_640 HFOV 1.74 rad. detector none: ArUco (marker_backend) is the primary detector; YOLO stays off.",
+  "profile": "sitl",
+  "flight_backend": "mavsdk_sitl",
+  "frame_backend": "gazebo",
+  "sitl_address": "udpin://0.0.0.0:14540",
+  "command_timeout_s": 30,
+  "camera_hfov_deg": 99.69,
+  "marker_backend": "aruco",
+  "gazebo_video_host": "127.0.0.1",
+  "gazebo_video_port": 5600,
+  "detector": { "backend": "none" },
+  "drones": [
+    { "id": "alpha", "phases": ["sentry_scan"], "altitude_band_m": 1.7 }
+  ]
+}

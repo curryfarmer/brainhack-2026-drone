@@ -1,0 +1,14 @@
+{
+  "_comment": "SIM-4 Stage A (de-risk): MockAdapter flight (NO PX4) + REAL gz frames over the sim/gz_camera_bridge TCP feed -> sentry_scan -> sightings.csv. Point the bridge at a STATIC convoy tower cam (e.g. cam_band_170) with the convoy DRIVING; render the world under llvmpipe (ogre2 = blank on the VM). Proves the bridge + GazeboRgbSource + PerceptionLoop + ArUco + sightings.csv path end-to-end with zero PX4 before the real onboard-camera flight (Stage B = configs/sitl_vision.json). Invoke with --config (this is not a --profile). gazebo_video_port MUST match the bridge --port. camera_hfov_deg 99.69 = mono_cam_640 HFOV 1.74 rad (bearing rays).",
+  "profile": "mock",
+  "flight_backend": "mock",
+  "frame_backend": "gazebo",
+  "camera_hfov_deg": 99.69,
+  "marker_backend": "aruco",
+  "gazebo_video_host": "127.0.0.1",
+  "gazebo_video_port": 5600,
+  "detector": { "backend": "none" },
+  "drones": [
+    { "id": "alpha", "phases": ["sentry_scan"], "altitude_band_m": 1.7 }
+  ]
+}

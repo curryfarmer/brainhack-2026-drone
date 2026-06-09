@@ -1,7 +1,7 @@
-"""main.py's S7 vision wiring: the _WIRED_FRAME_BACKENDS gate (VideoWatchdog
-present ONLY where a frame source actually feeds it — sitl/gazebo stays
-clean until S8), the mock-flight-with-replay-frames e2e, and the
-perception-crash screamer. Only the flight e2e needs cv2."""
+"""main.py's vision wiring: the _WIRED_FRAME_BACKENDS gate (VideoWatchdog
+present ONLY where a frame source actually feeds it — gazebo is WIRED as of
+S8/SIM-4; pyhulax stays clean until S9/S10), the mock-flight-with-replay-frames
+e2e, and the perception-crash screamer. Only the flight e2e needs cv2."""
 from __future__ import annotations
 
 import asyncio
@@ -45,17 +45,19 @@ def test_build_guards_video_watchdog_only_for_wired_backends():
 
     assert has_watchdog(cfg_with("replay")) is True
     assert has_watchdog(cfg_with("none")) is False
-    # THE SIM-TRACK PIN: sitl.json ships frame_backend "gazebo" with a drone
-    # TODAY (S8 wires the source). A watchdog built for it would log a
-    # guaranteed-false "no frame EVER" DEGRADE on every SIM-1/SIM-2 run
-    # (guards.py reconciliation 5) — the gate is the WIRED set, not
-    # frame_backend != "none".
+    # THE SIM-TRACK PIN: gazebo is WIRED as of S8/SIM-4 (GazeboRgbSource feeds
+    # a real frame source over the sim/gz_camera_bridge TCP seam), so sitl.json's
+    # frame_backend "gazebo" now BUILDS the VideoWatchdog. pyhulax stays OUT of
+    # the wired set until S9/S10 — a watchdog built for an UNWIRED backend would
+    # log a guaranteed-false "no frame EVER" DEGRADE every run (guards.py
+    # reconciliation 5); the gate is the WIRED set, not frame_backend != "none".
     assert has_watchdog(cfg_with("gazebo", profile="sitl",
-                                 flight_backend="mavsdk_sitl")) is False
+                                 flight_backend="mavsdk_sitl")) is True
     assert has_watchdog(cfg_with("pyhulax", profile="real",
                                  flight_backend="pyhulax")) is False
     assert fmain._frames_wired(cfg_with("replay")) is True
-    assert fmain._frames_wired(cfg_with("gazebo")) is False
+    assert fmain._frames_wired(cfg_with("gazebo")) is True
+    assert fmain._frames_wired(cfg_with("pyhulax")) is False
 
 
 # ============================================================
