@@ -49,6 +49,7 @@ def resolve_phase(name: str) -> Type[MissionPhase]:
 # Importing the phase modules populates the registry (stubs included, so
 # config name-validation works before the phases are implemented).
 from finals.mission.phases import takeoff_demo as _takeoff_demo  # noqa: E402,F401
+from finals.mission.phases import takeoff as _takeoff            # noqa: E402,F401
 from finals.mission.phases import search as _search              # noqa: E402,F401
 from finals.mission.phases import navigate as _navigate          # noqa: E402,F401
 from finals.mission.phases import track_convoy as _track_convoy  # noqa: E402,F401

@@ -99,6 +99,9 @@ class GuardsConfig:
     land_retry_period_s: float = 1.0        # SafetyController ladder cadence
     land_retry_window_s: float = 30.0       # ladder total -> operator alarm
     slot_wait_s: float = 120.0              # max wait for the landing slot
+    launch_slot_wait_s: float = 120.0       # max wait for the C2 launch
+                                            # corridor slot (NAV-8 staggered
+                                            # launch); bounded, never infinite
 
 
 @dataclass
@@ -109,6 +112,11 @@ class DroneConfig:
     led_rgb: Optional[Tuple[int, int, int]] = None    # identity colour (bench/real)
     altitude_band_m: Optional[float] = None     # swarm vertical separation (1.2/1.7/2.2)
     zone: Dict[str, Any] = field(default_factory=dict)  # per-drone search params (briefing-shaped)
+    # NAV-8 per-drone ADVISORY sector keep-in wedge (SPACE half of the
+    # deconfliction): [center_deg, half_width_deg], a heading range from C2
+    # (deg, CCW+, 0 = +north). ADVISORY ONLY (SectorGuard, never a control
+    # input). Optional; omit -> no sector guard for this drone.
+    sector_deg: Optional[Tuple[float, float]] = None
     # SITL multi-instance endpoints (S6/SIM-1): instance i listens on UDP
     # 14540+i and its mavsdk_server takes gRPC 50051+i. REQUIRED (and
     # distinct) on every drone when a sitl profile has >1 drone; a single
@@ -250,7 +258,8 @@ def _build_drone(raw: Dict[str, Any], index: int) -> DroneConfig:
         raw,
         required=("id", "phases"),
         optional=("plane_id", "led_rgb", "altitude_band_m", "zone",
-                  "sitl_address", "mavsdk_grpc_port", "gazebo_video_port"),
+                  "sitl_address", "mavsdk_grpc_port", "gazebo_video_port",
+                  "sector_deg"),
         where=where,
     )
     phases = data["phases"]
@@ -286,6 +295,21 @@ def _build_drone(raw: Dict[str, Any], index: int) -> DroneConfig:
         raise ConfigError(
             f"{where}.gazebo_video_port must be an int in [1024, 65535] "
             f"(the per-drone gz_camera_bridge TCP port) — got {gz_port!r}")
+    sector = data.get("sector_deg")
+    if sector is not None:
+        if (not isinstance(sector, (list, tuple)) or len(sector) != 2
+                or any(not isinstance(c, (int, float)) or isinstance(c, bool)
+                       or not math.isfinite(c) for c in sector)):
+            raise ConfigError(
+                f"{where}.sector_deg must be [center_deg, half_width_deg] "
+                f"finite numbers (the ADVISORY keep-in wedge from C2, deg, "
+                f"CCW+) — got {sector!r}")
+        if sector[1] < 0:
+            raise ConfigError(
+                f"{where}.sector_deg half_width_deg must be >= 0 (a negative "
+                f"wedge half-angle would strand the drone outside every "
+                f"sector) — got {sector!r}")
+        sector = (float(sector[0]), float(sector[1]))
     return DroneConfig(
         id=str(data["id"]),
         plane_id=data.get("plane_id"),
@@ -296,6 +320,7 @@ def _build_drone(raw: Dict[str, Any], index: int) -> DroneConfig:
         sitl_address=sitl_address,
         mavsdk_grpc_port=grpc_port,
         gazebo_video_port=gz_port,
+        sector_deg=sector,
     )
 
 
@@ -344,7 +369,8 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
         optional=("telemetry_stale_s", "battery_warn_pct", "video_stale_s",
                   "landing_reserve_s", "phase_timeout_s", "geofence_radius_m",
                   "geofence_alt_m", "loop_overrun_factor", "loop_overrun_ticks",
-                  "land_retry_period_s", "land_retry_window_s", "slot_wait_s"),
+                  "land_retry_period_s", "land_retry_window_s", "slot_wait_s",
+                  "launch_slot_wait_s"),
         where=f"{path}: guards",
     )
     guards = GuardsConfig(**guards_data)
@@ -513,13 +539,31 @@ def _validate(cfg: FinalsConfig, config_dir: str) -> None:
                 f"profile {cfg.profile!r} needs plane_id (Dola discovery key) "
                 f"for every drone — missing on: {missing}"
             )
-        bands = [d.altitude_band_m for d in cfg.drones]
-        if len(cfg.drones) > 1 and (None in bands or len(set(bands)) != len(bands)):
-            raise ConfigError(
-                f"profile {cfg.profile!r} with {len(cfg.drones)} drones requires "
-                f"a DISTINCT altitude_band_m per drone (vertical separation is "
-                f"the primary collision guarantee) — got {bands}"
-            )
+        # Multi-drone separation. The DEFAULT collision guarantee is the swarm
+        # altitude band (distinct per drone). BUT Challenge-2A flies under a
+        # ~1.1 m ceiling with a no-overfly rule, which KILLS altitude bands —
+        # so the LANDING mission separates by TIME (the SafetyController launch
+        # + landing corridor slots, NAV-8) + SPACE (per-drone advisory
+        # sectors). A config opts into that model by declaring sector_deg on
+        # EVERY drone; then bands are NOT required (and need not be distinct).
+        # Either mechanism is accepted; a config that declares NEITHER on a
+        # multi-drone flight is refused (silent no-separation is the bug class
+        # this guard exists to prevent).
+        if len(cfg.drones) > 1:
+            bands = [d.altitude_band_m for d in cfg.drones]
+            sectors_all = all(d.sector_deg is not None for d in cfg.drones)
+            bands_distinct = None not in bands and len(set(bands)) == len(bands)
+            if not bands_distinct and not sectors_all:
+                missing_sectors = [d.id for d in cfg.drones
+                                   if d.sector_deg is None]
+                raise ConfigError(
+                    f"profile {cfg.profile!r} with {len(cfg.drones)} drones "
+                    f"needs a multi-drone SEPARATION mechanism: EITHER a "
+                    f"DISTINCT altitude_band_m per drone (the swarm vertical "
+                    f"separation; got bands {bands}) OR a sector_deg on EVERY "
+                    f"drone (the NAV-8 TIME+SPACE model for the ~1.1 m-ceiling "
+                    f"landing mission, where altitude bands are illegal) — "
+                    f"missing sector_deg on: {missing_sectors}")
 
     for name, value in (("tick_hz", cfg.tick_hz),
                         ("mission_budget_s", cfg.mission_budget_s),
@@ -688,3 +732,4 @@ def _validate_guards(cfg: FinalsConfig) -> None:
             f"land_retry_period_s ({g.land_retry_period_s}) — the landing "
             f"ladder would never retry")
     _num("slot_wait_s", g.slot_wait_s)
+    _num("launch_slot_wait_s", g.launch_slot_wait_s)
