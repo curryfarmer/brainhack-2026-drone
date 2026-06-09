@@ -310,10 +310,14 @@ stageB3() {
   # the swarm proves single-drone-loss isolation (charlie FAILED + exactly one
   # emergency_land, alpha+bravo complete, exit 1).
   if [ "$mode" = "kill" ]; then
-    ( sleep "${KILL_AFTER:-55}"
-      kp="$(cat "$RUN/px4_vision_2.pid" 2>/dev/null)"
-      echo "[stageB3] DRILL kill3: kill -9 instance 2 (charlie) PX4 pid=${kp:-?}" >&2
-      [ -n "$kp" ] && kill -9 "$kp" 2>/dev/null ) &
+    ( sleep "${KILL_AFTER:-45}"
+      # The recorded px4_vision_2.pid is a setsid wrapper, not the live px4
+      # (setsid detaches px4 into its own session) -> kill the REAL process by
+      # command-line pattern. Killing px4 (not its mavsdk_server) exercises the
+      # staleness path: px4 dies, mavsdk_server lives, telemetry goes QUIET.
+      kp="$(pgrep -f 'bin/px4 -i 2' | tr '\n' ' ')"
+      echo "[stageB3] DRILL kill3: kill -9 instance 2 (charlie) px4 -i 2 pid(s)=${kp:-NONE}" >&2
+      pkill -9 -f 'bin/px4 -i 2' 2>/dev/null ) &
   fi
 
   echo "[stageB3] finals sitl3_vision (sentry_scan x3) budget=${secs}s mode=${mode}"
