@@ -45,8 +45,11 @@ start() {
 
 drive() {
   local secs="${1:-65}"
+  # ROS setup scripts reference unbound vars; relax nounset just for sourcing.
+  set +u
   # shellcheck disable=SC1090
   source "$ROS_SETUP" || { echo "FAIL [drive]: cannot source $ROS_SETUP" >&2; return 2; }
+  set -u
   local bridge_args=()
   for i in "${IDS[@]}"; do
     bridge_args+=("/model/convoy_robot_${i}/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist")
