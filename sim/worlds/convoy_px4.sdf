@@ -1,0 +1,98 @@
+<?xml version="1.0"?>
+<!-- SIM-4 convoy world, PX4-FLYABLE variant (gate V2a).
+
+     This is sim/worlds/convoy.sdf (the proven SIM-3 camera world) PLUS the gz
+     sensor SYSTEM plugins PX4 SITL needs to FLY (imu/air-pressure/air-speed/
+     altimeter/magnetometer/navsat/forcetorque/contact) and a spherical_coordinates
+     GPS origin. convoy.sdf has only the Sensors system (cameras render but PX4
+     reports "Accel/Gyro/baro/compass missing" because those sensors never
+     publish) — SIM-4 proved that empirically. convoy.sdf is left UNTOUCHED so
+     SIM-3 / run_convoy.sh / check_detection stay reproducible.
+
+     World NAME is "convoy_px4" -> camera topics are /world/convoy_px4/...; the
+     gz_camera_bridge --topic and finals must use convoy_px4. Convoy cmd_vel
+     topics (/model/convoy_robot_<id>/cmd_vel) are model-scoped, so run_convoy.sh
+     drive still moves the robots regardless of world name.
+
+     Run (PX4 OWNS the gz server so lockstep works; llvmpipe so cameras render):
+       LIBGL_ALWAYS_SOFTWARE=1 HEADLESS=1 PX4_SYS_AUTOSTART=4001 \
+         PX4_SIM_MODEL=gz_x500_mono_cam_640 PX4_GZ_WORLD=convoy_px4 \
+         GZ_SIM_RESOURCE_PATH=<repo>/sim/models:<px4>/Tools/simulation/gz/models \
+         ./build/px4_sitl_default/bin/px4 -i 0
+     Copy this file to ~/PX4-Autopilot/Tools/simulation/gz/worlds/ first. -->
+<sdf version="1.9">
+  <world name="convoy_px4">
+
+    <!-- Camera render (SIM-3) + the flight-sensor systems PX4 needs. Without the
+         Imu/AirPressure/Magnetometer/NavSat systems the matching sensors on the
+         x500 never publish and PX4 preflight fails "sensor missing". -->
+    <plugin filename="gz-sim-physics-system"           name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system"     name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system"           name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-imu-system"               name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-air-pressure-system"      name="gz::sim::systems::AirPressure"/>
+    <plugin filename="gz-sim-air-speed-system"         name="gz::sim::systems::AirSpeed"/>
+    <plugin filename="gz-sim-altimeter-system"         name="gz::sim::systems::Altimeter"/>
+    <plugin filename="gz-sim-magnetometer-system"      name="gz::sim::systems::Magnetometer"/>
+    <plugin filename="gz-sim-navsat-system"            name="gz::sim::systems::NavSat"/>
+    <plugin filename="gz-sim-forcetorque-system"       name="gz::sim::systems::ForceTorque"/>
+    <plugin filename="gz-sim-contact-system"           name="gz::sim::systems::Contact"/>
+
+    <!-- GPS/NavSat origin (PX4 needs a global origin to fuse position). -->
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>47.397971057728974</latitude_deg>
+      <longitude_deg>8.546163739800146</longitude_deg>
+      <elevation>0</elevation>
+    </spherical_coordinates>
+
+    <scene>
+      <ambient>0.4 0.4 0.4 1</ambient>
+      <background>0.7 0.7 0.75 1</background>
+      <grid>false</grid>
+    </scene>
+
+    <light type="directional" name="sun">
+      <cast_shadows>false</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>1 1 1 1</diffuse>
+      <specular>0.3 0.3 0.3 1</specular>
+      <direction>0.2 0.2 -1.0</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="col">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+        </collision>
+        <visual name="vis">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+          <material><diffuse>0.5 0.5 0.5 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 5 convoy robots, phase-offset around the circle (center (0,-2), R=2, CCW). -->
+    <include><uri>model://convoy_robot_7</uri> <name>convoy_robot_7</name> <pose>0 0 0 0 0 3.1416</pose></include>
+    <include><uri>model://convoy_robot_11</uri><name>convoy_robot_11</name><pose>-1.902 -1.382 0 0 0 4.3982</pose></include>
+    <include><uri>model://convoy_robot_23</uri><name>convoy_robot_23</name><pose>-1.176 -3.618 0 0 0 5.6549</pose></include>
+    <include><uri>model://convoy_robot_42</uri><name>convoy_robot_42</name><pose>1.176 -3.618 0 0 0 0.6283</pose></include>
+    <include><uri>model://convoy_robot_88</uri><name>convoy_robot_88</name><pose>1.902 -1.382 0 0 0 1.8850</pose></include>
+
+    <!-- 2 landing-pad markers, static, just north of the route. -->
+    <include><uri>model://pad_100</uri><name>pad_100</name><pose>0.8 0.5 0 0 0 0</pose></include>
+    <include><uri>model://pad_101</uri><name>pad_101</name><pose>-0.8 0.5 0 0 0 0</pose></include>
+
+    <!-- 3 SENTRY tower cameras at the origin, looking straight down (kept so the
+         static-cam fallback + SIM-3 parity hold; the drone flies its OWN camera). -->
+    <include><uri>model://mono_cam_640</uri><name>cam_band_120</name><pose>0 0 1.2 0 1.5707 0</pose></include>
+    <include><uri>model://mono_cam_640</uri><name>cam_band_170</name><pose>0 0 1.7 0 1.5707 0</pose></include>
+    <include><uri>model://mono_cam_640</uri><name>cam_band_220</name><pose>0 0 2.2 0 1.5707 0</pose></include>
+
+  </world>
+</sdf>
