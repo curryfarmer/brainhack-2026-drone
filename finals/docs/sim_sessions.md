@@ -95,7 +95,7 @@ after SIM-2; full sim after SIM-5.
 | SIM-0 | env | VM bring-up: launch/stop scripts, raw smoke 1×+3×, rendering/ros2/resource probes | — | ✅ 2026-06-07 |
 | SIM-1 | **S6** | `MavsdkSitlAdapter` (vendored-with-fixes) + per-drone config schema; **VM V1** + kill drill | SIM-0, S4 (S5 recommended) | ✅ 2026-06-07 |
 | SIM-2 | S6 stretch | `replay_plot.py` (proven on the SIM-1 fixture) → `sitl3.json` → 3× headless swarm + drills — **HEADLESS SIM DONE** | SIM-1, S5 | ✅ 2026-06-09 |
-| SIM-3 | S8 assets | Convoy world: markers (ArUco+QR), robots, pads, band-altitude cams; detection check — **∥ with S4–S7** | SIM-0 | ⬜ |
+| SIM-3 | S8 assets | Convoy world: markers (ArUco+QR), robots, pads, band-altitude cams; detection check — **∥ with S4–S7** | SIM-0 | ✅ 2026-06-09 |
 | SIM-4 | **S8** core | `gazebo_video.py` + `search.py`; **V2a**: single drone logs sightings of MOVING markers | SIM-1, SIM-3, S7, S5 | ⬜ |
 | SIM-5 | S8 full | 3 camera-drones, full mission, all drills — **FULL SIM DONE** + residual-gaps list for S10 | SIM-2, SIM-4 | ⬜ |
 
@@ -795,7 +795,81 @@ full battery) before each drill/run; never reuse instances across many missions.
 
 **HEADLESS SIM DONE**
 
-### SIM-3 — pending
+### SIM-3 — convoy world assets ✅ 2026-06-09
+
+**Scope shipped** (all under `sim/`, outside the conventions/SDK scan — raw cv2/gz/rclpy):
+`gen_markers.py` (ArUco DICT_6X6_250 + QR v1/L PNG → per-marker gz model dir),
+`models/{convoy_robot_<id>×5, pad_{100,101}, mono_cam_640}`, `worlds/convoy.sdf`,
+`convoy_driver.py` (rclpy), `check_detection.py` (gz.transport13), `run_convoy.sh`.
+**World**: 5 marker robots (VelocityControl, driven via rclpy→ros_gz→`/model/<n>/cmd_vel`)
+orbiting a 2 m circle through the origin; a 3-camera down-tower (1.2/1.7/2.2 m sentry bands,
+mono_cam_640 = stock mono_cam at 640×480, HFOV **1.74 rad = 99.69° → SIM-4 `camera_hfov_deg`**);
+2 landing-pad markers just north of the route. `pytest finals/tests` green, `finals/` untouched.
+
+**VM RENDER FINDING (supersedes SIM-0 "top GL rung holds")**: ogre2 + SVGA3D renders **BLANK**
+camera frames on this VM — std=0 even on the stock `camera_sensor.sdf`. SIM-0's "29.8 FPS while
+rendering" was measuring blank frames. Camera SENSOR geometry only renders under **llvmpipe**
+(`LIBGL_ALWAYS_SOFTWARE=1`, std 59) or **ogre1** (`--render-engine ogre`, std 67). `run_convoy.sh`
+defaults to llvmpipe + `DISPLAY=:0`. Headless EGL (`--headless-rendering`) is also blank here.
+**SIM-4/5 must render under llvmpipe or ogre1, never the ogre2 default.**
+
+**Two bugs fixed during bring-up**: (1) texture **basename collision** — every `marker.png`
+collided in ogre2's resource cache so all markers rendered as the first-loaded id (7); textures
+are now `<model>.png` (unique). (2) `gz sim` `$!` is the **wrapper** PID, not the render-server
+child — `stop` now kills the server by world name.
+
+**px-vs-distance table PER MARKER TYPE** (llvmpipe, run 1 of 2; convoy markers 20 cm on the
+robot top z≈0.25 m so dist = band − 0.25; pads 40 cm on the ground so dist = band):
+
+```text
+ArUco (DICT_6X6_250) — DECODED on every band:
+  band 1.2 m (dist 0.95):  ids 7,11,23,42,88   px 44/45/45
+  band 1.7 m (dist 1.45):  ids 7,11,23,42,88   px 28/29/30
+  band 2.2 m (dist 1.95):  ids 7,11,23,42,88   px 21/21/22 ; pads 100,101 (dist 2.20) px 38
+QR (v1/L, payload=id) — LOCATED only, NEVER decoded:
+  band 1.2 m:  QR located 75 reads  px 35/57/57   (full-code extent; ~1.7 px/module)
+  band 1.7 m / 2.2 m:  QR not even located
+```
+
+**ArUco vs QR conclusion (feeds module_map's highest-value open question)**: ArUco (20 cm) decodes
+at ALL three sentry altitudes; QR is barely *locatable* at 1.2 m and invisible at 1.7/2.2 m.
+QR decode floor ≈ **4 px/module** (measured locally on cv2 4.11+QUIRC: decodes at ≥4, fails at 3),
+i.e. ~132 px total for a 33-module code — the 57 px seen at 1.2 m is ~1.7 px/module, far below.
+**→ QR is NOT viable for sentry detection at 1.2–2.2 m on 640 px; use ArUco** (or fly QR ≪1 m).
+The VM's apt cv2 4.5.4 is also **not linked against QUIRC** (locates QR, never decodes — separate
+real-world caveat); decode was confirmed on the laptop cv2 4.11.
+
+**Coverage**: every convoy id (7,11,23,42,88) + both pads (100,101) decoded, **missing: NONE**.
+Pads decode at band 2.2 m (centered in the wide FOV; near the frame edge at 1.2/1.7 m they fall
+outside detection). A reproducible spurious id **157** (1–3 reads/run) is a raw single-frame ArUco
+false positive — exactly why the finals perception layer confirms ids across frames.
+
+**Determinism** (two fresh runs, seeded constant-Twist circle): identical decoded id SET
+`{7,11,23,42,88,100,101}` both runs; per-band px identical (44/45 · 28/29/30 · 21/22). PASS.
+
+**FPS per rendering rung** (3×640×480 cams @ 15 Hz, 4 vCPU):
+```text
+ogre2 (default)            : BLANK frames (std 0) — unusable for vision on this VM
+llvmpipe (LIBGL_SW=1)      : ~14 fps/cam delivered, RTF ~0.9–1.0  [the working default + the smoke's REAL llvmpipe run]
+ogre1 (--render-engine ogre): ~13.5 fps/cam, RTF 1.00 (renders + detects; faster RTF than llvmpipe)
+```
+
+**Annotated frames** (`finals/docs/evidence/`): `sim3_aruco_band120.png` (robot 7 detected on its
+3D chassis + 2 distinct pads), `sim3_aruco_band220.png` (pads 100/101 + robot 88 all annotated),
+`sim3_qr_band120.png` (40 cm pad QRs located [orange] but the 20 cm robot QR not even located).
+
+**What this does NOT validate** (onsite-window jobs — `simulation.md`): HULA camera **HFOV** (we use
+stock 1.74 rad; real unknown, `camera_hfov_deg: null`); **real-world read range** (rendered, noise-free,
+flat-lit textures); **motion blur** (static cams + 0.4 m/s convoy ≈ none; real flight + rolling shutter
+will degrade decode, QR worst). Out of scope by design: flight dynamics, PX4/HULA, the finals detector
+wrapper (S7) / `gazebo_video.py` (SIM-4), bearing math, any `finals/` integration.
+
+**Notes for SIM-4/5**: (a) render under **llvmpipe or ogre1** — ogre2 is blank here; (b) reuse the
+camera topic `/world/convoy/model/cam_band_<NN>/link/camera_link/sensor/camera/image` and the
+`PYTHONNOUSERSITE=1 python3` (system 3.10) interpreter for gz+cv2; (c) `gazebo_video.py` runs the SAME
+gz.transport13 latest-frame pattern as `sim/check_detection.py` (mirrors root `depth_receiver.py`);
+(d) marker skin is a one-key `gen_markers.py --type {aruco|qr}` reskin (type-agnostic model names);
+(e) the 4th (0.7 m) camera was dropped — a 4-cam llvmpipe world starves one camera's stream.
 
 ### SIM-4 — pending
 
