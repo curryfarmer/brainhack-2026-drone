@@ -525,12 +525,26 @@ def _validate(cfg: FinalsConfig, config_dir: str) -> None:
             raise ConfigError(
                 f"profile 'sitl' multi-drone mavsdk_grpc_port values must be "
                 f"DISTINCT (one mavsdk_server per drone) — got {ports}")
+        # Same EITHER/OR separation contract as bench/real below: distinct
+        # altitude bands (the swarm vertical-separation default, e.g. SIM-5's
+        # sitl3_vision.json 1.2/1.7/2.2) OR a sector_deg on EVERY drone (the
+        # NAV-8 TIME+SPACE model the ~1.1 m-ceiling LANDING mission flies — and
+        # rehearses in SITL via sitl3_landing.json — where altitude bands are
+        # illegal). A multi-drone SITL flight declaring NEITHER is refused
+        # (silent no-separation is the bug class this guard prevents).
         bands = [d.altitude_band_m for d in cfg.drones]
-        if None in bands or len(set(bands)) != len(bands):
+        sectors_all = all(d.sector_deg is not None for d in cfg.drones)
+        bands_distinct = None not in bands and len(set(bands)) == len(bands)
+        if not bands_distinct and not sectors_all:
+            missing_sectors = [d.id for d in cfg.drones
+                               if d.sector_deg is None]
             raise ConfigError(
-                f"profile 'sitl' with {len(cfg.drones)} drones requires a "
-                f"DISTINCT altitude_band_m per drone (vertical separation is "
-                f"the primary collision guarantee) — got {bands}")
+                f"profile 'sitl' with {len(cfg.drones)} drones needs a "
+                f"multi-drone SEPARATION mechanism: EITHER a DISTINCT "
+                f"altitude_band_m per drone (vertical separation; got bands "
+                f"{bands}) OR a sector_deg on EVERY drone (the NAV-8 TIME+SPACE "
+                f"model for the landing mission, where altitude bands are "
+                f"illegal) — missing sector_deg on: {missing_sectors}")
 
     if cfg.profile in ("bench", "real"):
         missing = [d.id for d in cfg.drones if d.plane_id is None]

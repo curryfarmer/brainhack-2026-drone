@@ -106,6 +106,54 @@ are JSON edits — no source changes.
 
 ---
 
+## Challenge-2A LANDING (44%) — nav gates (added by NAV-9)
+
+The blocks above are the 2B convoy-tag mission (altitude bands + sentry search).
+**2A is the separate, equally-weighted LANDING mission**: launch 3 HULA from C2,
+navigate position-blind to 3 chosen pads avoiding obstacles, land each inside its
+hoop. It uses the unified nav layer (planner → `navigate` → `land_on_pad`) and a
+DIFFERENT deconfliction — **TIME + SPACE, never altitude bands** (the ~1.1 m
+ceiling + no-overfly rule forbid bands). Config: [`finals/configs/landing_real.json`](../../finals/configs/landing_real.json)
+(`flight_backend: pyhulax`), arena [`finals/configs/arenas/sample.json`](../../finals/configs/arenas/sample.json)
+(re-measure + overwrite onsite).
+
+### SITL rehearsal (done on the VM, NOT onsite — proves the LOGIC)
+
+A PX4+Gazebo rehearsal of the **backend-agnostic** nav logic (the real drone is
+HULA via pyhulax; the nav phases emit the same Action vocabulary above the adapter
+boundary, so SITL proves the algorithm — planner detour, open-loop transit, visual
+landing, staggered+serialized deconfliction — NOT the HULA hardware constants).
+Run via [`sim/run_landing.sh`](../../sim/run_landing.sh) on the VM:
+
+| Gate | Proves | Run |
+|---|---|---|
+| **L1** | 1 drone flies `[takeoff, navigate, land_on_pad]` and lands near the pad, detouring around the crate keep-out | `bash sim/run_landing.sh land1` |
+| **L2** | 3 drones, time-staggered launch + serialized landing, each to its OWN distinct valid pad; zero spurious FlightTimeouts | `bash sim/run_landing.sh land3` |
+| **drills** | `q` lands all (orderly); kill instance 2 → it FAILs + exactly-once emergency_land, others finish | `abort3` / `kill3` |
+| **footage** | watchable third-person + onboard mp4 of the whole flight | `viewtest` |
+
+Evidence (RTF, final DR-vs-pad error, drill outcomes) is logged in
+[`sim_sessions.md`](../../sim_sessions.md). SITL gives the drone real EKF position,
+but the nav phases ignore it (position-blind by design), so the open-loop transit
++ visual servo are faithfully exercised.
+
+### Onsite landing bench gates (tune config, not code)
+
+These are the HULA-specific constants SITL cannot establish — bench them in the
+0:55–1:15 config block, props off until the servo gate:
+
+| Gate | Re-validate | Field(s) |
+|---|---|---|
+| **Gate-DR** (drift) | fly 1 m forward + a 4×90° square, tape-measure the closure error → the open-loop drift budget. Sets the planner inflation + leg subdivision so cumulative drift stays inside the inflated corridor. | `zone.navigate.inflation_m`, `max_leg_cm` |
+| **Gate-AD** (ArUco decode) | hold a pad marker at the takeoff height and at `commit_alt_m`; find the real acquire/decode range looking DOWN → the acquire window + commit altitude | `zone.land_on_pad.valid_marker_ids` (the real green-pad ids), `acquire_timeout_s`, `commit_alt_m` |
+| **Gate-LS** (landing servo) | props-OFF first: hold the drone over a fixed marker, confirm `pixel_offset_to_move` drives the correct LEFT/RIGHT/FWD/BACK; THEN a single props-on descent onto a stationary marker → tune `k_lateral`, `tol_px`, `descend_step_cm`, `descend_persist_frames` | `zone.land_on_pad.*` servo tunables |
+
+(These mirror the spec's NAV-9 Gate-E/F/M; renamed Gate-DR/AD/LS so they don't
+collide with the 2B swarm gates A–G above.) The binding rule still holds: **no new
+behavior in the last 25 min — tune the JSON, not the code.**
+
+---
+
 ## Hard rules (non-negotiable)
 
 1. **Tune config, not code.** Onsite changes are JSON edits. The one sanctioned
