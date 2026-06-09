@@ -338,3 +338,25 @@ def test_servo_module_is_pure_no_numpy_at_runtime():
     # only third-party-ish dependency and it is stdlib.
     import finals.mission.phases._servo as servo
     assert servo.math is math
+
+
+def test_pixel_move_step_scales_with_k():
+    # k is the ONSITE-tuned lateral gain (Gate F). A mutant that drops/ignores
+    # k would emit the SAME distance for k=1 and k=2 — every other servo test
+    # uses k=1.0, so without this the drop-k mutant survives the whole suite.
+    # cx 480 -> px +160 -> error_norm 0.25; alt 1.0 -> step_cm = 25*k, unclamped.
+    common = dict(frame_w=640, altitude_m=1.0, min_cm=0.0, max_cm=1000.0,
+                  tol_px=5.0)
+    m1 = pixel_offset_to_move(_bbox_centred_at(480.0), k=1.0, **common)
+    m2 = pixel_offset_to_move(_bbox_centred_at(480.0), k=2.0, **common)
+    assert isinstance(m1, Move) and isinstance(m2, Move)
+    assert m1.distance_cm == 25
+    assert m2.distance_cm == pytest.approx(2 * m1.distance_cm, abs=1)
+
+
+def test_pixel_move_short_bbox_raises_typed_not_indexerror():
+    # A bbox missing element [2] must fail with the typed WHAT/WHICH/WHY/CHECK
+    # ValueError, NOT a bare IndexError (the deadband loop indexes [0] and [2]).
+    with pytest.raises(ValueError, match="bbox_xyxy"):
+        pixel_offset_to_move((10.0, 20.0, 30.0), frame_w=640, altitude_m=1.0,
+                             k=1.0, min_cm=0.0, max_cm=100.0, tol_px=5.0)

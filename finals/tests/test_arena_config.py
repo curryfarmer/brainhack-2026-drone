@@ -222,3 +222,34 @@ def test_load_config_missing_arena_raises(tmp_path):
     }), encoding="utf-8")
     with pytest.raises(ConfigError, match="map file not found"):
         load_config(str(bad))
+
+
+def test_pad_radius_infinite_raises():
+    # radius_m = inf passes `radius > 0` (inf > 0 is True) but is a config bug
+    # that would create an infinite NAV-6 hoop. Every other numeric guard checks
+    # isfinite; this pins that radius_m does too.
+    bad = copy.deepcopy(_VALID)
+    bad["pads"][0]["radius_m"] = float("inf")
+    with pytest.raises(ConfigError, match=r"radius_m must be a finite"):
+        ArenaMap.from_dict(bad, name="t")
+
+
+def test_load_config_propagates_semantically_malformed_arena(tmp_path):
+    # A SEMANTIC arena error (pad out of bounds) must surface THROUGH
+    # load_config, not only through ArenaMap.from_dict — guards a _resolve_arena
+    # regression that swallows the ConfigError (the whole suite would otherwise
+    # stay green while shipping a broken arena).
+    arena_dir = tmp_path / "arenas"
+    arena_dir.mkdir()
+    bad_arena = copy.deepcopy(_VALID)
+    bad_arena["pads"][0]["center_m"] = [999.0, 2.0]   # north 999 >> north_max 10
+    (arena_dir / "bad_arena.json").write_text(
+        json.dumps(bad_arena), encoding="utf-8")
+    cfg_path = tmp_path / "cfg.json"
+    cfg_path.write_text(json.dumps({
+        "profile": "mock", "flight_backend": "mock", "frame_backend": "none",
+        "detector": {"backend": "none"}, "arena_name": "bad_arena",
+        "drones": [{"id": "alpha", "phases": ["takeoff_demo"]}],
+    }), encoding="utf-8")
+    with pytest.raises(ConfigError, match="OUTSIDE bounds"):
+        load_config(str(cfg_path))

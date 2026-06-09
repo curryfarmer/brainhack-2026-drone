@@ -56,6 +56,11 @@ Point = Tuple[float, float]  # (north_m, east_m)
 # ~0.057 deg => miter scale <= ~1000x inflation, which is already absurd for a
 # crate footprint and only ever makes the keep-out (safely) larger.
 _MIN_SIN_HALF_ANGLE = 1e-3
+# Below this |signed area| (m^2) a ring is degenerate or self-intersecting
+# (a bow-tie's lobes cancel to ~0): "outward" is undefined, so we fail loud
+# rather than silently pick the inward normal and shrink the keep-out. Far
+# below any real crate footprint (a 10 cm square is 1e-2 m^2).
+_MIN_SIGNED_AREA_M2 = 1e-9
 
 
 def _signed_area(polygon_m: Sequence[Point]) -> float:
@@ -99,7 +104,14 @@ def inflate_polygon(polygon_m: Sequence[Point],
     # For a CCW ring (area > 0) the outward normal of edge (p_i -> p_{i+1}),
     # direction (dn, de), is (de, -dn) normalized; for a CW ring it is the
     # negation. We fold that into `s = +/-1`.
-    s = 1.0 if _signed_area(pts) > 0.0 else -1.0
+    area2 = _signed_area(pts)
+    if abs(area2) <= _MIN_SIGNED_AREA_M2:
+        raise ValueError(
+            f"inflate_polygon: polygon signed area is ~0 ({area2!r} m^2) — the "
+            f"ring is degenerate or self-intersecting (e.g. a bow-tie), so "
+            f"'outward' is undefined and the offset would SHRINK it and silently "
+            f"re-admit collisions; check the keep-out vertex order in the arena")
+    s = 1.0 if area2 > 0.0 else -1.0
 
     # Per-edge OUTWARD unit normal, edge i = pts[i] -> pts[i+1].
     edge_normals = []

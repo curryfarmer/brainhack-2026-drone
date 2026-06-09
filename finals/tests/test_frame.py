@@ -146,3 +146,20 @@ def test_sector_bad_half_width_raises():
 def test_sector_bad_center_raises():
     with pytest.raises(ConfigError, match="sector_center_deg"):
         in_sector((1.0, 0.0), (0.0, 0.0), float("nan"), 30.0)
+
+
+def test_sector_delta_wraps_across_the_180_seam():
+    # center=-170, half=30 -> wedge spans [-200,-140] == [160,180] U [-180,-140].
+    # A point at bearing +175 is INSIDE only via the INNER wrap180 on the delta:
+    # wrap180(175 - (-170)) = wrap180(345) = -15, |−15| = 15 <= 30. A mutant that
+    # drops that inner wrap computes |345| = 345 > 30 -> WRONGLY outside. The
+    # existing +170/south test never wraps (delta 10), so it does not catch this.
+    o = (0.0, 0.0)
+    pt175 = (math.cos(math.radians(175.0)), -math.sin(math.radians(175.0)))
+    assert bearing_from_c2_deg(pt175, o) == pytest.approx(175.0, abs=1e-6)
+    assert in_sector(pt175, o, sector_center_deg=-170.0,
+                     sector_half_width_deg=30.0) is True
+    # control: bearing +100 is genuinely outside the same wedge (delta 90).
+    pt100 = (math.cos(math.radians(100.0)), -math.sin(math.radians(100.0)))
+    assert in_sector(pt100, o, sector_center_deg=-170.0,
+                     sector_half_width_deg=30.0) is False

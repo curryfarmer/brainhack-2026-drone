@@ -654,11 +654,15 @@ def _resolve_arena(cfg: FinalsConfig, config_dir: str) -> None:
             f"arena_name {name!r}: map file not found (tried "
             f"{[os.path.abspath(c) for c in candidates]}) — add "
             f"finals/configs/arenas/{filename} (NAV-2 ships a sample)")
-    with open(resolved, "r", encoding="utf-8") as f:
-        try:
+    try:
+        with open(resolved, "r", encoding="utf-8") as f:
             raw = json.load(f)
-        except json.JSONDecodeError as e:
-            raise ConfigError(f"{resolved}: invalid JSON — {e}") from e
+    except json.JSONDecodeError as e:
+        raise ConfigError(f"{resolved}: invalid JSON — {e}") from e
+    except OSError as e:
+        raise ConfigError(
+            f"arena_name {name!r}: cannot read map file {resolved} — {e}; "
+            f"check the file exists, is readable, and is not locked") from e
     cfg.arena = ArenaMap.from_dict(raw, name=name)
 
 

@@ -113,6 +113,35 @@ def test_detour_path_goes_around_not_through_inflated_box():
     assert not _hits(pts, shrunk)
 
 
+def test_planner_returns_the_optimal_path_not_a_greedy_one():
+    # OPTIMALITY pin (S-PLAN review HIGH: every other detour test asserts only
+    # reachability + clearance, so a planner that returns a LONGER collision-free
+    # path passes them all). Two asymmetric stacked boxes form a greedy TRAP:
+    # B1 pokes east (so its near detour is WEST), B2 pokes west (near detour
+    # EAST). A greedy-best-first search (heuristic only, no g) dives toward the
+    # goal-ward corner each step and zig-zags ~16.7 m; the true shortest weaves
+    # the other way for ~11.08 m. Asserting the EXACT optimal length KILLS the
+    # greedy-best-first mutant (drop the g term in the priority key — verified it
+    # returns ~16.7 m here and fails this assert). NOTE: an inadmissible-weight
+    # (h*1.5) or a `<`->`<=` relaxation-retie mutant are EQUIVALENT mutants (both
+    # still return the exact optimum on this unique-optimum graph), so no detour
+    # fixture can kill them — they are not real defects. A* with an admissible
+    # euclidean heuristic must return exactly the optimum.
+    b1 = KeepOut(id="b1", polygon_m=((2.0, -0.5), (2.0, 4.0),
+                                     (4.0, 4.0), (4.0, -0.5)))
+    b2 = KeepOut(id="b2", polygon_m=((6.0, -4.0), (6.0, 0.5),
+                                     (8.0, 0.5), (8.0, -4.0)))
+    legs = plan((0.0, 0.0), (10.0, 0.0), arena(b1, b2), inflation_m=0.3,
+                max_leg_cm=100_000.0)
+    pts = fly(legs)
+    assert pts[-1][0] == pytest.approx(10.0, abs=TOL_M)
+    assert pts[-1][1] == pytest.approx(0.0, abs=TOL_M)
+    assert not _hits(pts, b1.polygon_m)
+    assert not _hits(pts, b2.polygon_m)
+    total_cm = sum(l.distance_cm for l in legs)
+    assert total_cm == pytest.approx(1108.369, abs=1.0)   # optimum; greedy ~1672
+
+
 # ============================================================
 # Corridor between two boxes
 # ============================================================

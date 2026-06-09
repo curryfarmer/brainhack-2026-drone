@@ -139,12 +139,14 @@ pass count + any new test file paths. Commit nothing — leave changes staged fo
 
 | Slice | R1 done | R2 done | CRIT | HIGH | Disposition | Suite |
 |---|---|---|---|---|---|---|
-| S-PLAN  | ☐ | ☐ | - | - | | |
-| S-FRAME | ☐ | ☐ | - | - | | |
-| S-SERVO | ☐ | ☐ | - | - | | |
+| S-PLAN  | ☑ | ☑ | 0 | 1 | FIXED: bowtie/degenerate-ring guard in inflate_polygon (was silently shrinking keep-out); + A* optimality test (greedy-trap, kills drop-g; h*1.5 & relax-retie are equivalent mutants, documented). | 1007 ✓ |
+| S-FRAME | ☑ | ☑ | 0 | 2 | FIXED: pad radius_m isfinite guard (inf was accepted); malformed-arena-through-load_config test; _resolve_arena OSError→typed ConfigError. R2 REFUTED the non-45° discord_to_ned HIGH (heading-0 already exercises cos*right). | 1007 ✓ |
+| S-SERVO | ☑ | ☑ | 0 | 0 | FIXED: k-gain non-unit test (drop-k was unkillable); short-bbox→typed ValueError (was bare IndexError); hoisted per-tick f-string [OPT]; corrected the wrong module_map wrap180 `>=` note. | 1007 ✓ |
 | S-NAV   | ☐ | ☐ | - | - | | |
 | S-LAND  | ☐ | ☐ | - | - | | |
 | S-DECON | ☐ | ☐ | - | - | | |
 | E2E suite | ☐ | — | - | - | | |
+
+**Batch-1 mutation kill-checks (verified):** drop-`k` servo → test FAILS; drop inner `wrap180` in `in_sector` → test FAILS; greedy-best-first A* (drop `g`) → optimality test FAILS. All reverted clean. (Lesson logged: `git checkout --` to revert a MUTANT also nukes an uncommitted real fix in the same file — re-apply or stash first.)
 
 ## NAV-9 (SITL, after the table is green) — see the plan's NAV-9 spec; run on `ssh bhvm`.

@@ -150,10 +150,10 @@ class LandingPad:
             optional=(), where=where)
         radius = data["radius_m"]
         if (not isinstance(radius, (int, float)) or isinstance(radius, bool)
-                or not radius > 0):
+                or not math.isfinite(radius) or not radius > 0):
             raise ConfigError(
-                f"{where}.radius_m must be a number > 0 (m, the hoop radius), "
-                f"got {radius!r}")
+                f"{where}.radius_m must be a finite number > 0 (m, the hoop "
+                f"radius), got {radius!r}")
         valid = data["valid"]
         if not isinstance(valid, bool):
             raise ConfigError(

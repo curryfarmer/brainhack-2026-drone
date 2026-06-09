@@ -75,6 +75,16 @@ def test_inflate_zero_is_identity():
     assert out == SQUARE_CCW
 
 
+def test_inflate_degenerate_bowtie_raises():
+    # A self-intersecting (bow-tie) ring has ~zero signed area, so "outward" is
+    # undefined. Before the guard, _signed_area == 0 fell to the INWARD branch
+    # and SHRANK the keep-out, silently re-admitting collisions. NAV-2 accepts a
+    # 4-distinct-vertex bow-tie (no simple-polygon check), so this is reachable.
+    bowtie = ((0.0, 0.0), (1.0, 1.0), (1.0, 0.0), (0.0, 1.0))  # area cancels to 0
+    with pytest.raises(ValueError, match="signed area"):
+        inflate_polygon(bowtie, 0.5)
+
+
 def test_inflate_negative_raises():
     with pytest.raises(ValueError, match="must be >= 0"):
         inflate_polygon(SQUARE_CCW, -0.1)

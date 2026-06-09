@@ -50,6 +50,11 @@ from typing import Optional, Tuple
 
 from finals.types import Direction, Move, Rotate
 
+# Hoisted off the per-tick hot path: pixel_offset_to_move runs every control
+# tick, so the bbox-element error labels are precomputed once instead of
+# f-formatted on each call before the deadband early-return.
+_BBOX_LABELS = ("bbox_xyxy[0]", "bbox_xyxy[1]", "bbox_xyxy[2]", "bbox_xyxy[3]")
+
 
 def _require_finite(name: str, value: float) -> float:
     """Reject NaN/inf/non-number loudly — a silent NaN poisons every
@@ -182,8 +187,13 @@ def pixel_offset_to_move(bbox_xyxy: Tuple[float, float, float, float],
         raise ValueError(
             f"pixel_offset_to_move: tol_px must be >= 0, got {tol_px} — a "
             f"negative deadband can never be satisfied; check the config")
+    if len(bbox_xyxy) < 4:
+        raise ValueError(
+            f"pixel_offset_to_move: bbox_xyxy must have 4 elements "
+            f"(x1,y1,x2,y2), got {len(bbox_xyxy)} — check the Sighting.bbox_xyxy "
+            f"source (a short tuple is a detector/wiring bug)")
     for i in (0, 2):
-        _require_finite(f"bbox_xyxy[{i}]", bbox_xyxy[i])
+        _require_finite(_BBOX_LABELS[i], bbox_xyxy[i])
 
     cx = (float(bbox_xyxy[0]) + float(bbox_xyxy[2])) / 2.0
     px = cx - frame_w_in / 2.0
