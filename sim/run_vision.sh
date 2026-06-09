@@ -164,11 +164,22 @@ stageB() {
 # SIM-5: 3 PX4 camera-drones (FULL SIM)
 # ============================================================
 # Onboard camera topic for instance i (model x500_mono_cam_640_<i>).
-cam_topic_n() { echo "/world/convoy_px4/model/x500_mono_cam_640_$1/link/camera_link/sensor/camera/image"; }
+cam_topic_n() { echo "/world/${VWORLD}/model/x500_mono_cam_640_$1/link/camera_link/sensor/camera/image"; }
+
+# World + finals config + spawn poses launch3/stageB3 use. Defaults = the SIM-5
+# circle world; lanes3/track3 (S11) override these globals to convoy_3lane.
+VWORLD="${VWORLD:-convoy_px4}"
+VCONFIG="${VCONFIG:-finals/configs/sitl3_vision.json}"
 
 # Spawn poses (ENU x,y,z,r,p,yaw), >=1.2 m from every robot start (robot_7 @ origin):
 # alpha (1.2,0.2) E, bravo (-1.2,0.2) W, charlie (0,-2) = convoy-circle CENTRE.
 SIM5_POSES=( "1.2,0.2,0.2,0,0,0" "-1.2,0.2,0.2,0,0,0" "0,-2,0.2,0,0,0" )
+# S11 3-lane drone poses: alpha over car_7 (4.2,0), bravo over car_23 (-2,3.5),
+# charlie over car_88 (-2,-3.5) — each >=1.2 m from its car spawn (see
+# convoy_3lane.sdf). VM-TUNE these against the measured nadir footprints.
+LANES3_POSES=( "4.2,0,0.2,0,0,0" "-2.0,3.5,0.2,0,0,0" "-2.0,-3.5,0.2,0,0,0" )
+# The poses launch3 actually spawns; lanes3/track3 swap in LANES3_POSES.
+LAUNCH_POSES=( "${SIM5_POSES[@]}" )
 
 stageB3_stop() {
   stop_bridge
@@ -180,7 +191,7 @@ stageB3_stop() {
   done
   pkill -9 -f 'bin/px4 -i' 2>/dev/null
   bash "$REPO/sim/run_convoy.sh" stop 2>/dev/null   # ros bridge + driver
-  pkill -9 -f 'convoy_px4' 2>/dev/null               # PX4's gz server (this world)
+  pkill -9 -f "$VWORLD" 2>/dev/null                  # PX4's gz server (this world)
   pkill -9 -f 'g[z] sim' 2>/dev/null                 # last resort (bracket = no self-match)
   sleep 1
 }
@@ -193,26 +204,26 @@ stageB3_stop() {
 # for scriptable kill drills.
 launch3() {
   install_model
-  cp "$REPO/sim/worlds/convoy_px4.sdf" "$HOME/PX4-Autopilot/Tools/simulation/gz/worlds/" 2>/dev/null
+  cp "$REPO/sim/worlds/${VWORLD}.sdf" "$HOME/PX4-Autopilot/Tools/simulation/gz/worlds/" 2>/dev/null
   export DISPLAY="${DISPLAY:-:0}"
   export GZ_SIM_RESOURCE_PATH="$REPO/sim/models:$HOME/PX4-Autopilot/Tools/simulation/gz/models:${GZ_SIM_RESOURCE_PATH:-}"
 
   local i
   for i in 0 1 2; do
     local log="$RUN/px4_vision_$i.log" pidf="$RUN/px4_vision_$i.pid"
-    echo "[launch3] instance $i pose=${SIM5_POSES[$i]} -> $log"
+    echo "[launch3] instance $i world=$VWORLD pose=${LAUNCH_POSES[$i]} -> $log"
     if (( i == 0 )); then
       ( cd "$HOME/PX4-Autopilot" && \
         LIBGL_ALWAYS_SOFTWARE=1 HEADLESS=1 PX4_SYS_AUTOSTART=4001 \
-          PX4_SIM_MODEL=gz_x500_mono_cam_640 PX4_GZ_WORLD=convoy_px4 \
-          PX4_GZ_MODEL_POSE="${SIM5_POSES[$i]}" \
+          PX4_SIM_MODEL=gz_x500_mono_cam_640 PX4_GZ_WORLD=$VWORLD \
+          PX4_GZ_MODEL_POSE="${LAUNCH_POSES[$i]}" \
           setsid ./build/px4_sitl_default/bin/px4 -i "$i" -d > "$log" 2>&1 & \
         echo $! > "$pidf" )
     else
       ( cd "$HOME/PX4-Autopilot" && \
         HEADLESS=1 PX4_SYS_AUTOSTART=4001 PX4_GZ_STANDALONE=1 \
-          PX4_SIM_MODEL=gz_x500_mono_cam_640 PX4_GZ_WORLD=convoy_px4 \
-          PX4_GZ_MODEL_POSE="${SIM5_POSES[$i]}" \
+          PX4_SIM_MODEL=gz_x500_mono_cam_640 PX4_GZ_WORLD=$VWORLD \
+          PX4_GZ_MODEL_POSE="${LAUNCH_POSES[$i]}" \
           setsid ./build/px4_sitl_default/bin/px4 -i "$i" -d > "$log" 2>&1 & \
         echo $! > "$pidf" )
     fi
@@ -320,7 +331,7 @@ stageB3() {
       pkill -9 -f 'bin/px4 -i 2' 2>/dev/null ) &
   fi
 
-  echo "[stageB3] finals sitl3_vision (sentry_scan x3) budget=${secs}s mode=${mode}"
+  echo "[stageB3] finals --config $VCONFIG budget=${secs}s mode=${mode}"
   local rc=0
   if [ "$mode" = "abort" ]; then
     # DRILL abort3: run finals under a PTY so the AbortListener arms, inject 'q'
@@ -328,14 +339,47 @@ stageB3() {
     ( cd "$REPO" && PYTHONNOUSERSITE=1 python3 sim/pty_q_harness.py \
         --trigger-regex 'offboard active' --trigger-count 3 --fallback-secs 80 -- \
         .venv/bin/python -m finals.main --profile sitl \
-        --config finals/configs/sitl3_vision.json --budget "$secs" ) || rc=$?
+        --config "$VCONFIG" --budget "$secs" ) || rc=$?
   else
     ( cd "$REPO" && .venv/bin/python -m finals.main --profile sitl \
-        --config finals/configs/sitl3_vision.json --budget "$secs" ) || rc=$?
+        --config "$VCONFIG" --budget "$secs" ) || rc=$?
   fi
   stageB3_stop
   echo "[stageB3] finals rc=$rc — sightings.csv under $REPO/runs_finals/<latest>/"
   return $rc
+}
+
+# ============================================================
+# S11: 3 PX4 drones over the convoy_3lane world (3 diverging straight lanes).
+# Reuses the full stageB3 flow (launch3 gate + 120 s settle + 3 bridges +
+# finals) with VWORLD/VCONFIG/LAUNCH_POSES overridden and a STRAIGHT convoy
+# (CONVOY_ANGULAR=0) on the 3 lane robots only.
+#
+# CONVOY_DELAY (150 s): the convoy HOLDS at its spawns through the EKF settle +
+# takeoff and only starts driving once the scan is live. Each drone spawns
+# DIRECTLY OVER its car's spawn (LANES3_POSES, in-footprint), so detection is
+# guaranteed the moment the scan starts (car sitting still under the nadir cam),
+# and the post-delay motion shows the 3 diverging directions. Without the hold
+# the cars (driving from t=0) would leave the footprints before takeoff.
+# CONVOY_LINEAR slow (0.05 m/s) so each car lingers in / is easily chased by its
+# drone. Both env-overridable for VM tuning.
+# ============================================================
+lanes3() {                 # Workstream A: hover + photograph (sentry_scan)
+  VWORLD=convoy_3lane
+  VCONFIG=finals/configs/sitl3_lanes_vision.json
+  LAUNCH_POSES=( "${LANES3_POSES[@]}" )
+  export CONVOY_IDS="7 23 88" CONVOY_ANGULAR=0 \
+         CONVOY_LINEAR="${CONVOY_LINEAR:-0.05}" CONVOY_DELAY="${CONVOY_DELAY:-150}"
+  stageB3 "${1:-300}" normal
+}
+
+track3() {                 # Workstream B: active chase (track_convoy)
+  VWORLD=convoy_3lane
+  VCONFIG=finals/configs/sitl3_track_vision.json
+  LAUNCH_POSES=( "${LANES3_POSES[@]}" )
+  export CONVOY_IDS="7 23 88" CONVOY_ANGULAR=0 \
+         CONVOY_LINEAR="${CONVOY_LINEAR:-0.05}" CONVOY_DELAY="${CONVOY_DELAY:-150}"
+  stageB3 "${1:-360}" normal
 }
 
 case "${1:-}" in
@@ -350,5 +394,7 @@ case "${1:-}" in
   abort3)        shift; stageB3 "${1:-360}" abort ;;
   kill3)         shift; stageB3 "${1:-360}" kill ;;
   stageB3-stop)  stageB3_stop ;;
-  *) echo "usage: $0 {install-model|bridge --topic T [--port P]|stop-bridge|stageA [secs]|stageB [secs]|probe3 [secs]|stageB3 [secs]|abort3 [secs]|kill3 [secs]|stageB3-stop}" >&2; exit 64 ;;
+  lanes3)        shift; lanes3 "${1:-300}" ;;
+  track3)        shift; track3 "${1:-360}" ;;
+  *) echo "usage: $0 {install-model|bridge --topic T [--port P]|stop-bridge|stageA [secs]|stageB [secs]|probe3 [secs]|stageB3 [secs]|abort3 [secs]|kill3 [secs]|stageB3-stop|lanes3 [secs]|track3 [secs]}" >&2; exit 64 ;;
 esac

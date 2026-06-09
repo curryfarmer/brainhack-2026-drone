@@ -1022,3 +1022,116 @@ Onsite pyhulax drones stream at their native rate; keep `command_timeout_s`/`mis
 at the onsite-sized values, not these RTF-0.86 sim numbers.
 
 **FULL SIM DONE**
+
+---
+
+## S11 — the strong-pipeline photo demo (Workstream A) + moonshot tracker (Workstream B)
+
+Two pieces past the SIM ladder, both built on the SIM-5 flight (3 PX4 camera-drones, llvmpipe,
+cam `update_rate 5`, RTF ~0.86 — *that* envelope is unchanged here; S11 adds no new flight load,
+only new world geometry + new finals decision logic). Branch `s11-track-and-photo`.
+
+**Workstream A — 1-drone → 1-car → 1-id + a saved photo.** The SIM-5 world orbits 5 cars on one
+circle so *every* drone sees *every* id — the opposite of a clean per-drone story. A forked world
+`sim/worlds/convoy_3lane.sdf` (SIM-5's `convoy_px4.sdf` left UNTOUCHED + reproducible) spawns only
+3 robots (ids 7/23/88) at 3 distinct yaws; a forward-only Twist (`run_convoy.sh CONVOY_ANGULAR=0`)
+drives them in 3 DIVERGING straight lanes ≈5.2 m apart, so the nadir footprints (r ≈ 1.18·band)
+never overlap. One drone hovers (`sentry_scan`) over each lane and reads ONLY its car's unique id.
+
+The one genuinely new finals capability: **the ArUco path now saves a photo.** Before, only the
+YOLO detector wrote annotated frames; the ArUco path built Sightings with `frame_path=None`. Now,
+config-gated by a single top-level `FinalsConfig.save_marker_frames` (default **False** → zero
+behaviour change, suite stays green, no stray frames), `make_marker_detector("aruco",
+save_dir=…)` creates the dir fail-loud at build time and the detector draws
+`cv2.aruco.drawDetectedMarkers` + `cv2.imwrite`s an annotated JPEG per frame-with-markers, stamping
+`Sighting.frame_path`. It lives in `aruco.py` (NOT perception): the detector already holds the
+frame AND the corners and cv2 is top-level there (SDK_ALLOWED), so `perception.py` stays pure (zero
+cv2) — mirrors the YOLO precedent. `main._build_perception` threads `run_dir` →
+`marker_frames/<drone>/`. Save is best-effort observability: a failed write (typed `cv2.error` /
+`imwrite`→False) warns to stderr and leaves `frame_path=None`; the Sighting still flows.
+Config `finals/configs/sitl3_lanes_vision.json` (run via `sim/run_vision.sh lanes3`).
+
+**Workstream B — `track_convoy`, a moonshot active tracker (was a stub).** A genuine reactive
+`MissionPhase`: it LOCKS one car's unique marker id and bearing-pursues the moving car, keeping it
+under the nadir camera, then gives up cleanly on budget and lands. Pure (no I/O/SDK/sleep) so it
+unit-tests by stepping hand-built `AgentContext`s like every other phase. Control law uses the ONE
+signal real HULA has (no measured position): steer `err = wrap180(bearing_deg − yaw_deg)` →
+`Rotate(clamp(err, ±max_step_deg))` (CCW+ sign, pinned in types/dead_reckon); once centered, since
+the camera is NADIR (rotating only spins the image), FOLLOWING needs TRANSLATION →
+`Move(FORWARD, approach_cm)` then `Hover` to re-observe. Open-loop, so bounded two ways: a
+cumulative `max_chase_cm` runaway cap AND `approach_enabled` **default False** (the lawnmower
+gate-E discipline — no open-loop translation on real flight until move/rotate accuracy is measured
+onsite; the sim demo config turns it on, sim being exactly where pursuit is proven). State machine
+INIT (Takeoff unless already flying) → ACQUIRE (lock the most-seen id within `acquire_window_s` that
+reaches `acquire_hits`; `track_marker_ids` filters which ids are eligible) → TRACK (steer/approach;
+re-acquire on a `lost_timeout_s` gap) → Done on `investigate_budget_s` or the chase cap. Degrades to
+a stable Hover when `bearing_deg`/`yaw_deg` is None (e.g. `camera_hfov_deg` null on real HULA) —
+never crashes, never flies blind. **`acquire_budget_s` is measured per ACQUIRE entry** (initial +
+every re-acquire), so a mid-chase loss gets a fresh budget to re-find the car while
+`investigate_budget_s` stays the phase-wide hard cap (a phase-relative budget would make re-acquire
+vestigial — Done instantly the moment the phase clock passed `acquire_budget_s`; caught by mutation
+kill-check). All tunables in `DroneConfig.zone["track_convoy"]`, validated loudly in `__init__`
+(a no-op tracker dies on the ground). Config `finals/configs/sitl3_track_vision.json` (per-drone
+`track_marker_ids` alpha→7/bravo→23/charlie→88, `approach_enabled true`; run via
+`sim/run_vision.sh track3`).
+
+**Bench evidence (laptop, pre-VM)** — all green:
+- Bare venv (no cv2/mavsdk/gz): **719 passed** (`perception.py` + `track_convoy.py` stay pure;
+  conventions scan clean — no `except Exception`, PHASE_REGISTRY set unchanged, no module globals).
+- With cv2 4.11.0: **59 passed** across the ArUco frame-save tests + the 26 `track_convoy` cases
+  (acquire/rotate-sign/center/chase-cap/lost-reacquire/budgets/degrade/validation/from_config + a
+  MockAdapter takeoff→Done→land integration).
+- Both configs resolve: `python -m finals.main --profile sitl --config … --dry-run` → exit 0 (the
+  dry-run builds agents, so `track_convoy.from_config` parsed every per-drone zone without error).
+- **Mutation kill-check** (3 mutants, all killed then reverted): `frame_path=saved_path`→`None`
+  killed the save-stamp test; the per-entry `acquire_budget_s`→phase-relative `elapsed` killed
+  `test_reacquire_gets_fresh_budget_after_late_loss`; the Rotate sign flip killed the 3
+  rotate-direction tests.
+
+**VM runs (`bhvm`, branch `s11-track-and-photo`) — BOTH workstreams PASS.** probe3 on
+`convoy_3lane` → RTF **0.85**, 3 cams ~4.3 fps (the SIM-5 envelope, unchanged — less geometry
+than the circle world). Instances came up in 6–11 s, EKF health-ready in **0.3–0.9 s** (the 120 s
+settle is conservative headroom, as SIM-5 noted).
+
+**THE convoy-timing fix (the only real surprise):** the first `lanes3` run flew clean (3 DONE,
+exit 0) but logged **sightings=0**. Root cause: `stageB3` starts the convoy *before* the 120 s EKF
+settle, so at the original 0.2 m/s the straight-lane cars drove ~24 m out and were gone before
+takeoff (SIM-5's circle hid this — the cars orbit forever; straight lanes don't return). Fix
+(sim-only): `convoy_driver.py --delay-s` holds the cars at their spawns (zero velocity, still a
+pure function of elapsed → two-run determinism) through the settle, so they only start driving once
+the scan is live; `lanes3`/`track3` set `CONVOY_DELAY=150` + `CONVOY_LINEAR=0.05`. Each drone
+spawns directly over its car (in-footprint) and each lane passes under the drone *centre*, so
+detection is guaranteed and the post-delay motion shows the 3 diverging directions.
+
+**A — `lanes3 300` (`runs_finals/20260609_223542`, 3 DONE, exit 0, elapsed 104 s, 745 sightings):**
+clean 1-drone→1-car→1-id + photo. Each drone's `sightings.csv` shows ONLY its assigned id, every
+row with a populated `frame_path`, and a matching annotated JPEG saved:
+
+```text
+drone     ids seen        frame_path set / none   marker_frames/<drone>/*.jpg
+alpha     {7: 134}        134 / 0                 134
+bravo     {23: 286}       286 / 0                 286
+charlie   {88: 325}       325 / 0                 325
+```
+Replay `finals/docs/evidence/s11_lanes3.png` — 3 near-stationary hover-scanners (final N/E ≈ 0),
+each a full 360° bearing-ray sweep onto its single centred marker.
+
+**B — `track3 360` (`runs_finals/20260609_224052`, 3 DONE, exit 0, elapsed 129 s ≈ the 120 s
+investigate budget, 680 sightings):** the bearing-pursuit controller works — `mission.jsonl` shows
+real `Rotate(clamp ±25°)` + `Move(FORWARD, 40 cm)` cycles (sentry_scan never emits `Move`).
+**charlie is textbook:** locked id 88, **281 sightings, chased 800 cm to the `max_chase_cm` cap, 1
+reacquire** (the per-acquire-entry re-budget firing live), then `Done` cleanly on the chase cap and
+landed (27 Rotate / 20 Move / 32 Hover). alpha tracked then lost its car and ended in re-acquire at
+the investigate budget ("…before a lock"); bravo tracked briefly, lost it, and the re-acquire
+timed out cleanly ("no id reached 3 hit(s)… nothing to track"). All 3 gave up cleanly and landed.
+Replay `finals/docs/evidence/s11_track3.png` — per-drone tracks with bearing rays onto the marker
+labels (charlie's the dense pursuit path). The lone `guard_trip` is BatteryGuard **ADVISORY** (SITL
+telemetry carries no battery_pct — known SIM-5 artifact, non-critical).
+
+**Chase-success scaled with footprint** (band 1.2→2.2 m → r ≈ 1.4→2.6 m): charlie (band 2.2) held
+its car through the head-on-then-tail pass and hit the chase cap; alpha (band 1.2) lost it during
+the turnaround. VM-TUNE lever for an all-3 clean chase: raise `lost_timeout_s` and/or the smaller
+bands in `sitl3_track_vision.json`, and/or slow `CONVOY_LINEAR` further — done-when B (one drone
+follows its car, then clean give-up + land) is already met.
+
+**STRONG PIPELINE — VM-PROVEN (A + B), merge pending**

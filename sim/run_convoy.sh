@@ -14,7 +14,10 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN="$REPO/sim/run"; mkdir -p "$RUN"
 WORLD="$REPO/sim/worlds/convoy.sdf"
 ROS_SETUP="/opt/ros/humble/setup.bash"
-IDS=(7 11 23 42 88)
+# IDS + driver velocity honor env overrides (run_vision.sh lanes3/track3 sets
+# CONVOY_IDS="7 23 88" CONVOY_ANGULAR=0 for 3 straight lanes); unset = the
+# SIM-3 5-robot circle (linear 0.4, angular 0.2).
+IDS=(${CONVOY_IDS:-7 11 23 42 88})
 TOPIC_DEADLINE_S=40
 
 export GZ_SIM_RESOURCE_PATH="$REPO/sim/models:${GZ_SIM_RESOURCE_PATH:-}"
@@ -58,7 +61,10 @@ drive() {
   ros2 run ros_gz_bridge parameter_bridge "${bridge_args[@]}" > "$RUN/bridge.log" 2>&1 &
   echo $! > "$RUN/bridge.pid"
   sleep 2
-  python3 "$REPO/sim/convoy_driver.py" --duration-s "$secs" > "$RUN/driver.log" 2>&1 &
+  python3 "$REPO/sim/convoy_driver.py" --ids "${IDS[@]}" \
+    --linear "${CONVOY_LINEAR:-0.4}" --angular "${CONVOY_ANGULAR:-0.2}" \
+    --delay-s "${CONVOY_DELAY:-0}" \
+    --duration-s "$secs" > "$RUN/driver.log" 2>&1 &
   echo $! > "$RUN/driver.pid"
 }
 

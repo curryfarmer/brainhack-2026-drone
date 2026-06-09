@@ -404,7 +404,8 @@ def _build_detector(cfg: FinalsConfig, bus: SightingBus,
 
 def _build_perception(cfg: FinalsConfig, drone_id: str, bus: SightingBus,
                       slog: Optional[SightingLog], events: EventLog,
-                      detector, csv_health=None, *, api=None) -> Tuple[object, object]:
+                      detector, csv_health=None, *, run_dir: str,
+                      api=None) -> Tuple[object, object]:
     """One (VideoSource, PerceptionLoop) pair per drone. Called only when
     _frames_wired(cfg). The VideoSource is chosen by cfg.frame_backend:
     ReplaySource (replay), GazeboRgbSource over the sim TCP bridge (gazebo,
@@ -447,9 +448,14 @@ def _build_perception(cfg: FinalsConfig, drone_id: str, bus: SightingBus,
             # The replay PROFILE ends when the frames do; a flight profile
             # replaying frames (dev rig) loops the clip for the whole mission.
             loop=(cfg.profile != "replay"))
+    # S11: per-drone annotated-frame dir, wired only when save_marker_frames
+    # is on (default off -> save_dir None -> minimal Sightings, suite unchanged).
+    marker_save_dir = (os.path.join(run_dir, "marker_frames", drone_id)
+                       if cfg.save_marker_frames else None)
     perception = PerceptionLoop(
         drone_id, source, bus, events,
-        detect_marker=make_marker_detector(cfg.marker_backend),
+        detect_marker=make_marker_detector(cfg.marker_backend,
+                                           save_dir=marker_save_dir),
         slog=slog, detector=detector,
         camera_hfov_deg=cfg.camera_hfov_deg,
         csv_health=csv_health,
@@ -559,6 +565,7 @@ async def _amain(cfg: FinalsConfig, agents: List[DroneAgent],
 
 def _build_agents(cfg: FinalsConfig, events: EventLog, bus: SightingBus,
                   slog: Optional[SightingLog], detector, csv_health, safety,
+                  run_dir: str,
                   ) -> Tuple[List[DroneAgent], List[Tuple[object, object]]]:
     """One DroneAgent + its (source, perception) pair per cfg.drone. Shared by
     the mission path (_run_mission) and --preflight-only (_run_preflight_only)
@@ -580,7 +587,7 @@ def _build_agents(cfg: FinalsConfig, events: EventLog, bus: SightingBus,
         if _frames_wired(cfg):
             source, perception = _build_perception(
                 cfg, d.id, bus, slog, events, detector,
-                csv_health=csv_health, api=api)
+                csv_health=csv_health, run_dir=run_dir, api=api)
             perceptions.append((source, perception))
             frame_ts_fn = perception.last_frame_ts
             on_degrade = (lambda trip, p=perception:
@@ -639,7 +646,7 @@ def _run_mission(cfg: FinalsConfig) -> int:
             cfg, events, bus, run_dir)
         try:
             agents, perceptions = _build_agents(
-                cfg, events, bus, slog, detector, csv_health, safety)
+                cfg, events, bus, slog, detector, csv_health, safety, run_dir)
             return asyncio.run(_amain(cfg, agents, events, run_dir, bus,
                                       perceptions=perceptions))
         finally:
@@ -671,7 +678,7 @@ def _run_preflight_only(cfg: FinalsConfig) -> int:
             cfg, events, bus, run_dir)
         try:
             agents, perceptions = _build_agents(
-                cfg, events, bus, slog, detector, csv_health, safety)
+                cfg, events, bus, slog, detector, csv_health, safety, run_dir)
             sources = [s for s, _p in perceptions]
             results = asyncio.run(run_preflight(
                 cfg.profile, agents, cfg, sources=sources, events=events,
@@ -711,7 +718,7 @@ def _run_replay(cfg: FinalsConfig) -> int:
                                        csv_health=csv_health)
             source, perception = _build_perception(
                 cfg, "replay", bus, slog, events, detector,
-                csv_health=csv_health)
+                csv_health=csv_health, run_dir=run_dir)
             events.log("mission", "run_start", profile=cfg.profile,
                        replay_dir=cfg.replay_dir, replay_fps=cfg.replay_fps,
                        marker_backend=cfg.marker_backend,
