@@ -331,7 +331,7 @@ stageB3() {
       pkill -9 -f 'bin/px4 -i 2' 2>/dev/null ) &
   fi
 
-  echo "[stageB3] finals sitl3_vision (sentry_scan x3) budget=${secs}s mode=${mode}"
+  echo "[stageB3] finals --config $VCONFIG budget=${secs}s mode=${mode}"
   local rc=0
   if [ "$mode" = "abort" ]; then
     # DRILL abort3: run finals under a PTY so the AbortListener arms, inject 'q'

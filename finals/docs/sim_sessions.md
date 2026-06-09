@@ -1088,16 +1088,50 @@ kill-check). All tunables in `DroneConfig.zone["track_convoy"]`, validated loudl
   `test_reacquire_gets_fresh_budget_after_late_loss`; the Rotate sign flip killed the 3
   rotate-direction tests.
 
-**VM run PENDING** (the actual flights are on `bhvm`, after `git pull`):
-```bash
-bash sim/run_vision.sh probe3            # RTF/fps sanity unchanged from SIM-5
-bash sim/run_vision.sh lanes3 300        # A: each drone photographs its OWN car
-bash sim/run_vision.sh track3 360        # B: each drone chases its OWN moving car, then lands
-```
-Done-when (A): each drone's `runs_finals/<run>/sightings.csv` shows ONLY its assigned id with a
-populated `frame_path`, and a saved `marker_frames/<drone>/aruco_*.jpg` of its car exists.
-Done-when (B): a run where a drone's track follows its car across the arena (sustained same-id
-sightings + `Move`/`Rotate` events in `mission.jsonl`), then gives up cleanly on budget and lands.
-The `lanes3`/`track3` drone poses + `CONVOY_LINEAR` are VM-TUNED on the box (tune config, not code).
+**VM runs (`bhvm`, branch `s11-track-and-photo`) — BOTH workstreams PASS.** probe3 on
+`convoy_3lane` → RTF **0.85**, 3 cams ~4.3 fps (the SIM-5 envelope, unchanged — less geometry
+than the circle world). Instances came up in 6–11 s, EKF health-ready in **0.3–0.9 s** (the 120 s
+settle is conservative headroom, as SIM-5 noted).
 
-**STRONG PIPELINE — bench-green, VM run pending**
+**THE convoy-timing fix (the only real surprise):** the first `lanes3` run flew clean (3 DONE,
+exit 0) but logged **sightings=0**. Root cause: `stageB3` starts the convoy *before* the 120 s EKF
+settle, so at the original 0.2 m/s the straight-lane cars drove ~24 m out and were gone before
+takeoff (SIM-5's circle hid this — the cars orbit forever; straight lanes don't return). Fix
+(sim-only): `convoy_driver.py --delay-s` holds the cars at their spawns (zero velocity, still a
+pure function of elapsed → two-run determinism) through the settle, so they only start driving once
+the scan is live; `lanes3`/`track3` set `CONVOY_DELAY=150` + `CONVOY_LINEAR=0.05`. Each drone
+spawns directly over its car (in-footprint) and each lane passes under the drone *centre*, so
+detection is guaranteed and the post-delay motion shows the 3 diverging directions.
+
+**A — `lanes3 300` (`runs_finals/20260609_223542`, 3 DONE, exit 0, elapsed 104 s, 745 sightings):**
+clean 1-drone→1-car→1-id + photo. Each drone's `sightings.csv` shows ONLY its assigned id, every
+row with a populated `frame_path`, and a matching annotated JPEG saved:
+
+```text
+drone     ids seen        frame_path set / none   marker_frames/<drone>/*.jpg
+alpha     {7: 134}        134 / 0                 134
+bravo     {23: 286}       286 / 0                 286
+charlie   {88: 325}       325 / 0                 325
+```
+Replay `finals/docs/evidence/s11_lanes3.png` — 3 near-stationary hover-scanners (final N/E ≈ 0),
+each a full 360° bearing-ray sweep onto its single centred marker.
+
+**B — `track3 360` (`runs_finals/20260609_224052`, 3 DONE, exit 0, elapsed 129 s ≈ the 120 s
+investigate budget, 680 sightings):** the bearing-pursuit controller works — `mission.jsonl` shows
+real `Rotate(clamp ±25°)` + `Move(FORWARD, 40 cm)` cycles (sentry_scan never emits `Move`).
+**charlie is textbook:** locked id 88, **281 sightings, chased 800 cm to the `max_chase_cm` cap, 1
+reacquire** (the per-acquire-entry re-budget firing live), then `Done` cleanly on the chase cap and
+landed (27 Rotate / 20 Move / 32 Hover). alpha tracked then lost its car and ended in re-acquire at
+the investigate budget ("…before a lock"); bravo tracked briefly, lost it, and the re-acquire
+timed out cleanly ("no id reached 3 hit(s)… nothing to track"). All 3 gave up cleanly and landed.
+Replay `finals/docs/evidence/s11_track3.png` — per-drone tracks with bearing rays onto the marker
+labels (charlie's the dense pursuit path). The lone `guard_trip` is BatteryGuard **ADVISORY** (SITL
+telemetry carries no battery_pct — known SIM-5 artifact, non-critical).
+
+**Chase-success scaled with footprint** (band 1.2→2.2 m → r ≈ 1.4→2.6 m): charlie (band 2.2) held
+its car through the head-on-then-tail pass and hit the chase cap; alpha (band 1.2) lost it during
+the turnaround. VM-TUNE lever for an all-3 clean chase: raise `lost_timeout_s` and/or the smaller
+bands in `sitl3_track_vision.json`, and/or slow `CONVOY_LINEAR` further — done-when B (one drone
+follows its car, then clean give-up + land) is already met.
+
+**STRONG PIPELINE — VM-PROVEN (A + B), merge pending**
