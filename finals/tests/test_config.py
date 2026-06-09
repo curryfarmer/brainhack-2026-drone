@@ -268,6 +268,86 @@ def test_shipped_config_loads(profile, repo_root, monkeypatch):
     assert cfg.profile == profile
 
 
+# ---------------- SIM-5: per-drone gazebo_video_port ----------------
+def _sitl3_gazebo() -> dict:
+    """The SIM-5 shape: 3 PX4 camera-drones, gazebo frames, a distinct bridge
+    port per drone."""
+    def drone(id_, addr, grpc, band, port):
+        return {"id": id_, "phases": ["sentry_scan"], "altitude_band_m": band,
+                "sitl_address": addr, "mavsdk_grpc_port": grpc,
+                "gazebo_video_port": port}
+    return {
+        "profile": "sitl", "flight_backend": "mavsdk_sitl",
+        "frame_backend": "gazebo", "camera_hfov_deg": 99.69,
+        "detector": {"backend": "none"},
+        "drones": [
+            drone("alpha", "udpin://0.0.0.0:14540", 50051, 1.2, 5600),
+            drone("bravo", "udpin://0.0.0.0:14541", 50052, 1.7, 5601),
+            drone("charlie", "udpin://0.0.0.0:14542", 50053, 2.2, 5602),
+        ],
+    }
+
+
+def test_resolve_gazebo_video_port_per_drone_then_fallback(write_config):
+    from finals.config import resolve_gazebo_video_port
+    cfg = load_config(write_config(_sitl3_gazebo()))
+    assert resolve_gazebo_video_port(cfg, "alpha") == 5600
+    assert resolve_gazebo_video_port(cfg, "bravo") == 5601
+    assert resolve_gazebo_video_port(cfg, "charlie") == 5602
+    # an id not in the fleet (the replay runner never hits the gazebo branch)
+    # falls back to the top-level default port, never crashes.
+    assert resolve_gazebo_video_port(cfg, "nobody") == cfg.gazebo_video_port
+
+
+def test_sitl3_gazebo_ports_distinct_and_parsed(write_config):
+    cfg = load_config(write_config(_sitl3_gazebo()))
+    ports = [d.gazebo_video_port for d in cfg.drones]
+    assert ports == [5600, 5601, 5602]
+    assert len(set(ports)) == 3
+
+
+def test_multidrone_gazebo_missing_port_rejected(write_config):
+    cfg = _sitl3_gazebo()
+    del cfg["drones"][2]["gazebo_video_port"]      # charlie has no bridge port
+    with pytest.raises(ConfigError, match="gazebo_video_port on EVERY drone"):
+        load_config(write_config(cfg))
+
+
+def test_multidrone_gazebo_duplicate_port_rejected(write_config):
+    cfg = _sitl3_gazebo()
+    cfg["drones"][1]["gazebo_video_port"] = 5600    # bravo collides with alpha
+    with pytest.raises(ConfigError, match="DISTINCT"):
+        load_config(write_config(cfg))
+
+
+def test_gazebo_video_port_range_checked(write_config):
+    cfg = _sitl3_gazebo()
+    cfg["drones"][0]["gazebo_video_port"] = 80       # privileged, out of range
+    with pytest.raises(ConfigError, match="gazebo_video_port"):
+        load_config(write_config(cfg))
+
+
+def test_single_drone_gazebo_falls_back_to_top_level(write_config):
+    """sitl_vision.json's shape: one drone, no per-drone port — the top-level
+    fallback resolves and the multi-drone distinctness guard does NOT fire."""
+    from finals.config import resolve_gazebo_video_port
+    cfg_dict = _sitl3_gazebo()
+    cfg_dict["drones"] = cfg_dict["drones"][:1]
+    del cfg_dict["drones"][0]["gazebo_video_port"]
+    cfg_dict["gazebo_video_port"] = 5600
+    cfg = load_config(write_config(cfg_dict))
+    assert resolve_gazebo_video_port(cfg, "alpha") == 5600
+
+
+def test_shipped_sitl3_vision_loads(repo_root):
+    cfg = load_config(os.path.join(
+        repo_root, "finals", "configs", "sitl3_vision.json"))
+    assert cfg.frame_backend == "gazebo"
+    assert [d.id for d in cfg.drones] == ["alpha", "bravo", "charlie"]
+    ports = [d.gazebo_video_port for d in cfg.drones]
+    assert ports == [5600, 5601, 5602]
+
+
 # ---------------- guards (S5) ----------------
 def test_guards_defaults_applied(write_config, minimal_mock_config):
     cfg = load_config(write_config(minimal_mock_config))

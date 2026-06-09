@@ -265,10 +265,14 @@ def test_snapshot_negates_ned_into_contract_frame():
 # Endpoint resolution + factory wiring (still no mavsdk)
 # ============================================================
 def sitl_config(drones):
+    # frame_backend "none": these are endpoint/adapter-wiring tests, frames are
+    # irrelevant. (Multi-drone GAZEBO port validation lives in test_config.py's
+    # _sitl3_gazebo — keeping it out of here means the address/port/band
+    # distinctness tests below trip ONLY their intended guard.)
     return {
         "profile": "sitl",
         "flight_backend": "mavsdk_sitl",
-        "frame_backend": "gazebo",
+        "frame_backend": "none",
         "sitl_address": "udpin://0.0.0.0:14540",
         "detector": {"backend": "none"},
         "drones": drones,

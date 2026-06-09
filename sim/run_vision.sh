@@ -37,14 +37,17 @@ bridge() {
   done
   [ -n "$topic" ] || { echo "FAIL [bridge]: --topic required" >&2; return 64; }
 
-  local log="$RUN/gz_bridge.log" ready="$RUN/gz_bridge.ready"
+  # Per-port filenames so 3 concurrent bridges (SIM-5) never clobber each
+  # other's log/ready/pid (stageA/stageB still use exactly one, on 5600).
+  local log="$RUN/gz_bridge_${port}.log" ready="$RUN/gz_bridge_${port}.ready"
+  local pidf="$RUN/gz_bridge_${port}.pid"
   rm -f "$ready"
   echo "[bridge] gz_camera_bridge topic=$topic port=$port -> $log"
   PYTHONNOUSERSITE=1 python3 "$REPO/sim/gz_camera_bridge.py" \
     --topic "$topic" --port "$port" --ready-file "$ready" > "$log" 2>&1 &
-  echo $! > "$RUN/gz_bridge.pid"
+  echo $! > "$pidf"
 
-  local t0=$SECONDS pid; pid="$(cat "$RUN/gz_bridge.pid")"
+  local t0=$SECONDS pid; pid="$(cat "$pidf")"
   until [ -f "$ready" ] || grep -q "BRIDGE READY" "$log" 2>/dev/null; do
     kill -0 "$pid" 2>/dev/null || { echo "FAIL [bridge]: PID $pid died before READY — CHECK: tail $log" >&2; return 3; }
     if (( SECONDS - t0 > BRIDGE_READY_DEADLINE_S )); then
@@ -57,16 +60,20 @@ bridge() {
   echo "[bridge] ready after $((SECONDS - t0))s (PID $pid, port $port)"
 }
 
+# Tear down EVERY recorded bridge (1 for stageA/B, 3 for stageB3). Iterates the
+# per-port pid files; also reaps the legacy single-pid file from older runs.
 stop_bridge() {
-  if [ -f "$RUN/gz_bridge.pid" ]; then
-    local pid; pid="$(cat "$RUN/gz_bridge.pid")"
-    kill -TERM "$pid" 2>/dev/null && echo "[stop-bridge] TERM -> PID $pid"
+  local f pid found=0
+  for f in "$RUN"/gz_bridge_*.pid "$RUN/gz_bridge.pid"; do
+    [ -e "$f" ] || continue
+    found=1
+    pid="$(cat "$f")"
+    kill -TERM "$pid" 2>/dev/null && echo "[stop-bridge] TERM -> PID $pid ($(basename "$f"))"
     sleep 1
     kill -0 "$pid" 2>/dev/null && { kill -KILL "$pid" 2>/dev/null; echo "[stop-bridge] KILL -> PID $pid"; }
-    rm -f "$RUN/gz_bridge.pid"
-  else
-    echo "[stop-bridge] no recorded bridge PID"
-  fi
+    rm -f "$f"
+  done
+  (( found )) || echo "[stop-bridge] no recorded bridge PID"
 }
 
 # Stage A: convoy world (llvmpipe) + driving convoy + bridge on the STATIC
@@ -153,6 +160,149 @@ stageB() {
   return $rc
 }
 
+# ============================================================
+# SIM-5: 3 PX4 camera-drones (FULL SIM)
+# ============================================================
+# Onboard camera topic for instance i (model x500_mono_cam_640_<i>).
+cam_topic_n() { echo "/world/convoy_px4/model/x500_mono_cam_640_$1/link/camera_link/sensor/camera/image"; }
+
+# Spawn poses (ENU x,y,z,r,p,yaw), >=1.2 m from every robot start (robot_7 @ origin):
+# alpha (1.2,0.2) E, bravo (-1.2,0.2) W, charlie (0,-2) = convoy-circle CENTRE.
+SIM5_POSES=( "1.2,0.2,0.2,0,0,0" "-1.2,0.2,0.2,0,0,0" "0,-2,0.2,0,0,0" )
+
+stageB3_stop() {
+  stop_bridge
+  local i
+  for i in 0 1 2; do
+    if [ -f "$RUN/px4_vision_$i.pid" ]; then
+      kill -9 "$(cat "$RUN/px4_vision_$i.pid")" 2>/dev/null; rm -f "$RUN/px4_vision_$i.pid"
+    fi
+  done
+  pkill -9 -f 'bin/px4 -i' 2>/dev/null
+  bash "$REPO/sim/run_convoy.sh" stop 2>/dev/null   # ros bridge + driver
+  pkill -9 -f 'convoy_px4' 2>/dev/null               # PX4's gz server (this world)
+  pkill -9 -f 'g[z] sim' 2>/dev/null                 # last resort (bracket = no self-match)
+  sleep 1
+}
+
+# Launch 3 PX4 instances into ONE convoy_px4 world. Instance 0 OWNS the gz server
+# (renders all 3 cams -> needs llvmpipe); 1 and 2 JOIN via PX4_GZ_STANDALONE=1
+# (the normal multi-vehicle pattern — joining a PX4-lockstep world, unlike SIM-4's
+# failed join of a plain non-PX4 gz world). Each instance is gated on its OWN
+# camera topic (proves the model spawned AND its sensor publishes). PIDs recorded
+# for scriptable kill drills.
+launch3() {
+  install_model
+  cp "$REPO/sim/worlds/convoy_px4.sdf" "$HOME/PX4-Autopilot/Tools/simulation/gz/worlds/" 2>/dev/null
+  export DISPLAY="${DISPLAY:-:0}"
+  export GZ_SIM_RESOURCE_PATH="$REPO/sim/models:$HOME/PX4-Autopilot/Tools/simulation/gz/models:${GZ_SIM_RESOURCE_PATH:-}"
+
+  local i
+  for i in 0 1 2; do
+    local log="$RUN/px4_vision_$i.log" pidf="$RUN/px4_vision_$i.pid"
+    echo "[launch3] instance $i pose=${SIM5_POSES[$i]} -> $log"
+    if (( i == 0 )); then
+      ( cd "$HOME/PX4-Autopilot" && \
+        LIBGL_ALWAYS_SOFTWARE=1 HEADLESS=1 PX4_SYS_AUTOSTART=4001 \
+          PX4_SIM_MODEL=gz_x500_mono_cam_640 PX4_GZ_WORLD=convoy_px4 \
+          PX4_GZ_MODEL_POSE="${SIM5_POSES[$i]}" \
+          setsid ./build/px4_sitl_default/bin/px4 -i "$i" -d > "$log" 2>&1 & \
+        echo $! > "$pidf" )
+    else
+      ( cd "$HOME/PX4-Autopilot" && \
+        HEADLESS=1 PX4_SYS_AUTOSTART=4001 PX4_GZ_STANDALONE=1 \
+          PX4_SIM_MODEL=gz_x500_mono_cam_640 PX4_GZ_WORLD=convoy_px4 \
+          PX4_GZ_MODEL_POSE="${SIM5_POSES[$i]}" \
+          setsid ./build/px4_sitl_default/bin/px4 -i "$i" -d > "$log" 2>&1 & \
+        echo $! > "$pidf" )
+    fi
+
+    local t0=$SECONDS pid; pid="$(cat "$pidf")"
+    until gz topic -l 2>/dev/null | grep -q "x500_mono_cam_640_$i/link/camera_link/sensor/camera/image"; do
+      kill -0 "$pid" 2>/dev/null || { echo "FAIL [launch3]: instance $i (PID $pid) died before its camera topic — CHECK: tail $log" >&2; stageB3_stop; return 3; }
+      if (( SECONDS - t0 > 120 )); then
+        echo "FAIL [launch3]: instance $i camera topic never appeared in 120s — WHY: gz server (i0) or EKF/spawn — CHECK: tail $log" >&2
+        stageB3_stop; return 4
+      fi
+      sleep 2
+    done
+    echo "[launch3] instance $i camera up after $((SECONDS - t0))s"
+  done
+  echo "[launch3] all 3 instances up (cams 0/1/2)"
+}
+
+# Read sim-time milliseconds from one /clock message (sim block only).
+_clock_sim_ms() {
+  gz topic -e -t /clock -n 1 2>/dev/null | awk '
+    /^sim \{/{insim=1; next}
+    insim && /sec:/ {s=$2}
+    insim && /nsec:/{printf "%d", s*1000 + int($2/1000000); exit}'
+}
+
+# probe3: bring up 3 instances + 3 cams, measure RTF + per-cam fps over a window,
+# tear down. NO flight. THE render-load gate (SIM-3: 4 cams starve a stream on
+# this 4-vCPU VM; 3 is the open question). WARN -> drop x500_mono_cam_640
+# update_rate 15->10 and size command_timeout_s from the RTF.
+probe3() {
+  local secs="${1:-15}"
+  launch3 || return $?
+  echo "[probe3] measuring over ${secs}s (3 cams, llvmpipe)..."
+
+  local m0 w0; m0="$(_clock_sim_ms)"; w0=$SECONDS
+  # per-cam message counts over the window (background counters)
+  local i; declare -a cnt
+  local tmp="$RUN/probe3.$$"
+  for i in 0 1 2; do
+    ( timeout "$secs" gz topic -e -t "$(cam_topic_n "$i")" 2>/dev/null | grep -c 'header {' > "$tmp.$i" ) &
+  done
+  wait
+  local m1 w1; m1="$(_clock_sim_ms)"; w1=$SECONDS
+
+  local wall=$(( w1 - w0 )); (( wall < 1 )) && wall=1
+  local rtf="n/a"
+  if [ -n "$m0" ] && [ -n "$m1" ]; then
+    rtf="$(awk -v a="$m0" -v b="$m1" -v w="$wall" 'BEGIN{printf "%.2f", (b-a)/1000.0/w}')"
+  fi
+  echo "[probe3] --- RTF=${rtf} (sim ${m0}->${m1} ms over ${wall}s wall) ---"
+  local verdict="PASS" f
+  for i in 0 1 2; do
+    local c; c="$(cat "$tmp.$i" 2>/dev/null || echo 0)"; rm -f "$tmp.$i"
+    local fps; fps="$(awk -v c="$c" -v w="$wall" 'BEGIN{printf "%.1f", c/w}')"
+    echo "[probe3] cam $i: ${c} frames -> ${fps} fps"
+    awk -v f="$fps" 'BEGIN{exit !(f < 8.0)}' && verdict="WARN"
+  done
+  awk -v r="$rtf" 'BEGIN{exit !(r != "n/a" && r+0 < 0.9)}' 2>/dev/null && verdict="WARN"
+  echo "[probe3] VERDICT: $verdict"
+  [ "$verdict" = "WARN" ] && echo "[probe3]  -> a cam <8 fps or RTF<0.9: drop x500_mono_cam_640 update_rate 15->10 and re-probe; size command_timeout_s/mission_budget_s in sitl3_vision.json from the RTF (slow != broken)." >&2
+  stageB3_stop
+}
+
+# stageB3 (gate V2 full): 3 PX4 camera-drones fly sentry_scan over the moving
+# convoy, each reading its OWN onboard cam via its OWN bridge (5600/5601/5602).
+stageB3() {
+  local secs="${1:-180}"
+  launch3 || return $?
+
+  echo "[stageB3] driving the convoy"
+  bash "$REPO/sim/run_convoy.sh" drive "$((secs + 150))" || echo "[stageB3] WARN convoy drive failed — markers static" >&2
+
+  echo "[stageB3] settling EKF 60s (3-instance lockstep, convoy moving)"
+  sleep 60
+
+  local i
+  for i in 0 1 2; do
+    bridge --topic "$(cam_topic_n "$i")" --port "$((5600 + i))" || { stageB3_stop; return 5; }
+  done
+
+  echo "[stageB3] finals sitl3_vision (sentry_scan x3) budget=${secs}s"
+  local rc=0
+  ( cd "$REPO" && .venv/bin/python -m finals.main --profile sitl \
+      --config finals/configs/sitl3_vision.json --budget "$secs" ) || rc=$?
+  stageB3_stop
+  echo "[stageB3] finals rc=$rc — sightings.csv under $REPO/runs_finals/<latest>/"
+  return $rc
+}
+
 case "${1:-}" in
   install-model) install_model ;;
   bridge)        shift; bridge "$@" ;;
@@ -160,5 +310,8 @@ case "${1:-}" in
   stageA)        shift; stageA "$@" ;;
   stageB)        shift; stageB "$@" ;;
   stageB-stop)   stageB_stop ;;
-  *) echo "usage: $0 {install-model|bridge --topic T [--port P]|stop-bridge|stageA [secs]|stageB [secs]}" >&2; exit 64 ;;
+  probe3)        shift; probe3 "$@" ;;
+  stageB3)       shift; stageB3 "$@" ;;
+  stageB3-stop)  stageB3_stop ;;
+  *) echo "usage: $0 {install-model|bridge --topic T [--port P]|stop-bridge|stageA [secs]|stageB [secs]|probe3 [secs]|stageB3 [secs]|stageB3-stop}" >&2; exit 64 ;;
 esac

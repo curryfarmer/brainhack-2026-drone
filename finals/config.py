@@ -115,6 +115,11 @@ class DroneConfig:
     # 50051 (resolve_sitl_endpoint below).
     sitl_address: Optional[str] = None          # e.g. "udpin://0.0.0.0:14541"
     mavsdk_grpc_port: Optional[int] = None      # e.g. 50052
+    # Per-drone gz_camera_bridge TCP port (SIM-5): each camera-drone reads its
+    # OWN onboard camera via its OWN bridge, so a multi-drone gazebo config
+    # needs a DISTINCT port per drone. A single-drone gazebo config may omit it
+    # and falls back to the top-level gazebo_video_port (resolve_gazebo_video_port).
+    gazebo_video_port: Optional[int] = None     # e.g. 5601
 
 
 @dataclass
@@ -155,6 +160,20 @@ def resolve_sitl_endpoint(cfg: "FinalsConfig",
     port = drone.mavsdk_grpc_port if drone.mavsdk_grpc_port is not None \
         else 50051
     return address, port
+
+
+def resolve_gazebo_video_port(cfg: "FinalsConfig", drone_id: str) -> int:
+    """The gz_camera_bridge TCP port for one drone (SIM-5): the drone's own
+    gazebo_video_port when set, else the top-level cfg.gazebo_video_port
+    fallback (single-drone gazebo). Multi-drone gazebo configs are validated to
+    carry a DISTINCT gazebo_video_port on every drone, so the fallback can only
+    serve a single-drone config. Pure — unit-tested; main._build_perception is
+    the consumer (the gazebo branch). A drone_id not in cfg.drones (the no-drone
+    replay runner never reaches the gazebo branch) yields the top-level port."""
+    drone = next((d for d in cfg.drones if d.id == drone_id), None)
+    if drone is not None and drone.gazebo_video_port is not None:
+        return drone.gazebo_video_port
+    return cfg.gazebo_video_port
 
 
 # ============================================================
@@ -224,7 +243,7 @@ def _build_drone(raw: Dict[str, Any], index: int) -> DroneConfig:
         raw,
         required=("id", "phases"),
         optional=("plane_id", "led_rgb", "altitude_band_m", "zone",
-                  "sitl_address", "mavsdk_grpc_port"),
+                  "sitl_address", "mavsdk_grpc_port", "gazebo_video_port"),
         where=where,
     )
     phases = data["phases"]
@@ -253,6 +272,13 @@ def _build_drone(raw: Dict[str, Any], index: int) -> DroneConfig:
         raise ConfigError(
             f"{where}.mavsdk_grpc_port must be an int in [1024, 65535] "
             f"(instance i uses 50051+i) — got {grpc_port!r}")
+    gz_port = data.get("gazebo_video_port")
+    if gz_port is not None and (
+            not isinstance(gz_port, int) or isinstance(gz_port, bool)
+            or not 1024 <= gz_port <= 65535):
+        raise ConfigError(
+            f"{where}.gazebo_video_port must be an int in [1024, 65535] "
+            f"(the per-drone gz_camera_bridge TCP port) — got {gz_port!r}")
     return DroneConfig(
         id=str(data["id"]),
         plane_id=data.get("plane_id"),
@@ -262,6 +288,7 @@ def _build_drone(raw: Dict[str, Any], index: int) -> DroneConfig:
         zone=dict(data.get("zone", {})),
         sitl_address=sitl_address,
         mavsdk_grpc_port=grpc_port,
+        gazebo_video_port=gz_port,
     )
 
 
@@ -519,6 +546,24 @@ def _validate(cfg: FinalsConfig, config_dir: str) -> None:
         raise ConfigError(
             f'gazebo_video_host must be a non-empty string (e.g. "127.0.0.1"), '
             f"got {cfg.gazebo_video_host!r}")
+    if cfg.frame_backend == "gazebo" and len(cfg.drones) > 1:
+        # SIM-5: each camera-drone reads its OWN onboard camera through its OWN
+        # gz_camera_bridge, so every drone needs a DISTINCT gazebo_video_port
+        # (the top-level fallback can only serve a single-drone config). Same
+        # rule shape as the multi-drone mavsdk_grpc_port guard above.
+        missing = [d.id for d in cfg.drones if d.gazebo_video_port is None]
+        if missing:
+            raise ConfigError(
+                f"frame_backend 'gazebo' with {len(cfg.drones)} drones requires "
+                f"gazebo_video_port on EVERY drone (each reads its own onboard "
+                f"camera via its own bridge; the top-level fallback serves only a "
+                f"single drone) — missing on: {missing}")
+        gz_ports = [d.gazebo_video_port for d in cfg.drones]
+        if len(set(gz_ports)) != len(gz_ports):
+            raise ConfigError(
+                f"frame_backend 'gazebo' multi-drone gazebo_video_port values "
+                f"must be DISTINCT (one gz_camera_bridge per drone) — got "
+                f"{gz_ports}")
     if not 0 <= cfg.min_battery_pct <= 100:
         raise ConfigError(f"min_battery_pct {cfg.min_battery_pct} out of range [0, 100]")
     if cfg.video_channel_order not in ("rgb", "bgr"):

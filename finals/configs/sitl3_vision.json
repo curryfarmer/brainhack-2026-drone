@@ -1,0 +1,25 @@
+{
+  "_comment": "SIM-5 (FULL SIM): 3 concurrent PX4 SITL camera-drones flying sentry_scan over the moving convoy (convoy_px4 world). = configs/sitl3.json (3x endpoints) + configs/sitl_vision.json (gazebo frames + ArUco) + a per-drone gazebo_video_port so each drone reads its OWN onboard camera through its OWN sim/gz_camera_bridge. Endpoints: PX4 instance i sends MAVLink to udpin 1454<i>; one mavsdk_server per drone on gRPC 5005<i+1>; instance i's onboard camera model is x500_mono_cam_640_<i> on topic /world/convoy_px4/model/x500_mono_cam_640_<i>/link/camera_link/sensor/camera/image, forwarded by a bridge to TCP gazebo_video_port. PORT MAP: alpha i0 -> bridge 5600, bravo i1 -> 5601, charlie i2 -> 5602 (one bridge per drone; multi-drone gazebo REQUIRES distinct ports - config.py validated). altitude_band_m 1.2/1.7/2.2 doubles as takeoff height; vertical separation is the swarm collision guarantee. SPAWN POSES (run_vision.sh stageB3, ENU x,y >= 1.2 m from every robot start: robot_7 at origin): alpha (1.2,0.2), bravo (-1.2,0.2), charlie (0,-2)=convoy-circle centre so its 2.2 m band footprint covers the whole R=2 circle (all 5 IDs). sentry_scan revolutions 2 ~= >1 convoy lap. detector none: ArUco (marker_backend) is the primary detector. command_timeout_s 30 and mission_budget_s 240 are STARTING values - SIZE command_timeout_s from the measured 3-cam RTF (run_vision.sh probe3; slow != broken - sim_sessions recap 8); run_vision.sh stageB3 passes --budget. camera_hfov_deg 99.69 = mono_cam_640 HFOV 1.74 rad. gazebo_video_host/port top-level is the single-drone fallback only (unused here - every drone sets its own).",
+  "profile": "sitl",
+  "flight_backend": "mavsdk_sitl",
+  "frame_backend": "gazebo",
+  "sitl_address": "udpin://0.0.0.0:14540",
+  "command_timeout_s": 30,
+  "mission_budget_s": 240,
+  "camera_hfov_deg": 99.69,
+  "marker_backend": "aruco",
+  "gazebo_video_host": "127.0.0.1",
+  "gazebo_video_port": 5600,
+  "detector": { "backend": "none" },
+  "drones": [
+    { "id": "alpha",   "phases": ["sentry_scan"], "altitude_band_m": 1.2,
+      "sitl_address": "udpin://0.0.0.0:14540", "mavsdk_grpc_port": 50051,
+      "gazebo_video_port": 5600, "zone": { "sentry_scan": { "revolutions": 2 } } },
+    { "id": "bravo",   "phases": ["sentry_scan"], "altitude_band_m": 1.7,
+      "sitl_address": "udpin://0.0.0.0:14541", "mavsdk_grpc_port": 50052,
+      "gazebo_video_port": 5601, "zone": { "sentry_scan": { "revolutions": 2 } } },
+    { "id": "charlie", "phases": ["sentry_scan"], "altitude_band_m": 2.2,
+      "sitl_address": "udpin://0.0.0.0:14542", "mavsdk_grpc_port": 50053,
+      "gazebo_video_port": 5602, "zone": { "sentry_scan": { "revolutions": 2 } } }
+  ]
+}
