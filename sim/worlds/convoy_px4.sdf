@@ -10,7 +10,7 @@
      SIM-3 / run_convoy.sh / check_detection stay reproducible.
 
      World NAME is "convoy_px4" -> camera topics are /world/convoy_px4/...; the
-     gz_camera_bridge --topic and finals must use convoy_px4. Convoy cmd_vel
+     gz_camera_bridge topic and finals must use convoy_px4. Convoy cmd_vel
      topics (/model/convoy_robot_<id>/cmd_vel) are model-scoped, so run_convoy.sh
      drive still moves the robots regardless of world name.
 
