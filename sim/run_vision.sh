@@ -297,8 +297,9 @@ stageB3() {
   echo "[stageB3] driving the convoy"
   bash "$REPO/sim/run_convoy.sh" drive "$((secs + 150))" || echo "[stageB3] WARN convoy drive failed — markers static" >&2
 
-  echo "[stageB3] settling EKF 60s (3-instance lockstep, convoy moving)"
-  sleep 60
+  echo "[stageB3] settling EKF 120s (3-instance lockstep, convoy moving; the"
+  echo "          standalone-joining instances 1/2 converge slowest under render load)"
+  sleep 120
 
   local i
   for i in 0 1 2; do
