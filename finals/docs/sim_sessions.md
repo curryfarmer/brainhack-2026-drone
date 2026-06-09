@@ -1022,3 +1022,89 @@ Onsite pyhulax drones stream at their native rate; keep `command_timeout_s`/`mis
 at the onsite-sized values, not these RTF-0.86 sim numbers.
 
 **FULL SIM DONE**
+
+### NAV-9 — Challenge-2A LANDING SITL rehearsal: navigate → land_on_pad on PX4+Gazebo (2026-06-10) — NAV SIM DONE
+
+**Scope shipped** (forked from SIM-5's `run_vision.sh` rig; PX4≠HULA caveat in every header):
+`sim/worlds/landing_px4.sdf` (PX4 flight-sensor world: crate static obstacle at gz (0,2),
+3 ArUco pads pad_101/100/102 at gz (0,4)/(−1.5,3.5)/(1.5,3.5); NO convoy);
+`sim/worlds/landing_view.sdf` (= landing_px4 + ONE elevated overview camera, footage only);
+`sim/models/pad_102/` (new ArUco-102 pad cloned from pad_100; texture gen at install via the
+`gen_markers.py` `drawMarker` fallback — VM cv2 4.5.4 lacks `generateImageMarker`);
+`sim/gz_video_record.py` (gz camera→mp4 recorder, system python3 `PYTHONNOUSERSITE=1`,
+`cv2.VideoWriter` mp4v — no ffmpeg on the VM); `sim/run_landing.sh`
+(install/land1/land3/abort3/kill3/viewtest/stop); `configs/arenas/sitl_landing.json` (mirrors
+landing_px4.sdf: north=gz+Y, east=gz+X, c2_origin=spawn, c2_heading 0, crate keep-out, 3 pads)
++ `configs/sitl1_landing.json` + `configs/sitl3_landing.json`. Tests:
+`test_sitl_landing_config.py` (8, mutation-killed). `pytest finals/tests` green (**1036**, incl.
+NAV-0..8 + the NAV-E2E suite); conventions green.
+
+**Gate L1 (`run_landing.sh land1`, `runs_finals/20260610_011300`)** — 1 PX4 x500 + onboard
+640×480 down-cam → gz→TCP bridge 5600 → finals `sitl1_landing`. **alpha DONE 3/3, exit 0,
+elapsed 48.4 s, 97 sightings**. Phases: takeoff→110 cm HOLDING; **navigate "6 leg(s) flown to
+pad_101 (4.0, 0.0), open-loop per-leg compass re-orient"** — the planner routed AROUND the crate
+(track detours west to E≈−1.1 m then north, NOT a straight shot); **land_on_pad VERIFIED_LANDING
+on marker 101** (rotate-center + lateral RIGHT corrections + DOWN 30 cm steps → blind Land,
+is_flying=False). Saw all 3 pad markers, committed only on its valid 101. DR final estimate
+N+4.46 E+0.02 vs the true pad (4.0, 0.0) = **~0.46 m open-loop transit drift in the DR estimate,
+bought back by the visual CENTER stage** (the marker-gated landing was on-pad — this is exactly
+why the CENTER stage is the load-bearing part of the precision budget). Track:
+`finals/docs/evidence/nav9_L1.png`.
+
+**Footage (`run_landing.sh viewtest`) — the morning-review deliverable** — landing_view (1 drone
++ overview cam = 2 cams), alpha DONE 3/3 in 63.5 s (2-cam RTF lower than 1-cam, still well inside
+budget). Two watchable mp4s on the VM (frame-sampled non-blank): `sim/run/landing_overview.mp4`
+(third-person 1280×720@12fps, 469 frames) + `sim/run/landing_onboard_alpha.mp4` (down-cam
+640×480@6fps, 234 frames; per-frame std rises 36→51 as the pad fills the frame on descent).
+
+**Gate L2 (`run_landing.sh land3`, two runs)** — 3 PX4 x500, each its own down-cam + bridge
+(5600/01/02), time-staggered launch + sector deconfliction + serialized landing, each to its own
+distinct valid pad. **Both runs: all 3 DONE, exit 0, ZERO emergency_land, clean teardown.** Landing
+VERIFY outcome:
+- Run 1 (`...012425`, `acquire_timeout_s` 40): alpha→101 ✅, bravo→100 ✅, **charlie→UNVERIFIED** (blind-land fallback).
+- Run 2 (`...013348`, `acquire_timeout_s` 120): alpha→101 ✅, **charlie→102 ✅**, **bravo→UNVERIFIED** (blind-land fallback).
+
+**THE FINDING — the landing logic is correct; the un-VERIFIED drone is render-starvation roulette,
+sim-only.** A *different* instance failed to VERIFY each run (charlie, then bravo) = the SIM-5
+single-gz-thread lockstep signature ("a different drone fails each run"). Per-run sighting-frame
+rate is a clean gradient: alpha (gz host, instance 0) **~4.1–4.6/s** > bravo **~1.5–2.2/s** >
+charlie (the `PX4_GZ_STANDALONE` joiner, instance 2) **~1.2–1.8/s**. The starved instance SAW its
+marker plenty (charlie 76 frames, bravo 178 frames) but at ~1–2 fps the bounded ACQUIRE rotate-scan
+slews the down-cam between frames faster than they arrive, so the **3-of-5-recent AND-marker-in-the-
+current-frame** acquire gate (the current-frame guard is intentional — it blocks the center→acquire
+recursion bounce, see `land_on_pad._step_acquire`) rarely latches inside the budget → graceful
+blind-land fallback (no battery-death hover, never blocks the others). Raising `acquire_timeout_s`
+40→120 (`729c87c`) flipped charlie to VERIFIED but the starvation just relocated to bravo — **more
+wall-time can't manufacture frames; the gz render thread is the fixed ceiling**, so **2/3 VERIFY per
+run is the SITL ceiling** for 3 simultaneous camera-landings on this VM. Track:
+`finals/docs/evidence/nav9_L2.png`. (Minor LOW: the fallback message reports the recent-window hit
+count but not the current-frame miss, so "saw 3/5, need 3" reads as if it should have acquired —
+cosmetic; the logic is right.)
+
+**Onsite implication:** this vanishes — real HULA drones each render their own camera on their own
+hardware (no shared gz lockstep), so all 3 stream at native fps. Size `acquire_timeout_s` from
+gate-F (decode range) + native fps, NOT these RTF numbers. The single-drone L1 (full-rate frames)
+is the faithful LOGIC proof; L2 is the deconfliction + safety proof.
+
+**Drills (each a fresh launch3 → full battery):**
+- **A — `q` abort** (`abort3`, via `sim/pty_q_harness.py` for a tty; `...014107`): harness injects
+  `q` once all 3 log offboard-active → `[AbortListener] OPERATOR ABORT: landing ALL drones` →
+  `[Orchestrator] ... landing all drones cleanly` → all 3 land+disarm (5.0/5.1/6.4 s), **all DONE
+  (phases interrupted 1/3,1/3,2/3), exit 0**, post-run pgrep CLEAN.
+- **B — kill instance #2** (`kill3`: `pkill -9 -f 'bin/px4 -i 2'` at +90 s; `...014510`): charlie
+  telemetry goes **STALE (age 1.00 s > 1.00 s)** = the px4-death signature → typed actionable
+  failure (names udpin 14542 + gRPC 50053 to check) → **charlie FAILED 2/3, exactly ONE
+  emergency_land**, alpha+bravo DONE 3/3 (both VERIFIED — with charlie dead the surviving 2 cams had
+  spare render budget), **exit 1**, post-run pgrep CLEAN. Track: `finals/docs/evidence/nav9_killdrill.png`.
+
+**Residual gaps (only competition day resolves):** (1) the SITL render ceiling is sim-only but means
+we cannot demo 3/3 VERIFY in one SITL run — the per-run successes + L1 are the proof; (2) PX4 ≠ HULA
+— the nav LOGIC (legs, compass re-orient, visual servo, deconfliction, abort/kill safety) is
+backend-agnostic and proven, but the HULA constants (move-cm calibration, yaw accuracy, HFOV, ArUco
+decode range/altitude, blind-descent floor) are deferred to onsite gates E/F/landing-servo
+(`docs/finals/onsite_test_plan.md`); (3) Discord coords + real green-pad marker ids + obstacle heights
+are config the operator enters onsite; (4) the ~0.46 m open-loop DR drift over a 4.5 m transit was
+bought back by the visual CENTER stage — confirm onsite that the down-cam FOV at ~1.1 m covers the
+post-transit position error (gate-E sets `inflation_m`/`max_leg_cm`).
+
+**NAV SIM DONE**
