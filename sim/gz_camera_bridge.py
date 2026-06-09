@@ -151,6 +151,11 @@ def main() -> int:
     ap.add_argument("--ready-file", default=None,
                     help="touch this path once the first gz frame arrives "
                          "(the run-script gates finals on it)")
+    ap.add_argument("--count-secs", type=float, default=0.0,
+                    help="STATS MODE (SIM-5 probe3): after the first frame, count "
+                         "frames for this many seconds, print one `BRIDGE FPS ...` "
+                         "line, and exit WITHOUT serving TCP. Used to measure "
+                         "per-camera render rate under the 3-cam load.")
     args = ap.parse_args()
 
     topic = args.topic or build_topic(args.world, args.model, args.link,
@@ -187,6 +192,20 @@ def main() -> int:
         except OSError as e:
             print(f"[bridge] WARN could not write --ready-file "
                   f"{args.ready_file!r}: {e}", file=sys.stderr, flush=True)
+    # STATS MODE (SIM-5 probe3): count frames over the window, report fps, exit.
+    # No TCP serve — this is purely the render-load measurement.
+    if args.count_secs > 0:
+        first = time.monotonic()
+        c0 = receiver.get()[3]
+        while not _STOP.is_set() and time.monotonic() - first < args.count_secs:
+            time.sleep(0.05)
+        elapsed = max(time.monotonic() - first, 1e-3)
+        c1 = receiver.get()[3]
+        fps = (c1 - c0) / elapsed
+        print(f"BRIDGE FPS topic={topic} frames={c1 - c0} "
+              f"secs={elapsed:.1f} fps={fps:.1f}", flush=True)
+        return 0
+
     print(f"BRIDGE READY: first frame on {topic} after "
           f"{time.monotonic() - t0:.1f}s; serving on {args.host}:{args.port}",
           flush=True)

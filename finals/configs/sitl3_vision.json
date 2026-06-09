@@ -1,0 +1,25 @@
+{
+  "_comment": "SIM-5 (FULL SIM): 3 concurrent PX4 SITL camera-drones flying sentry_scan over the moving convoy (convoy_px4 world). = configs/sitl3.json (3x endpoints) + configs/sitl_vision.json (gazebo frames + ArUco) + a per-drone gazebo_video_port so each drone reads its OWN onboard camera through its OWN sim/gz_camera_bridge. Endpoints: PX4 instance i sends MAVLink to udpin 1454<i>; one mavsdk_server per drone on gRPC 5005<i+1>; instance i's onboard camera model is x500_mono_cam_640_<i> on topic /world/convoy_px4/model/x500_mono_cam_640_<i>/link/camera_link/sensor/camera/image, forwarded by a bridge to TCP gazebo_video_port. PORT MAP: alpha i0 -> bridge 5600, bravo i1 -> 5601, charlie i2 -> 5602 (one bridge per drone; multi-drone gazebo REQUIRES distinct ports - config.py validated). altitude_band_m 1.2/1.7/2.2 doubles as takeoff height; vertical separation is the swarm collision guarantee. SPAWN POSES (run_vision.sh stageB3, ENU x,y >= 1.2 m from every robot start: robot_7 at origin): alpha (1.2,0.2), bravo (-1.2,0.2), charlie (0,-2)=convoy-circle centre so its 2.2 m band footprint covers the whole R=2 circle (all 5 IDs). sentry_scan revolutions 2 ~= >1 convoy lap. detector none: ArUco (marker_backend) is the primary detector. RTF SIZING (run_vision.sh probe3, 2026-06-09): 3 llvmpipe 640x480 cams render-saturate the 4-vCPU VM -> RTF~0.28 (sim runs 0.28x wall), each cam steady ~4.3 fps (balanced, none starved - plenty for ArUco sentry). update_rate 15->10 does NOT help (renderer already below the 15 Hz target); lower resolution would but shortens ArUco decode range - so accept RTF and size the WALL timeouts (clock is time.monotonic): command_timeout_s 90 - the takeoff health-wait (global+home+armable) IS command_timeout_s, and the standalone-joining instances 1/2 (bravo/charlie) converge EKF/mavsdk-health SLOWLY under 3-cam render jitter (instance 0 alpha is always fast); 45 was too tight (bravo/charlie timed out at exactly 45.0 s), 90 gives the borderline secondaries room. mission_budget_s 500 >= full flight (3x takeoff up to ~90 wall worst + 16x(hover 2 wall + rotate ~6 wall) + land; budget is a MAX - orchestrator exits on all-DONE). NB run_vision.sh stageB3 also settles EKF 120 s (was 60) before finals so 1/2 stabilize. hover duration_s is WALL (not RTF-inflated); battery discharges in SIM-time so low RTF => LESS drain/run. run_vision.sh stageB3 passes --budget. camera_hfov_deg 99.69 = mono_cam_640 HFOV 1.74 rad. gazebo_video_host/port top-level is the single-drone fallback only (unused here - every drone sets its own).",
+  "profile": "sitl",
+  "flight_backend": "mavsdk_sitl",
+  "frame_backend": "gazebo",
+  "sitl_address": "udpin://0.0.0.0:14540",
+  "command_timeout_s": 90,
+  "mission_budget_s": 500,
+  "camera_hfov_deg": 99.69,
+  "marker_backend": "aruco",
+  "gazebo_video_host": "127.0.0.1",
+  "gazebo_video_port": 5600,
+  "detector": { "backend": "none" },
+  "drones": [
+    { "id": "alpha",   "phases": ["sentry_scan"], "altitude_band_m": 1.2,
+      "sitl_address": "udpin://0.0.0.0:14540", "mavsdk_grpc_port": 50051,
+      "gazebo_video_port": 5600, "zone": { "sentry_scan": { "revolutions": 2 } } },
+    { "id": "bravo",   "phases": ["sentry_scan"], "altitude_band_m": 1.7,
+      "sitl_address": "udpin://0.0.0.0:14541", "mavsdk_grpc_port": 50052,
+      "gazebo_video_port": 5601, "zone": { "sentry_scan": { "revolutions": 2 } } },
+    { "id": "charlie", "phases": ["sentry_scan"], "altitude_band_m": 2.2,
+      "sitl_address": "udpin://0.0.0.0:14542", "mavsdk_grpc_port": 50053,
+      "gazebo_video_port": 5602, "zone": { "sentry_scan": { "revolutions": 2 } } }
+  ]
+}

@@ -100,7 +100,7 @@ after SIM-2; full sim after SIM-5.
 | SIM-2 | S6 stretch | `replay_plot.py` (proven on the SIM-1 fixture) → `sitl3.json` → 3× headless swarm + drills — **HEADLESS SIM DONE** | SIM-1, S5 | ✅ 2026-06-09 |
 | SIM-3 | S8 assets | Convoy world: markers (ArUco+QR), robots, pads, band-altitude cams; detection check — **∥ with S4–S7** | SIM-0 | ✅ 2026-06-09 |
 | SIM-4 | **S8** core | `gazebo_video.py` + `search.py`; **V2a**: single drone logs sightings of MOVING markers | SIM-1, SIM-3, S7, S5 | ✅ 2026-06-09 |
-| SIM-5 | S8 full | 3 camera-drones, full mission, all drills — **FULL SIM DONE** + residual-gaps list for S10 | SIM-2, SIM-4 | ⬜ |
+| SIM-5 | S8 full | 3 camera-drones, full mission, all drills — **FULL SIM DONE** (gz single-thread lockstep → cam `update_rate` 5 → RTF 0.86, all 3 DONE, 5/5 ids, 4 drills) | SIM-2, SIM-4 | ✅ 2026-06-09 |
 
 ## Smoke matrix — what "thoroughly smoked" means per part
 
@@ -942,4 +942,83 @@ flagged (4 starved) — measure RTF, size `command_timeout_s` from it; (c) disti
 `sitl_address`/`mavsdk_grpc_port` per drone (config already validates this); (d) reuse `run_vision.sh`
 stageB shape (PX4 owns the world, spawn each drone clear of robot starts, drive before settle).
 
-### SIM-5 — pending
+### SIM-5 — full rehearsal: 3 PX4 camera-drones, full mission (2026-06-09) — FULL SIM DONE
+
+**Scope shipped**: `configs/sitl3_vision.json` (3 drones, per-drone `gazebo_video_port`
+5600/5601/5602 + `udpin`/gRPC/`altitude_band_m` + `sentry_scan` rev 2); `config.py`
+`DroneConfig.gazebo_video_port` + `resolve_gazebo_video_port()` + multi-drone gazebo
+present-and-distinct validation; `main.py` `_build_perception` gazebo branch uses
+`resolve_gazebo_video_port(cfg, drone_id)` (one line, the S10-owned seam); `run_vision.sh`
+`launch3`/`probe3`/`stageB3` (+ `abort3`/`kill3` drill modes); `sim/pty_q_harness.py`;
+`gz_camera_bridge.py` `--count-secs` stats mode. Tests: 7 new in `test_config.py`. `pytest
+finals/tests` green (669) on Windows; `test_conventions` green (config.py pure stdlib, main.py
+adds only a method-local config import).
+
+**THE ROOT-CAUSE FINDING — the gz server is single-threaded and is the lockstep master for all
+3 PX4 instances.** First flights had a *different* drone fail each run (slow climb / `ekf2
+missing data` / gRPC "Connection reset by peer"). It was NOT core starvation: bumping the VM
+4→8 vCPUs did **nothing** to the idle 3-cam probe (RTF stayed 0.29, fps 4.3/cam) because the
+gz physics+render loop is ONE thread — more cores can't speed it. Under that 0.29× jittery
+lockstep only ~1 of 3 concurrent offboard flights stays healthy; the laggards (the
+`PX4_GZ_STANDALONE` joiners, instances 1/2) starve. The lever is **render load on the gz
+thread, not CPU count.** Render-time model fitted from the probe: `wall/sim ≈ 1 + 0.163·rate`.
+Dropping camera `update_rate` **15→5** in `px4_models/x500_mono_cam_640/model.sdf` raised **RTF
+0.29→0.86** (probe3) while *keeping* ~4.5 fps/cam (at 15 Hz the cams were render-starved below
+target; at 5 Hz they hit it). Resolution stays 640×480 so ArUco decode range is unchanged.
+Then every drone flew. Timeouts sized from RTF (mission clock is `time.monotonic` = wall):
+`command_timeout_s` 90 (the takeoff health-wait IS this; 45 was too tight for the borderline
+secondaries), `mission_budget_s` 500, and `stageB3` settles EKF 120 s before finals.
+
+**8 vCPUs** were kept (host has 24) — they don't fix RTF but give the 3 PX4 + 3 mavsdk_server +
+3 bridges room so nothing else contends; the single gz thread is the only bottleneck.
+
+**Gate V2-full (`run_vision.sh stageB3 360`, `runs_finals/20260609_201157`)** — 3 PX4 x500, each
+its own onboard 640×480 down-cam → its own `gz_camera_bridge` on 5600/5601/5602 → finals
+`sitl3_vision`. Result: **all 3 DONE 1/1**, elapsed 87 s, **sightings = 1692**, `run_end
+exit_code 0`, **ZERO** FlightTimeout/emergency_land events (RTF audit clean). All 5 MOVING
+convoy ids seen by EVERY drone (charlie at the circle centre `(0,−2)`, band 2.2 m → 2.6 m disk
+⊇ the whole R=2 circle → strongest):
+
+```text
+id   total   alpha  bravo  charlie        (100/101 = the two static landing-pad markers, bonus)
+ 7    179     20     46     113           100   360 (alpha 280 + bravo 17 + charlie 63)
+11    177     24     46     107           101   324 (bravo 242 + charlie 82)
+23    235     38     40     157
+42    229     32     36     161           per-drone totals: alpha 422, bravo 476, charlie 794
+88    188     28     49     111
+```
+
+3-track replay (per-drone subplots + bearing rays): `finals/docs/evidence/sim5_full.png`
+(generated on the VM, headless Agg).
+
+**Drills (all PASS, each a FRESH launch3 → full battery, then `stageB3_stop`)**:
+- **A — `q` abort** (`abort3`, via `sim/pty_q_harness.py` so stdin is a tty — plain ssh gives
+  "abort key disabled"): harness injects `q`+Enter once all 3 log "offboard active" → `OPERATOR
+  ABORT → landing ALL drones cleanly`, all 3 land+disarm, **all DONE 0/1** (phases interrupted
+  mid-scan, expected), **exit 0**.
+- **B — kill instance #2** (`kill3`: `pkill -9 -f 'bin/px4 -i 2'` at 45 s — the recorded
+  `px4_vision_2.pid` is a setsid *wrapper*, so kill the real px4 by pattern): charlie's
+  telemetry goes **STALE (age 1.18 s > 1.0 s)** = the px4-death signature (px4 dies,
+  mavsdk_server lives, streams quiet), **exactly one** emergency_land (offboard.stop/land/disarm
+  each time-out against the dead px4, traceback-logged by the whitelisted swallows, latched
+  once, no hang), **charlie FAILED 0/1, alpha+bravo DONE 1/1, exit 1**.
+- **C — teardown cleanliness**: after every run `pgrep -fa 'b[i]n/px4|g[z] sim|m[a]vsdk_server'`
+  → **CLEAN** (bracket form — the "leftover gz" WARN from `run_convoy.sh stop` is killed by
+  `stageB3_stop`'s `pkill -f convoy_px4` immediately after; net clean).
+- **D — 2 consecutive runs**: `stageB3` twice with a full stop+start between → **both rc=0**, all
+  3 DONE, CLEAN after. (At RTF 0.86 EKF now converges in <1 s — charlie health-ready 0.6 s — so
+  battery/settle are non-issues; the 120 s settle is conservative headroom.)
+
+**Gotchas logged**: (1) over ssh, NEVER `pkill -f 'convoy_px4'` from the interactive command —
+the pattern text is in your own shell's argv → self-kill → ssh exit 255; use `convoy_p[x]4`.
+(2) Don't `> logfile` a long ssh run with no streaming output — the idle channel drops (255);
+stream through `grep` with `-o ServerAliveInterval=15`. (3) `update_rate 15→10` would NOT have
+helped (still above the render ceiling); the fix needed `≤5` to drop below it.
+
+**Notes for S10 / onsite**: SIM-5's single-gz-thread lockstep ceiling is a *sim-only* artifact
+(real HULA drones each render their own camera on their own hardware — no shared lockstep), so
+the `update_rate 5` is a sim-render concession, NOT a flight-rate the onsite mission inherits.
+Onsite pyhulax drones stream at their native rate; keep `command_timeout_s`/`mission_budget_s`
+at the onsite-sized values, not these RTF-0.86 sim numbers.
+
+**FULL SIM DONE**

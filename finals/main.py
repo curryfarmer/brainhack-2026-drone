@@ -420,10 +420,12 @@ def _build_perception(cfg: FinalsConfig, drone_id: str, bus: SightingBus,
         # imports NO gz binding (the 3.11-venv constraint). The bridge must
         # already be streaming before this source's start() (run-script gates
         # on the first frame); a missing bridge -> SensorTimeout -> loud abort.
+        from finals.config import resolve_gazebo_video_port
         from finals.vision.gazebo_video import GazeboRgbSource
         source = GazeboRgbSource(
             drone_id,
-            host=cfg.gazebo_video_host, port=cfg.gazebo_video_port,
+            host=cfg.gazebo_video_host,
+            port=resolve_gazebo_video_port(cfg, drone_id),  # SIM-5: per-drone bridge
             video_channel_order=cfg.video_channel_order,
             stale_s=cfg.guards.video_stale_s)
     elif cfg.frame_backend == "pyhulax":
