@@ -52,3 +52,17 @@ class SensorTimeout(SensorError):
 
 class AbortRequested(FinalsError):
     """Operator abort (kill key / Ctrl+C). Triggers land-all, never ignored."""
+
+
+class PlanningError(FinalsError):
+    """The 2-D path planner could not produce a transit plan — refuse to fly
+    that leg of the mission. Like ConfigError this is a "refuse to start (this
+    transit)" failure, not a per-drone in-flight fault, so it derives straight
+    from FinalsError rather than FlightError.
+
+    Message must be ACTIONABLE: name WHAT was attempted (plan start->goal),
+    WHICH start/goal points (with the keep-out id when one is the cause), WHY
+    it failed (goal inside an inflated keep-out / start trapped / no
+    collision-free path), and what to CHECK (the arena keep_out polygons, the
+    inflation_m margin, or the chosen start/goal). The visibility_graph.plan
+    raise sites carry exactly that — never a bare 'no path'."""
