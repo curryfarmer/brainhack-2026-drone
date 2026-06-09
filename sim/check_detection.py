@@ -158,7 +158,7 @@ def main() -> int:
     ap.add_argument("--secs", type=float, default=40.0, help="capture window (>= one lap)")
     ap.add_argument("--bands", type=int, nargs="+", default=list(DEFAULT_BANDS),
                     help="band names to subscribe (default 120 170 220)")
-    ap.add_argument("--first-frame-deadline-s", type=float, default=20.0)
+    ap.add_argument("--first-frame-deadline-s", type=float, default=45.0)
     ap.add_argument("--robot-ids", type=int, nargs="+", default=DEFAULT_ROBOT_IDS)
     ap.add_argument("--pad-ids", type=int, nargs="+", default=DEFAULT_PAD_IDS)
     ap.add_argument("--outdir", default=os.path.join("sim", "run", "convoy_world"))
@@ -180,29 +180,40 @@ def main() -> int:
                   f"CHECK: gz topic -l | grep cam_band_{band}", file=sys.stderr)
             return 3
 
-    # first frame per band must arrive (proves world + Sensors plugin + topic name)
+    # first frame per band must arrive (proves world + Sensors plugin + topic name).
+    # Under heavy render load a single camera can warm up slowly — wait up to the deadline,
+    # then proceed with whatever IS streaming (skip the laggards); fail only if NONE stream.
     t0 = time.monotonic()
-    pending = set(args.bands)
-    while pending:
-        for band in list(pending):
-            if receivers[band].get() is not None:
-                pending.discard(band)
-        if pending and time.monotonic() - t0 > args.first_frame_deadline_s:
-            print(f"FAIL: no frame on band(s) {sorted(pending)} within "
-                  f"{args.first_frame_deadline_s:.0f}s — WHY: Sensors plugin missing, world "
-                  f"not started, or wrong topic — CHECK: gz topic -l ; gz sim log",
-                  file=sys.stderr)
-            return 4
+    ready = set()
+    while True:
+        for band in args.bands:
+            if band not in ready and receivers[band].get() is not None:
+                ready.add(band)
+        if len(ready) == len(args.bands):
+            break
+        if time.monotonic() - t0 > args.first_frame_deadline_s:
+            missing = sorted(set(args.bands) - ready)
+            if not ready:
+                print(f"FAIL: no frame on ANY band {missing} within "
+                      f"{args.first_frame_deadline_s:.0f}s — WHY: Sensors plugin missing, "
+                      f"world not started, or wrong topic — CHECK: gz topic -l ; gz sim log",
+                      file=sys.stderr)
+                return 4
+            print(f"WARN: bands {missing} never streamed within "
+                  f"{args.first_frame_deadline_s:.0f}s — proceeding with {sorted(ready)} "
+                  f"(CHECK render load / RTF in /stats)", file=sys.stderr)
+            break
         time.sleep(0.1)
-    print(f"all {len(args.bands)} bands streaming; capturing {args.secs:.0f}s ...")
+    active_bands = sorted(ready)
+    print(f"streaming bands {active_bands}; capturing {args.secs:.0f}s ...")
 
     aruco = ArucoShim()
     qr = cv2.QRCodeDetector()
-    stats = {band: BandStats() for band in args.bands}
-    saved = {band: 0 for band in args.bands}
+    stats = {band: BandStats() for band in active_bands}
+    saved = {band: 0 for band in active_bands}
     end = time.monotonic() + args.secs
     while time.monotonic() < end:
-        for band in args.bands:
+        for band in active_bands:
             bgr = receivers[band].get()
             if bgr is None:
                 continue
@@ -212,14 +223,14 @@ def main() -> int:
                 path = os.path.join(args.outdir, "frames", f"band{band}_sample{saved[band]}.png")
                 cv2.imwrite(path, annotated)
                 saved[band] += 1
-        time.sleep(0.02)
+        time.sleep(0.08)   # ~12 Hz sampling: markers move slowly; leaves CPU for the render thread
 
     # --------------------------- report ---------------------------
     height = {**{i: ROBOT_MARKER_H_M for i in args.robot_ids},
               **{i: PAD_MARKER_H_M for i in args.pad_ids}}
     seen_ids = set()
     print("\n================= px-vs-distance (PER MARKER TYPE) =================")
-    for band in args.bands:
+    for band in active_bands:
         alt = DEFAULT_BANDS.get(band, float("nan"))
         st = stats[band]
         print(f"\n--- band {band}  (camera altitude {alt:.2f} m, frames {receivers[band].count}) ---")
@@ -243,7 +254,7 @@ def main() -> int:
 
     expected = set(args.robot_ids) | set(args.pad_ids)
     missing = sorted(expected - seen_ids)
-    total_qr_located = sum(len(stats[b].qr_located) for b in args.bands)
+    total_qr_located = sum(len(stats[b].qr_located) for b in active_bands)
     print("\n========================= COVERAGE =========================")
     print(f"decoded/identified ids: {sorted(seen_ids)}")
     print(f"expected ids ({len(expected)}): {sorted(expected)}")

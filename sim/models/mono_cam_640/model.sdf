@@ -28,7 +28,9 @@
           </clip>
         </camera>
         <always_on>1</always_on>
-        <update_rate>30</update_rate>
+        <!-- 15 Hz (not 30): 4 simultaneous renders on a 4-vCPU VM; 15 Hz is ample for
+             marker detection and keeps RTF/first-frame warmup healthy (measured). -->
+        <update_rate>15</update_rate>
         <visualize>true</visualize>
       </sensor>
     </link>
