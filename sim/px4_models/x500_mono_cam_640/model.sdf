@@ -52,7 +52,18 @@
           </clip>
         </camera>
         <always_on>1</always_on>
-        <update_rate>15</update_rate>
+        <!-- SIM-5: 5 Hz (was 15). The gz server is SINGLE-THREADED and is the
+             lockstep master for all 3 PX4 instances; 3 software-rendered cameras
+             at 15 Hz throttle that one thread to RTF~0.29, and under a 0.29x
+             jittery lockstep only ~1 of 3 concurrent offboard flights stays
+             healthy (the others starve: slow climb / ekf2-missing-data /
+             gRPC reset). Render-time model wall/sim ~= 1 + 0.163*update_rate ->
+             5 Hz gives RTF~0.55 (2x faster lockstep, far less jitter) at ~2.75
+             fps/cam, still ample for ArUco sentry over a multi-minute scan.
+             RESOLUTION stays 640x480 so ArUco decode range is UNCHANGED (alpha's
+             776 sightings proved 640x480 decodes). More vCPUs do NOT help -- the
+             gz render thread is the bottleneck, not core count. -->
+        <update_rate>5</update_rate>
         <visualize>true</visualize>
       </sensor>
     </link>
