@@ -18,11 +18,17 @@ IDS=(7 11 23 42 88)
 TOPIC_DEADLINE_S=40
 
 export GZ_SIM_RESOURCE_PATH="$REPO/sim/models:${GZ_SIM_RESOURCE_PATH:-}"
+# DISPLAY needed for the GLX context. CAMERA SENSOR RENDERING on this VM only draws
+# geometry under llvmpipe (LIBGL_ALWAYS_SOFTWARE=1) or ogre1 — the default ogre2+SVGA3D
+# path renders BLANK camera frames (verified against the stock camera_sensor.sdf). So
+# llvmpipe is the default render rung here, not a fallback. (--ogre1 = the alternative.)
+export DISPLAY="${DISPLAY:-:0}"
 
 start() {
-  local sw=""; [ "${1:-}" = "--sw" ] && sw="LIBGL_ALWAYS_SOFTWARE=1"
-  echo "[start] gz server ${sw:+(llvmpipe) }$WORLD"
-  env $sw gz sim -s -r "$WORLD" > "$RUN/gz_convoy.log" 2>&1 &
+  local gl="LIBGL_ALWAYS_SOFTWARE=1"; local eng=""
+  [ "${1:-}" = "--ogre1" ] && { gl=""; eng="--render-engine ogre"; }
+  echo "[start] gz server ${eng:-llvmpipe} $WORLD"
+  env $gl gz sim -s -r $eng "$WORLD" > "$RUN/gz_convoy.log" 2>&1 &
   echo $! > "$RUN/gz_convoy.pid"
   local t0=$SECONDS
   until gz topic -l 2>/dev/null | grep -q cam_band_120; do
@@ -60,10 +66,14 @@ check() {
 }
 
 stop() {
-  echo "[stop] killing recorded PIDs"
+  echo "[stop] killing recorded PIDs + the gz server (the recorded PID is the gz wrapper;
+        the render-server child needs killing by world name)"
   for p in driver bridge gz_convoy; do
     [ -f "$RUN/$p.pid" ] && kill "$(cat "$RUN/$p.pid")" 2>/dev/null && rm -f "$RUN/$p.pid"
   done
+  pkill -9 -f 'convoy\.sdf' 2>/dev/null
+  pkill -9 -f 'sim/convoy_driver\.py' 2>/dev/null
+  pkill -9 -f 'parameter_bridge.*convoy_robot' 2>/dev/null
   sleep 2
   # bracket form: a plain 'gz sim' pattern self-matches the wrapping shell (sim/README)
   local leftover; leftover="$(pgrep -fa 'g[z] sim' || true)"

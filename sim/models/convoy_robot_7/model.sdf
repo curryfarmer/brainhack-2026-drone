@@ -25,7 +25,7 @@
           <specular>0 0 0 1</specular>
           <pbr>
             <metal>
-              <albedo_map>model://convoy_robot_7/materials/textures/marker.png</albedo_map>
+              <albedo_map>model://convoy_robot_7/materials/textures/convoy_robot_7.png</albedo_map>
               <metalness>0.0</metalness>
               <roughness>1.0</roughness>
             </metal>

@@ -133,14 +133,20 @@ def _model_config(name: str, desc: str) -> str:
 
 
 def _marker_material(name: str) -> str:
-    """PBR/metal/albedo_map block (Harmonic) — model:// resolves via GZ_SIM_RESOURCE_PATH."""
+    """PBR/metal/albedo_map block (Harmonic) — model:// resolves via GZ_SIM_RESOURCE_PATH.
+
+    The texture filename is UNIQUE per model (`<name>.png`, not a shared `marker.png`):
+    ogre2's resource manager caches textures by BASENAME, so identical filenames in
+    different model dirs collide and every marker renders the first-loaded one. Unique
+    names are mandatory for distinct per-marker ids.
+    """
     return (
         "        <material>\n"
         "          <diffuse>1 1 1 1</diffuse>\n"
         "          <specular>0 0 0 1</specular>\n"
         "          <pbr>\n"
         "            <metal>\n"
-        f"              <albedo_map>model://{name}/materials/textures/marker.png</albedo_map>\n"
+        f"              <albedo_map>model://{name}/materials/textures/{name}.png</albedo_map>\n"
         "              <metalness>0.0</metalness>\n"
         "              <roughness>1.0</roughness>\n"
         "            </metal>\n"
@@ -232,7 +238,7 @@ def write_model(out_dir: str, name: str, sdf_text: str, desc: str,
     model_dir = os.path.join(out_dir, name)
     tex_dir = os.path.join(model_dir, "materials", "textures")
     os.makedirs(tex_dir, exist_ok=True)
-    if not cv2.imwrite(os.path.join(tex_dir, "marker.png"), png):
+    if not cv2.imwrite(os.path.join(tex_dir, f"{name}.png"), png):
         print(f"FAIL: cv2.imwrite failed for {name} — WHY: bad path/permissions — "
               f"CHECK: {tex_dir} writable", file=sys.stderr)
         sys.exit(4)

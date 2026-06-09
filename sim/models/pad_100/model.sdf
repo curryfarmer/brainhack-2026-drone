@@ -14,7 +14,7 @@
           <specular>0 0 0 1</specular>
           <pbr>
             <metal>
-              <albedo_map>model://pad_100/materials/textures/marker.png</albedo_map>
+              <albedo_map>model://pad_100/materials/textures/pad_100.png</albedo_map>
               <metalness>0.0</metalness>
               <roughness>1.0</roughness>
             </metal>
