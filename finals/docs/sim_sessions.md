@@ -1135,3 +1135,89 @@ bands in `sitl3_track_vision.json`, and/or slow `CONVOY_LINEAR` further — done
 follows its car, then clean give-up + land) is already met.
 
 **STRONG PIPELINE — VM-PROVEN (A + B), merge pending**
+
+---
+
+## S11.1 — live gz GUI over ssh + the track_convoy chase-tuning arc (2026-06-10)
+
+Branch `s11-gz-gui` off main `ae3a9d0`. Two things: a repeatable way to *watch* the
+swarm fly in 3D over ssh, and an honest tuning pass on the moonshot chase.
+
+### Live Gazebo GUI over ssh (watch all 3 drones in 3D)
+
+PX4 runs the gz **server** headless (`HEADLESS=1`, no window). To see the scene, attach
+a **separate render-only `gz sim -g` client** to that running server and paint it on the
+VM's own `:0` desktop (watched in the VMware console — *not* forwarded to the laptop).
+The client is a pure viewer: it subscribes to the scene/pose stream and adds **no camera
+sensor**, so it puts **zero extra frames on the single-thread gz lockstep** (the SIM-5 RTF
+ceiling) — only desktop GL load. Safe to run during a flight.
+
+`sim/run_vision.sh`:
+- `gz_gui_start()` — no-op unless `GZ_GUI=1`; else `DISPLAY=:0 QT_QPA_PLATFORM=xcb
+  LIBGL_ALWAYS_SOFTWARE=1 GZ_SIM_RESOURCE_PATH=… setsid gz sim -g` to an **absolute** log
+  (`$RUN/gz_gui.log`), called right *after* `launch3` (server already up).
+- `stageB3_stop` reaps it (pid file, then bracket-form `pkill -9 -f 'g[z] sim -g'`).
+- new cases **`lanes3-gui` / `track3-gui`** set `GZ_GUI=1` so the GUI lives inside the ONE
+  blocking run — no cross-ssh orphaning.
+
+The three VM env vars that make it work: `DISPLAY=:0` (the VM's real GNOME/Wayland desktop,
+gdm3) · `QT_QPA_PLATFORM=xcb` (Qt rides XWayland) · `LIBGL_ALWAYS_SOFTWARE=1` (no GPU on the
+VM). Full writeup + gotchas: **`finals/docs/gz_gui_over_ssh.md`**. VM-proven — operator
+watched all 3 drones chase live. (A harmless `libEGL warning: Not allowed to force software
+rendering…` prints but it still renders.) Gotchas: run as ONE blocking ssh command
+(backgrounding in a second session orphans the flight); absolute log path (a relative
+redirect silently fails to exec); never `pkill -f "gz sim"` from your ssh shell — the
+pattern matches the killer's own argv and kills the session (exit 255), use the bracket form.
+
+### track_convoy nadir deadband (new finals code)
+
+The first chase runs lost the smaller-footprint drones mid-chase. Root cause was the control
+law, not lock: `_steer` issued `Move(FORWARD)` whenever the **bearing** was centred — even
+when the slow car was already **under** the drone — so it over-walked the car out of the nadir
+footprint. Fix: a deadband on the marker's **pixel offset from frame centre** (the signal the
+bearing discards). `center_px_frac` tunable (default 0.30); `_offcenter(s)` = radial offset of
+the bbox centre vs `frame_shape` (0 = centre, 1 = edge; `None` on missing geometry → degrade to
+the prior always-step). Near centre = car under us → **HOLD**; step only once it drifts past the
+deadband. Pure phase, no SDK/cv2. 726 bare-venv green; mutation kill-check (flipping the
+comparison kills 2 tests). With over-walk fixed, steps went back to keep-up sizing (`approach_cm
+40`, `track_dwell_s 0.5`).
+
+### The finding — the chase is FOOTPRINT-limited, not lock-limited
+
+Across four VM runs, the result tracked the altitude band, not the lock: every drone *locked*
+its id fine (100+ sightings), but a small nadir footprint can't absorb the **open-loop
+move/rotate error** (there is no position feedback — and HULA won't have it either), so the
+drone drifts off the *moving* car and gives up. A bigger footprint absorbs the drift, and a
+higher drone also sees a smaller per-move angular marker shift = steadier tracking.
+
+Progression (per-drone id-sighting span within the ~120 s chase; full span = never lost):
+
+| run | bands α/β/γ | deadband | cars | charlie | alpha | bravo |
+|---|---|---|---|---|---|---|
+| 1 | 1.2/1.7/2.2 | no | 0.05 | full (800 cm) | lost | lost @28 s |
+| 2 | 1.2/2.0/2.2 | no | 0.05 | full | churn (166 hover) | lost @37 s |
+| 3 | 1.2/2.0/2.2 | **yes** | 0.08 | full (0 reacq) | lost @97 s | lost @46 s |
+| 4 | **2.6/2.4/2.2** | yes | 0.08 | full [9→144 s] | **full [9→123 s]** | lost @48 s |
+
+**Final tuning (committed):** bands **alpha 2.6 / bravo 2.4 / charlie 2.2** (worst performer
+*highest* — bigger footprint + steadier angular shift; bands must stay distinct = the sitl
+vertical-separation guard; charlie's 460+ sightings at 2.2 = ample margin for the ~20 px marker
+at 2.4/2.6), nadir deadband `center_px_frac 0.30`, `approach_cm 40`, `track_dwell_s 0.5`,
+`lost_timeout_s 8.0`, and **`run_vision.sh track3` drives the convoy at `CONVOY_LINEAR 0.08`**
+(with the deadband a near-still car makes the drones *hold* = looks parked; the convoy has to
+actually drive for the chase to read as a chase). Pads `100/101` moved out to the empty western
+gap `(-6, ±1)` in `convoy_3lane.sdf` (they sat at +y crowding bravo's frame, pad_101 165× vs car
+68×) → clean single-id per drone.
+
+**Outcome:** run 4 = **2 of 3 sustain the full chase** (alpha + charlie), up from 1; charlie
+textbook. **bravo (the NW lane) still drops at ~48 s** and is *not* pure footprint (bravo 2.4 >
+charlie 2.2 yet bravo fails), so its lane geometry has something specific. **Parked by decision
+(2026-06-10)** — closing it needs real position feedback, not more tuning.
+
+### Known observability bug (not fixed)
+
+A track-then-lose-then-reacquire-fail reports the **re-acquire** give-up message ("no id reached
+3 hit(s)… nothing to track" / "investigate budget … before a lock"), which **masks the prior
+successful track** (sightings + cm chased). A drone that chased 100+ sightings reads as "never
+locked" — it misled the diagnosis here. Fix would be: when ACQUIRE gives up *after* a prior
+track, report the cumulative track stats.
