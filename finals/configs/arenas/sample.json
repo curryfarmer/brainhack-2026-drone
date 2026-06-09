@@ -1,0 +1,55 @@
+{
+  "_comment": "Challenge-2A SAMPLE arena (NAV-2). A realistic-shaped map for the test suite + a SITL dry-run, NOT the real briefing geometry. EVERY number here is briefing/onsite-tunable: re-measure the arena rectangle, crate footprints, pad centres, taped lanes, and the C2 launch pose at gate F and overwrite this file (tune config, not code). Frame: (north_m, east_m), +north/+east; headings deg CCW-positive (0 = +north), the pyhulax/dead_reckon yaw sign.",
+
+  "_comment_bounds": "bounds_m = [north_min, east_min, north_max, east_max], the keep-in geofence rectangle. ~12 m (north) x 10 m (east) placeholder; widen/shrink to the taped arena edges onsite. Validator: north_min < north_max and east_min < east_max (strict).",
+  "bounds_m": [0.0, 0.0, 12.0, 10.0],
+
+  "_comment_c2": "C2 launch pose: c2_origin_m = where the swarm boots (must be INSIDE bounds_m); c2_heading_deg = the common compass heading every drone boots aligned to (deg, CCW+). 90 deg here = the fleet boots facing WEST (-east); onsite this is whichever way the team lines the airframes up at gate D. Re-measure both.",
+  "c2_origin_m": [1.0, 5.0],
+  "c2_heading_deg": 90.0,
+
+  "_comment_keep_out": "Crate / obstacle footprints (no-fly polygons), rings of [north_m, east_m] vertices. NAV-1 inflates each by the safety margin before planning. Validator: >= 3 DISTINCT vertices, unique ids. 4 placeholder crates; re-trace the real footprints + add/remove crates onsite.",
+  "keep_out": [
+    {
+      "_comment": "Crate A — square obstacle mid-arena.",
+      "id": "crate_a",
+      "polygon_m": [[4.0, 2.0], [5.5, 2.0], [5.5, 3.5], [4.0, 3.5]]
+    },
+    {
+      "_comment": "Crate B — rectangular obstacle on the east lane.",
+      "id": "crate_b",
+      "polygon_m": [[6.0, 6.5], [8.0, 6.5], [8.0, 7.5], [6.0, 7.5]]
+    },
+    {
+      "_comment": "Crate C — triangular barrier near the north wall.",
+      "id": "crate_c",
+      "polygon_m": [[9.5, 3.0], [10.5, 4.5], [9.0, 4.5]]
+    },
+    {
+      "_comment": "Crate D — small square between the two pad clusters.",
+      "id": "crate_d",
+      "polygon_m": [[3.0, 7.0], [4.0, 7.0], [4.0, 8.0], [3.0, 8.0]]
+    }
+  ],
+
+  "_comment_pads": "Candidate landing pads (hoop targets). center_m = [north_m, east_m] (must be INSIDE bounds_m); radius_m = hoop radius (m, > 0); valid mirrors the GREEN(true)/RED(false) ArUco beside the pad — NOT geometry. 5 pads: 3 valid (green) + 2 invalid (red). Validator: center within bounds, unique ids, radius > 0. Re-measure centres + flip valid flags to the briefing onsite.",
+  "pads": [
+    {
+      "_comment": "Valid pad on the edge (flush to the north wall — closed bounds, legal).",
+      "id": "pad_north", "center_m": [12.0, 5.0], "radius_m": 0.3, "valid": true
+    },
+    { "id": "pad_se", "center_m": [2.5, 9.0], "radius_m": 0.3, "valid": true },
+    { "id": "pad_mid", "center_m": [7.0, 4.0], "radius_m": 0.3, "valid": true },
+    {
+      "_comment": "Invalid (red) decoy pads — flying here must score zero / be refused by land_on_pad.",
+      "id": "pad_decoy_w", "center_m": [5.0, 9.5], "radius_m": 0.3, "valid": false
+    },
+    { "id": "pad_decoy_n", "center_m": [10.0, 8.5], "radius_m": 0.3, "valid": false }
+  ],
+
+  "_comment_lanes": "Taped floor lanes (ADVISORY reference polylines only — never a hard control input), each a list of [north_m, east_m] points. 2 placeholder lanes tracing the convoy path; re-trace from the taped floor onsite.",
+  "lanes": [
+    [[0.0, 5.0], [6.0, 5.0], [11.0, 5.0]],
+    [[2.0, 1.0], [2.0, 9.0]]
+  ]
+}
