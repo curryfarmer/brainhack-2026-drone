@@ -1,5 +1,5 @@
 {
-  "_comment": "NAV-9 gate L2: 3 concurrent PX4 SITL camera-drones flying the full Challenge-2A landing pipeline [takeoff -> navigate -> land_on_pad], time-staggered + serialized-landing (the NAV-8 deconfliction), each to its OWN distinct VALID pad. = configs/sitl3_vision.json transport (3x udpin/gRPC + a per-drone gz->TCP camera bridge) with configs/landing_real.json's landing phases + sector deconfliction, over arena_name sitl_landing (mirrors sim/worlds/landing_px4.sdf). Deconfliction is TIME (launch-corridor slot serializes takeoff) + SPACE (advisory sector_deg wedge per drone) + serialized landing slot — NEVER altitude bands (the ~1.1 m ceiling forbids them). PAD ASSIGNMENT (distinct + valid, so the NAV-review pad-target guard passes): alpha->pad_101 (gz 0,4; straight north, behind the crate -> detours), bravo->pad_100 (gz -1.5,3.5; NW), charlie->pad_102 (gz 1.5,3.5; NE). valid_marker_ids match the ArUco each gz pad renders (101/100/102). PORT MAP: alpha i0 udpin 14540 / gRPC 50051 / bridge 5600; bravo i1 14541 / 50052 / 5601; charlie i2 14542 / 50053 / 5602 (distinct ports REQUIRED for multi-drone gazebo — config-validated). RTF SIZING: 3 llvmpipe cams render-saturate the 4-vCPU VM; the x500 cam is update_rate 5 (SIM-5: RTF~0.55-0.86, all 3 fly). Budgets are WALL seconds (time.monotonic): command_timeout_s 120 (the standalone-joining instances 1/2 converge EKF/mavsdk-health slowly under render jitter, and landing Move translations take longer than in-place rotates); mission_budget_s 900 covers 3 SERIALIZED takeoffs + transits + SERIALIZED descents at low RTF (a MAX - orchestrator exits on all-DONE). RE-MEASURE onsite (gate F): valid_marker_ids = the briefing's real green-pad markers; arena = the real coords. Tune config, not code.",
+  "_comment": "NAV-9 gate L2: 3 concurrent PX4 SITL camera-drones flying the full Challenge-2A landing pipeline [takeoff -> navigate -> land_on_pad], time-staggered + serialized-landing (the NAV-8 deconfliction), each to its OWN distinct VALID pad. = configs/sitl3_vision.json transport (3x udpin/gRPC + a per-drone gz->TCP camera bridge) with configs/landing_real.json's landing phases + sector deconfliction, over arena_name sitl_landing (mirrors sim/worlds/landing_px4.sdf). Deconfliction is TIME (launch-corridor slot serializes takeoff) + SPACE (advisory sector_deg wedge per drone) + serialized landing slot — NEVER altitude bands (the ~1.1 m ceiling forbids them). PAD ASSIGNMENT (distinct + valid, so the NAV-review pad-target guard passes): alpha->pad_101 (gz 0,4; straight north, behind the crate -> detours), bravo->pad_100 (gz -1.5,3.5; NW), charlie->pad_102 (gz 1.5,3.5; NE). valid_marker_ids match the ArUco each gz pad renders (101/100/102). PORT MAP: alpha i0 udpin 14540 / gRPC 50051 / bridge 5600; bravo i1 14541 / 50052 / 5601; charlie i2 14542 / 50053 / 5602 (distinct ports REQUIRED for multi-drone gazebo — config-validated). RTF SIZING: 3 llvmpipe cams render-saturate the 4-vCPU VM; the x500 cam is update_rate 5 (SIM-5: RTF~0.55-0.86, all 3 fly). Budgets are WALL seconds (time.monotonic): command_timeout_s 120 (the standalone-joining instances 1/2 converge EKF/mavsdk-health slowly under render jitter, and landing Move translations take longer than in-place rotates); mission_budget_s 900 covers 3 SERIALIZED takeoffs + transits + SERIALIZED descents at low RTF (a MAX - orchestrator exits on all-DONE). RE-MEASURE onsite (gate F): valid_marker_ids = the briefing's real green-pad markers; arena = the real coords. Tune config, not code. LAND ACQUIRE BUDGET: land_on_pad.acquire_timeout_s 120 + total_budget_s 300 (raised from 40/180 after the first L2 run): under 3-cam render starvation the standalone-joining instance 2 (charlie) gets ~1.8 sighting-frames/s vs alpha's ~4.6, so the down-cam slews between scan steps faster than frames arrive and the 3-of-5 ACQUIRE gate needs a longer WALL window to catch the marker held-still in FOV. This is a SITL-render concession (like update_rate 5), NOT an onsite flight number: real HULA drones each render their own camera on their own hardware (no shared gz lockstep), so onsite size acquire_timeout_s from gate-F decode range + native fps, not these RTF numbers.",
   "profile": "sitl",
   "flight_backend": "mavsdk_sitl",
   "frame_backend": "gazebo",
@@ -31,7 +31,7 @@
         "navigate": { "pad_id": "pad_101", "inflation_m": 0.5, "max_leg_cm": 100, "total_budget_s": 240 },
         "land_on_pad": {
           "valid_marker_ids": [101],
-          "commit_alt_m": 0.5, "total_budget_s": 180, "acquire_timeout_s": 40
+          "commit_alt_m": 0.5, "total_budget_s": 300, "acquire_timeout_s": 120
         }
       }
     },
@@ -47,7 +47,7 @@
         "navigate": { "pad_id": "pad_100", "inflation_m": 0.5, "max_leg_cm": 100, "total_budget_s": 240 },
         "land_on_pad": {
           "valid_marker_ids": [100],
-          "commit_alt_m": 0.5, "total_budget_s": 180, "acquire_timeout_s": 40
+          "commit_alt_m": 0.5, "total_budget_s": 300, "acquire_timeout_s": 120
         }
       }
     },
@@ -63,7 +63,7 @@
         "navigate": { "pad_id": "pad_102", "inflation_m": 0.5, "max_leg_cm": 100, "total_budget_s": 240 },
         "land_on_pad": {
           "valid_marker_ids": [102],
-          "commit_alt_m": 0.5, "total_budget_s": 180, "acquire_timeout_s": 40
+          "commit_alt_m": 0.5, "total_budget_s": 300, "acquire_timeout_s": 120
         }
       }
     }
