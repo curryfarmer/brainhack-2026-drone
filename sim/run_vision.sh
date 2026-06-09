@@ -291,7 +291,7 @@ probe3() {
 # stageB3 (gate V2 full): 3 PX4 camera-drones fly sentry_scan over the moving
 # convoy, each reading its OWN onboard cam via its OWN bridge (5600/5601/5602).
 stageB3() {
-  local secs="${1:-180}"
+  local secs="${1:-180}" mode="${2:-normal}"   # mode: normal | abort | kill
   launch3 || return $?
 
   echo "[stageB3] driving the convoy"
@@ -306,10 +306,29 @@ stageB3() {
     bridge --topic "$(cam_topic_n "$i")" --port "$((5600 + i))" || { stageB3_stop; return 5; }
   done
 
-  echo "[stageB3] finals sitl3_vision (sentry_scan x3) budget=${secs}s"
+  # DRILL kill3: background a killer that -9's instance 2 (charlie) mid-scan so
+  # the swarm proves single-drone-loss isolation (charlie FAILED + exactly one
+  # emergency_land, alpha+bravo complete, exit 1).
+  if [ "$mode" = "kill" ]; then
+    ( sleep "${KILL_AFTER:-55}"
+      kp="$(cat "$RUN/px4_vision_2.pid" 2>/dev/null)"
+      echo "[stageB3] DRILL kill3: kill -9 instance 2 (charlie) PX4 pid=${kp:-?}" >&2
+      [ -n "$kp" ] && kill -9 "$kp" 2>/dev/null ) &
+  fi
+
+  echo "[stageB3] finals sitl3_vision (sentry_scan x3) budget=${secs}s mode=${mode}"
   local rc=0
-  ( cd "$REPO" && .venv/bin/python -m finals.main --profile sitl \
-      --config finals/configs/sitl3_vision.json --budget "$secs" ) || rc=$?
+  if [ "$mode" = "abort" ]; then
+    # DRILL abort3: run finals under a PTY so the AbortListener arms, inject 'q'
+    # once all 3 are airborne (orderly land-all -> all DONE, exit 0).
+    ( cd "$REPO" && PYTHONNOUSERSITE=1 python3 sim/pty_q_harness.py \
+        --trigger-regex 'offboard active' --trigger-count 3 --fallback-secs 80 -- \
+        .venv/bin/python -m finals.main --profile sitl \
+        --config finals/configs/sitl3_vision.json --budget "$secs" ) || rc=$?
+  else
+    ( cd "$REPO" && .venv/bin/python -m finals.main --profile sitl \
+        --config finals/configs/sitl3_vision.json --budget "$secs" ) || rc=$?
+  fi
   stageB3_stop
   echo "[stageB3] finals rc=$rc — sightings.csv under $REPO/runs_finals/<latest>/"
   return $rc
@@ -323,7 +342,9 @@ case "${1:-}" in
   stageB)        shift; stageB "$@" ;;
   stageB-stop)   stageB_stop ;;
   probe3)        shift; probe3 "$@" ;;
-  stageB3)       shift; stageB3 "$@" ;;
+  stageB3)       shift; stageB3 "${1:-360}" normal ;;
+  abort3)        shift; stageB3 "${1:-360}" abort ;;
+  kill3)         shift; stageB3 "${1:-360}" kill ;;
   stageB3-stop)  stageB3_stop ;;
-  *) echo "usage: $0 {install-model|bridge --topic T [--port P]|stop-bridge|stageA [secs]|stageB [secs]|probe3 [secs]|stageB3 [secs]|stageB3-stop}" >&2; exit 64 ;;
+  *) echo "usage: $0 {install-model|bridge --topic T [--port P]|stop-bridge|stageA [secs]|stageB [secs]|probe3 [secs]|stageB3 [secs]|abort3 [secs]|kill3 [secs]|stageB3-stop}" >&2; exit 64 ;;
 esac
