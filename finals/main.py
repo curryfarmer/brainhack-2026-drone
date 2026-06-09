@@ -8,6 +8,7 @@ Usage (run from repo root):
   python -m finals.main --profile mock --dry-run
   python -m finals.main --profile sitl --phases takeoff_demo --budget 120
   python -m finals.main --profile replay
+  python -m finals.main --profile bench --preflight-only   # onsite bench tool
   python -m finals.main --profile bench
   python -m finals.main --profile real --i-know-this-arms-real-drones
 
@@ -28,11 +29,14 @@ Wiring notes (binding):
 - Phase construction soft convention: a phase class MAY define
   from_config(drone_cfg, cfg) (TakeoffDemo does — zone tunables + altitude
   band); phases without it are built with no arguments.
-- Preflight gate: bench/real run finals.preflight.run_preflight (S10 stub —
-  raises its session pointer today); mock/sitl record a loud
-  preflight-skipped event instead (nothing to gate in pure software).
+- Preflight gate (S10): bench/real run finals.preflight.run_preflight (the
+  ordered P0-P10 gate) — it OWNS adapter.connect (P4) AND video source.start
+  (P6), leaving adapters connected + sources started for the orchestrator (the
+  S9-deferred connect-before-stream-start ordering). `--preflight-only` runs
+  P0-P9 standalone (no flight) as the onsite bench tool. mock/sitl record a
+  loud preflight-skipped event instead (nothing to gate in pure software).
 - VISION GATE (S7): perception + VideoWatchdog are wired ONLY for frame
-  backends in _WIRED_FRAME_BACKENDS ({"replay"} today) — deliberately
+  backends in _WIRED_FRAME_BACKENDS (replay + pyhulax, S10) — deliberately
   NARROWER than frame_backend != "none": sitl.json ships frame_backend
   "gazebo" with a drone TODAY (S8 wires it), and gating on != "none" would
   either crash on the GazeboRgbSource stub or hand agents a VideoWatchdog
@@ -99,6 +103,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--display", action="store_true", help="show the detection window (debug)")
     p.add_argument("--dry-run", action="store_true",
                    help="load config, resolve backends + phases, print the plan, exit 0")
+    p.add_argument("--preflight-only", action="store_true",
+                   help="bench/real ONLY: run the preflight P0-P9 gate (no "
+                        "operator GO, no orchestrator, no flight) and exit — "
+                        "the primary onsite bench tool (exit 0 pass / 3 fail)")
     p.add_argument("--i-know-this-arms-real-drones", action="store_true",
                    help="required confirmation gate for --profile real")
     return p.parse_args(argv)
@@ -226,22 +234,40 @@ def run(argv: Optional[List[str]] = None) -> int:
         print(format_resolved_plan(cfg, flight_cls, video_cls, config_path))
         return EXIT_OK
 
+    if args.preflight_only:
+        return _run_preflight_only(cfg)
+
     return _run_mission(cfg)
 
 
 # ============================================================
 # Mission execution (S4)
 # ============================================================
-def _build_adapter(cfg: FinalsConfig, drone: DroneConfig):
+def _make_shared_pyhulax_api(cfg: FinalsConfig):
+    """ONE pyhulax DroneAPI per drone (S10): the flight adapter and the video
+    source MUST speak to the same link, so main creates the api here and injects
+    it into BOTH builders. Method-local SDK import keeps main SDK-free (the
+    composition-root convention); tests monkeypatch this seam to hand back a
+    FakeDroneAPI(video_stream=FakeVideoStream()) and never import pyhulax."""
+    from finals.flight.pyhulax_adapter import _real_drone_api_factory
+    return _real_drone_api_factory()
+
+
+def _build_adapter(cfg: FinalsConfig, drone: DroneConfig, *, api=None):
     """One adapter per drone, from (FinalsConfig, DroneConfig) — NEVER bare
     flight_cls(drone_id): BenchAdapter wraps an inner backend (special case
     below, see its docstring), and MavsdkSitlAdapter will need per-drone
     (sitl_address, mavsdk_grpc_port) from here in S6/SIM-1
-    (sim_sessions.md "Notes to roadmap sessions")."""
+    (sim_sessions.md "Notes to roadmap sessions").
+
+    api (S10): the SHARED pyhulax DroneAPI for this drone, created once in
+    _run_mission so the PyhulaxAdapter and the PyhulaxVideoSource speak to ONE
+    link (None on every non-pyhulax path; the adapter then makes its own at
+    connect())."""
     if cfg.flight_backend == "bench":
         from finals.flight.adapter import BenchAdapter
         from finals.flight.pyhulax_adapter import PyhulaxAdapter   # S9
-        return BenchAdapter(PyhulaxAdapter(drone.id))
+        return BenchAdapter(PyhulaxAdapter(drone.id, api=api))
     if cfg.flight_backend == "mavsdk_sitl":
         # S6/SIM-1: per-drone (sitl_address, grpc_port) — instance i listens
         # on udpin 14540+i with its own mavsdk_server on gRPC 50051+i;
@@ -251,6 +277,11 @@ def _build_adapter(cfg: FinalsConfig, drone: DroneConfig):
         address, grpc_port = resolve_sitl_endpoint(cfg, drone)
         return MavsdkSitlAdapter(drone.id, sitl_address=address,
                                  grpc_port=grpc_port)
+    if cfg.flight_backend == "pyhulax":
+        # S10 real profile: ip is None here — preflight P3 resolves plane_id ->
+        # ip and applies it via set_target_ip BEFORE P4 connect.
+        from finals.flight.pyhulax_adapter import PyhulaxAdapter
+        return PyhulaxAdapter(drone.id, api=api)
     flight_cls = resolve_flight_adapter_cls(cfg.flight_backend)
     if flight_cls is None:      # 'none' is guarded before we get here
         raise ConfigError(
@@ -287,6 +318,8 @@ _HEARTBEAT_PERIOD_S = 1.0
 _WIRED_FRAME_BACKENDS = (
     "replay",
     "gazebo",    # S8 (SIM-4): GazeboRgbSource <- sim/gz_camera_bridge (TCP)
+    "pyhulax",   # S10: PyhulaxVideoSource over the shared DroneAPI (preflight
+                 # connects the link before _amain starts the stream)
 )
 
 
@@ -371,11 +404,14 @@ def _build_detector(cfg: FinalsConfig, bus: SightingBus,
 
 def _build_perception(cfg: FinalsConfig, drone_id: str, bus: SightingBus,
                       slog: Optional[SightingLog], events: EventLog,
-                      detector, csv_health=None) -> Tuple[object, object]:
+                      detector, csv_health=None, *, api=None) -> Tuple[object, object]:
     """One (VideoSource, PerceptionLoop) pair per drone. Called only when
-    _frames_wired(cfg). The VideoSource is chosen by cfg.frame_backend; the
-    PerceptionLoop wiring below is identical for every backend (S9/S10 adds a
-    pyhulax branch alongside the gazebo one)."""
+    _frames_wired(cfg). The VideoSource is chosen by cfg.frame_backend:
+    ReplaySource (replay), GazeboRgbSource over the sim TCP bridge (gazebo,
+    SIM-4), or PyhulaxVideoSource over the per-drone shared DroneAPI (pyhulax,
+    S10 — the SAME link the flight adapter uses; NOT started here, preflight P6
+    owns start() AFTER P4 connects the api = the connect-before-stream-start
+    ordering). The PerceptionLoop wiring below is identical for every backend."""
     from finals.vision.aruco import make_marker_detector
     from finals.vision.perception import PerceptionLoop
     if cfg.frame_backend == "gazebo":
@@ -388,6 +424,18 @@ def _build_perception(cfg: FinalsConfig, drone_id: str, bus: SightingBus,
         source = GazeboRgbSource(
             drone_id,
             host=cfg.gazebo_video_host, port=cfg.gazebo_video_port,
+            video_channel_order=cfg.video_channel_order,
+            stale_s=cfg.guards.video_stale_s)
+    elif cfg.frame_backend == "pyhulax":
+        # S10 live path: the shared DroneAPI (api) is connected by preflight
+        # P4 BEFORE preflight P6 calls source.start() — connect-before-stream.
+        from finals.vision.pyhulax_video import PyhulaxVideoSource
+        if api is None:      # wiring drift: _build_agents must pass the shared api
+            raise ConfigError(
+                f"{drone_id}: frame_backend 'pyhulax' needs the shared "
+                f"DroneAPI — _build_agents must pass api= (wiring bug)")
+        source = PyhulaxVideoSource(
+            drone_id, api,
             video_channel_order=cfg.video_channel_order,
             stale_s=cfg.guards.video_stale_s)
     else:
@@ -447,14 +495,23 @@ async def _amain(cfg: FinalsConfig, agents: List[DroneAgent],
     event loop. Perception teardown always runs (finally), in dependency
     order: stop sampling -> stop sources (the detector pool is stopped by
     _run_mission, which owns it)."""
-    if cfg.profile in ("bench", "real"):
-        from finals.preflight import run_preflight     # S10 — pointer today
-        await run_preflight(cfg.profile, agents, cfg)  # PreflightError -> 3
+    sources = [s for s, _p in perceptions]
+    # bench/real: preflight (S10) owns connect (P4) AND video start (P6) — it
+    # leaves adapters CONNECTED and sources STARTED for the orchestrator, so the
+    # generic source.start loop below MUST skip them (PyhulaxVideoSource.start
+    # refuses a second call). Other profiles have no hardware gate and start
+    # their own sources here.
+    preflight_owns_sources = cfg.profile in ("bench", "real")
+    if preflight_owns_sources:
+        from finals.preflight import run_preflight
+        await run_preflight(cfg.profile, agents, cfg, sources=sources,
+                            events=events, run_dir=run_dir)   # PreflightError -> 3
     else:
         # "mission" = the orchestrator's mission-level pseudo drone id.
         events.log("mission", "preflight", status="skipped",
                    reason=f"profile {cfg.profile!r} has no preflight gate "
-                          f"(P0-P10 applies to bench/real; arrives S10)")
+                          f"(P0-P10 gates bench/real hardware; mock/sitl are "
+                          f"pure software)")
     abort_event = threading.Event()
     orchestrator = Orchestrator(agents, events, run_dir,
                                 budget_s=cfg.mission_budget_s, bus=bus,
@@ -472,9 +529,10 @@ async def _amain(cfg: FinalsConfig, agents: List[DroneAgent],
             # The mission's hard ceiling (budget + settle grace) bounds the
             # perception tasks too; p_stop in the finally is the normal end.
             p_deadline = time.monotonic() + cfg.mission_budget_s + 60.0
-            for source, perception in perceptions:
-                source.start(timeout_s=10.0)   # SensorTimeout -> loud abort
-                                               # BEFORE anything arms
+            if not preflight_owns_sources:
+                for source, perception in perceptions:
+                    source.start(timeout_s=10.0)   # SensorTimeout -> loud abort
+                                                   # BEFORE anything arms
             for source, perception in perceptions:
                 task = asyncio.get_running_loop().create_task(
                     perception.run(deadline=p_deadline, stop_event=p_stop),
@@ -497,6 +555,75 @@ async def _amain(cfg: FinalsConfig, agents: List[DroneAgent],
             source.stop()                      # idempotent, never raises
 
 
+def _build_agents(cfg: FinalsConfig, events: EventLog, bus: SightingBus,
+                  slog: Optional[SightingLog], detector, csv_health, safety,
+                  ) -> Tuple[List[DroneAgent], List[Tuple[object, object]]]:
+    """One DroneAgent + its (source, perception) pair per cfg.drone. Shared by
+    the mission path (_run_mission) and --preflight-only (_run_preflight_only)
+    so they build the IDENTICAL fleet — the bench tool must exercise exactly
+    what flies. For the live pyhulax path one shared DroneAPI per drone feeds
+    BOTH the adapter and the video source (the same-link invariant).
+
+    Returns agents in cfg.drones order (preflight P3 zips on that order)."""
+    agents: List[DroneAgent] = []
+    perceptions: List[Tuple[object, object]] = []
+    for d in cfg.drones:
+        frame_ts_fn = None
+        on_degrade = None
+        perception = None
+        # S10: ONE shared pyhulax DroneAPI per drone (flight + video, same
+        # link). None on every other backend — each builder makes its own.
+        api = (_make_shared_pyhulax_api(cfg)
+               if cfg.frame_backend == "pyhulax" else None)
+        if _frames_wired(cfg):
+            source, perception = _build_perception(
+                cfg, d.id, bus, slog, events, detector,
+                csv_health=csv_health, api=api)
+            perceptions.append((source, perception))
+            frame_ts_fn = perception.last_frame_ts
+            on_degrade = (lambda trip, p=perception:
+                          p.shed(trip.reason))
+        agent = DroneAgent(d.id, _build_adapter(cfg, d, api=api),
+                           _build_phases(d, cfg), events, bus=bus,
+                           command_timeout_s=cfg.command_timeout_s,
+                           guards=_build_guards(cfg, d),
+                           safety=safety,
+                           frame_ts_fn=frame_ts_fn,
+                           on_degrade=on_degrade)
+        if perception is not None:
+            # Wire-once AFTER the agent exists (the perception<->agent
+            # reference cycle): enrichment reads the agent's cached per-tick
+            # telemetry, never the adapter directly.
+            perception.set_telemetry_source(
+                lambda a=agent: a.last_telemetry)
+        agents.append(agent)
+    return agents, perceptions
+
+
+def _build_fleet_support(cfg: FinalsConfig, events: EventLog, bus: SightingBus,
+                         run_dir: str):
+    """The optional vision support trio (SightingLog, shared YOLO detector,
+    run-wide CsvRecordingHealth) — built ONLY when frames are wired, None
+    otherwise. The caller owns teardown (detector.stop / slog.close in its
+    finally). Shared by the mission + preflight-only paths."""
+    if not _frames_wired(cfg):
+        return None, None, None
+    from finals.vision.perception import CsvRecordingHealth
+    slog = SightingLog(os.path.join(run_dir, "sightings.csv"))
+    csv_health = CsvRecordingHealth()              # run-wide, all paths
+    detector = _build_detector(cfg, bus, slog, run_dir, csv_health=csv_health)
+    return slog, detector, csv_health
+
+
+def _build_safety(cfg: FinalsConfig, events: EventLog) -> SafetyController:
+    return SafetyController(
+        events,
+        land_retry_period_s=cfg.guards.land_retry_period_s,
+        land_retry_window_s=cfg.guards.land_retry_window_s,
+        command_timeout_s=cfg.command_timeout_s,
+        slot_wait_s=cfg.guards.slot_wait_s)
+
+
 def _run_mission(cfg: FinalsConfig) -> int:
     if cfg.flight_backend == "none":
         return _run_replay(cfg)
@@ -505,55 +632,55 @@ def _run_mission(cfg: FinalsConfig) -> int:
     install_crash_hooks(run_dir)
     with EventLog(run_dir) as events:
         bus = SightingBus()
-        safety = SafetyController(
-            events,
-            land_retry_period_s=cfg.guards.land_retry_period_s,
-            land_retry_window_s=cfg.guards.land_retry_window_s,
-            command_timeout_s=cfg.command_timeout_s,
-            slot_wait_s=cfg.guards.slot_wait_s)
-        slog: Optional[SightingLog] = None
-        detector = None
-        csv_health = None
-        perceptions: List[Tuple[object, object]] = []
+        safety = _build_safety(cfg, events)
+        slog, detector, csv_health = _build_fleet_support(
+            cfg, events, bus, run_dir)
         try:
-            if _frames_wired(cfg):
-                from finals.vision.perception import CsvRecordingHealth
-                slog = SightingLog(os.path.join(run_dir, "sightings.csv"))
-                csv_health = CsvRecordingHealth()  # run-wide, all paths
-                detector = _build_detector(cfg, bus, slog, run_dir,
-                                           csv_health=csv_health)
-            agents = []
-            for d in cfg.drones:
-                frame_ts_fn = None
-                on_degrade = None
-                perception = None
-                if _frames_wired(cfg):
-                    source, perception = _build_perception(
-                        cfg, d.id, bus, slog, events, detector,
-                        csv_health=csv_health)
-                    perceptions.append((source, perception))
-                    frame_ts_fn = perception.last_frame_ts
-                    on_degrade = (lambda trip, p=perception:
-                                  p.shed(trip.reason))
-                agent = DroneAgent(d.id, _build_adapter(cfg, d),
-                                   _build_phases(d, cfg), events, bus=bus,
-                                   command_timeout_s=cfg.command_timeout_s,
-                                   guards=_build_guards(cfg, d),
-                                   safety=safety,
-                                   frame_ts_fn=frame_ts_fn,
-                                   on_degrade=on_degrade)
-                if perception is not None:
-                    # Wire-once AFTER the agent exists (the perception<->
-                    # agent reference cycle): enrichment reads the agent's
-                    # cached per-tick telemetry, never the adapter directly.
-                    perception.set_telemetry_source(
-                        lambda a=agent: a.last_telemetry)
-                agents.append(agent)
+            agents, perceptions = _build_agents(
+                cfg, events, bus, slog, detector, csv_health, safety)
             return asyncio.run(_amain(cfg, agents, events, run_dir, bus,
                                       perceptions=perceptions))
         finally:
             if detector is not None:
                 detector.stop()                # joins the worker threads
+            if slog is not None:
+                slog.close()
+
+
+def _run_preflight_only(cfg: FinalsConfig) -> int:
+    """`--preflight-only`: build the EXACT mission fleet and run the P0-P9 gate
+    (P10 operator-GO is skipped — preflight-only never flies), then tear the
+    link down. The primary onsite bench tool. Requires bench/real (preflight is
+    their gate); any other profile is a ConfigError. Exit 0 = all critical
+    gates passed (WARNs allowed); a critical failure raises PreflightError ->
+    main() maps it to exit 3."""
+    if cfg.profile not in ("bench", "real"):
+        raise ConfigError(
+            f"--preflight-only needs --profile bench or real (preflight is "
+            f"their P0-P10 hardware gate); profile {cfg.profile!r} has none — "
+            f"mock/sitl are pure software")
+    run_dir = create_run_dir(cfg.run_dir)
+    install_crash_hooks(run_dir)
+    with EventLog(run_dir) as events:
+        from finals.preflight import run_preflight
+        bus = SightingBus()
+        safety = _build_safety(cfg, events)
+        slog, detector, csv_health = _build_fleet_support(
+            cfg, events, bus, run_dir)
+        try:
+            agents, perceptions = _build_agents(
+                cfg, events, bus, slog, detector, csv_health, safety)
+            sources = [s for s, _p in perceptions]
+            results = asyncio.run(run_preflight(
+                cfg.profile, agents, cfg, sources=sources, events=events,
+                run_dir=run_dir, preflight_only=True))   # PreflightError -> 3
+            # We only reach here when no critical gate failed (a critical fail
+            # raises). WARNs (non-critical, ok=False) do not fail the bench.
+            ok = all(r.ok or not r.critical for r in results)
+            return EXIT_OK if ok else EXIT_PREFLIGHT
+        finally:
+            if detector is not None:
+                detector.stop()
             if slog is not None:
                 slog.close()
 

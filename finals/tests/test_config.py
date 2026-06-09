@@ -199,6 +199,23 @@ def test_detector_workers_validated(write_config, minimal_mock_config):
         load_config(write_config(minimal_mock_config))
 
 
+def test_discovery_timeout_s_default_and_roundtrip(write_config,
+                                                   minimal_mock_config):
+    # S10: the preflight P3 Dola listen window — defaults, onsite-tunable.
+    assert load_config(
+        write_config(dict(minimal_mock_config))).discovery_timeout_s == 10.0
+    minimal_mock_config["discovery_timeout_s"] = 4.5
+    assert load_config(
+        write_config(minimal_mock_config)).discovery_timeout_s == 4.5
+
+
+@pytest.mark.parametrize("bad", [0, -1, float("inf"), True])
+def test_discovery_timeout_s_validated(write_config, minimal_mock_config, bad):
+    minimal_mock_config["discovery_timeout_s"] = bad
+    with pytest.raises(ConfigError, match="discovery_timeout_s"):
+        load_config(write_config(minimal_mock_config))
+
+
 def _bench_config(drones: list) -> dict:
     return {
         "profile": "bench", "flight_backend": "bench", "frame_backend": "pyhulax",

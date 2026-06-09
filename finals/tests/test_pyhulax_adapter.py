@@ -80,6 +80,65 @@ def test_connect_without_ip_refuses():
 
 
 # ============================================================
+# set_target_ip (S10: preflight P3 applies the discovered IP pre-connect)
+# ============================================================
+def test_set_target_ip_applies_before_connect():
+    api = FakeDroneAPI()
+    a = PyhulaxAdapter("alpha", api=api)          # no ip — discovery resolves it
+
+    async def _wrap():
+        a.set_target_ip("192.168.1.77")
+        await a.connect()
+        try:
+            assert a._connected is True
+            connect_calls = [c for c in api.calls if c[0] == "connect"]
+            assert connect_calls[0][1]["ip"] == "192.168.1.77"
+        finally:
+            await a.disconnect()
+    asyncio.run(_wrap())
+
+
+def test_set_target_ip_rejects_empty():
+    with pytest.raises(ValueError, match="non-empty"):
+        PyhulaxAdapter("alpha").set_target_ip("")
+
+
+def test_set_target_ip_refused_after_connect():
+    a, _ = make_adapter(FakeDroneAPI())           # built with an ip already
+
+    async def check(a):
+        with pytest.raises(FlightError, match="already connected"):
+            a.set_target_ip("9.9.9.9")
+    run_connected(a, check)
+
+
+def test_connect_is_idempotent_single_handshake():
+    """Preflight P4 connects and leaves the link up; the agent's later
+    connect() (agent.py) must be a NO-OP, not a second handshake — the
+    S9-deferred connect-before-stream-start ordering relies on it."""
+    a, api = make_adapter(FakeDroneAPI())
+
+    async def check(a):
+        await a.connect()                         # second call — must no-op
+        assert [c[0] for c in api.calls].count("connect") == 1
+        assert a._connected is True
+    run_connected(a, check)
+
+
+def test_degraded_connect_re_handshakes():
+    """The idempotent guard EXCLUDES a degraded adapter: safe-down then
+    re-connect() must clear the latch (the _gate_not_degraded contract)."""
+    a, api = make_adapter(FakeDroneAPI())
+
+    async def check(a):
+        a.degraded = True                         # simulate a post-timeout latch
+        await a.connect()                         # must actually reconnect
+        assert [c[0] for c in api.calls].count("connect") == 2
+        assert a.degraded is False
+    run_connected(a, check)
+
+
+# ============================================================
 # connect()
 # ============================================================
 def test_connect_enables_battery_failsafe_always_and_polls():
