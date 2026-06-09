@@ -17,8 +17,12 @@ python -m finals.main --profile mock --dry-run   # resolve + print the plan
 python -m finals.main --profile replay           # frames -> sightings.csv (S7; needs cv2)
 python -m finals.main --profile sitl --phases takeoff_demo   # VM (from S4+S6)
 python -m finals.main --profile sitl --config finals/configs/sitl3.json  # 3× swarm (SIM-2)
+python -m finals.main --profile bench --preflight-only   # S10 onsite bench tool: P0–P9, props off
 python -m finals.tools.replay_plot <run_dir> [--save out.png]   # DR-replay tracks (SIM-2)
 ```
+
+Onsite 2-hour window runbook (preflight P0–P10, bench B1–B8, gates A–G, hard
+rules): [`docs/finals/onsite_test_plan.md`](../../docs/finals/onsite_test_plan.md).
 
 Vision deps note (S7): the test suite stays green WITHOUT cv2/numpy (vision
 tests skip; everything else runs); `--profile replay` and the cv2-gated
@@ -73,7 +77,7 @@ SIM-1/2 execute S6; SIM-3/4/5 execute S8.
 | `types.py` | ✅ implemented | S1 | pyhulax docs (Direction/units); hula_connection.py:46–50 (Action vocabulary) |
 | `errors.py` | ✅ implemented | S1 | failure-mode audit of the official examples |
 | `config.py` | ✅ implemented | S1 | qualifier_run.py:72–132 MissionConfig; known-issue #9 weights guards |
-| `main.py` | ✅ implemented | S1 / S4 / S7 | qualifier_run.py parse_args/_amain; S4: bench wiring builds the INNER backend first (BenchAdapter special case); phases via the `from_config` soft convention; S7: `_run_replay` (the no-drone runner) + per-drone perception/VideoWatchdog wiring gated on `_WIRED_FRAME_BACKENDS` = {"replay"} — deliberately NOT `frame_backend != "none"`: sitl.json declares "gazebo" before S8 wires it (a watchdog without a frame source = guaranteed-false DEGRADE). **S8: add "gazebo" to the set + a source branch in `_build_perception` — no orchestrator changes** (sightings.csv is appended at the PUBLISH site, perception.py) |
+| `main.py` | ✅ implemented | S1 / S4 / S7 / **S10** | qualifier_run.py parse_args/_amain; S4: bench wiring builds the INNER backend first (BenchAdapter special case); phases via the `from_config` soft convention; S7: `_run_replay` (the no-drone runner) + per-drone perception/VideoWatchdog wiring gated on `_WIRED_FRAME_BACKENDS` — deliberately NOT `frame_backend != "none"`: sitl.json declares "gazebo" before S8 wires it (a watchdog without a frame source = guaranteed-false DEGRADE). **S8: add "gazebo" to the set + a source branch in `_build_perception` — no orchestrator changes** (sightings.csv is appended at the PUBLISH site, perception.py). **S10: `_WIRED_FRAME_BACKENDS` = (`replay`, `pyhulax`); `_make_shared_pyhulax_api` creates ONE DroneAPI per drone fed to BOTH `_build_adapter` and `_build_perception` (same-link invariant); `_build_agents` extracted (shared by the mission + `--preflight-only` paths); `_amain` lets preflight OWN `connect` (P4) + `source.start` (P6) for bench/real and skips the generic start loop; `--preflight-only` → `_run_preflight_only` (bench/real only, ConfigError otherwise)** |
 | `mission/phase.py` | ✅ contract | S1 (exercised S4) | hula_connection.py:46–50, made pure |
 | `mission/phases/__init__.py` | ✅ registry | S1 | — |
 | `flight/adapter.py` | ✅ implemented (ABC + BenchAdapter) | S1 / S3 | pyhulax ∩ MAVSDK honest primitives; Bench wraps an inner adapter (S4 wiring needs a special case) |
@@ -101,8 +105,8 @@ SIM-1/2 execute S6; SIM-3/4/5 execute S8.
 | `mission/phases/search.py` | ⬜ stub | **S8** = SIM-4 | SentryScan default (no-position searcher); coverage.py lane math informs lawnmower |
 | `flight/pyhulax_adapter.py` | ✅ implemented | **S9** | hula_connection.py:29–37 + https://pyhulax.xenops.ae (audit bar: the mapping_drone.py bug list). PyhulaxAdapter(FlightAdapter) + FakeDroneAPI; per-drone single-thread executor is THE choke point (every blocking SDK call under `wait_for` → hard deadline; TimeoutError → degraded latch + FlightTimeout → agent safes down); name-based SDK-error mapper (real + fake map identically, pyhulax NOT imported); connect = robust_connect single-retry on DroneConnectionError + `enable_battery_failsafe()` ALWAYS + 2 Hz lock-guarded telemetry poller (dead-flag/staleness `_check_alive_fresh`, the mapping_drone.py infinite-wait fix); `move_to` deliberately absent; cm/yaw onsite "unit hop" gate (commented, not silently decided). `EXCEPT_EXCEPTION_WHITELIST` (S9, reviewed): poller tick + emergency_land + disconnect, each full-traceback. Unit-tested pyhulax-free; 4/4 mutation kill-check |
 | `flight/discovery.py` | ✅ implemented | **S9** | dola.py (port 8668 — trust the code, not its docstring). `discover_required(plane_ids, timeout_s, *, sock=)` + pure `_parse_packet`; SYNCHRONOUS deadline-bounded scan (no listener thread → dola's stop()/join bug gone); missing planes RAISE PreflightError naming the gap (dola returned `{id: None}`); parse errors TYPED + counted (not print-and-continue); `sock=` injection seam. STDLIB-ONLY (stays in the SDK conventions scan, NOT in SDK_ALLOWED) |
-| `vision/pyhulax_video.py` | ✅ implemented | **S9** | hula_connection.py + pyhulax video docs (no auto-reconnect!). PyhulaxVideoSource(VideoSource) + FakeVideoStream over a SHARED DroneAPI stream; None startup-window tolerated (bounded, → SensorTimeout); ERROR(state 4) → bounded stop()/start() restart ladder → healthy=False (no auto-reconnect); `video_channel_order` flag normalizes .to_rgb() to the BGR contract (seam, never hardcoded; fake channel order observable WITHOUT numpy). Typed-only catches (OFF the except-Exception whitelist by design). Modular: NOT yet in `_WIRED_FRAME_BACKENDS` (live wiring + discovery→ip + connect-before-start = S10) |
-| `preflight.py` | ⬜ stub | **S10** | mapping_drone.py prompt (audited) + deployment.md checklist |
+| `vision/pyhulax_video.py` | ✅ implemented | **S9** | hula_connection.py + pyhulax video docs (no auto-reconnect!). PyhulaxVideoSource(VideoSource) + FakeVideoStream over a SHARED DroneAPI stream; None startup-window tolerated (bounded, → SensorTimeout); ERROR(state 4) → bounded stop()/start() restart ladder → healthy=False (no auto-reconnect); `video_channel_order` flag normalizes .to_rgb() to the BGR contract (seam, never hardcoded; fake channel order observable WITHOUT numpy). Typed-only catches (OFF the except-Exception whitelist by design). **S10: WIRED — in `_WIRED_FRAME_BACKENDS`; main shares its DroneAPI with the adapter; preflight P3→P4→P6 does discovery→ip→connect-before-start** |
+| `preflight.py` | ✅ implemented | **S10** | mapping_drone.py prompt (audited) + deployment.md checklist. Ordered **P0–P10** gate that refuses flight unless every critical check passes; runnable standalone via `--preflight-only` (P0–P9, props off, never flies) as the primary bench tool. PURE (NO top-level SDK import — not in SDK_ALLOWED; all SDK contact through the injected adapter/source/api; discovery + marker detector lazy/injected). Each gate returns a `CheckResult`; the FIRST critical FAIL tears the fleet down (stop video, disconnect adapters) → `PreflightError` → exit 3; non-critical (P7) WARNs. On mission-path success adapters stay CONNECTED + sources STARTED for `_amain` (P4 connect → P6 stream start = the connect-before-stream-start ordering). P3 applies the discovered IP via `set_target_ip` before P4. P10 default-deny fixes mapping_drone.py:318–327 (invalid input fell THROUGH to arm). Tested pyhulax/cv2-free via FakeDroneAPI/FakeVideoStream + injected discovery/detector |
 | `mission/phases/track_convoy.py` | ⬜ stub | **S11** (post-briefing) | Sighting stream + bearing servo |
 | `mission/phases/land_on_pad.py` | ⬜ stub | **S11** (post-briefing) | ArUco pattern; PAD_* visual servo |
 
@@ -119,13 +123,13 @@ SIM-1/2 execute S6; SIM-3/4/5 execute S8.
 | S7 | `vision/{video,aruco,perception,detector}.py` | **ArUco first**: detect + read marker IDs on every sampled frame → sightings.csv via the replay profile; vendored YOLO Detector (bugs fixed) lands as the optional config-gated extra | pytest + replay run |
 | S8 | `vision/gazebo_video.py`, `phases/search.py` + convoy world (5 moving marker robots, 2 pads) + 640×480 cam model ([`simulation.md`](simulation.md) Tier 2). Executed partwise: assets **SIM-3** (∥ S4–S7), single-drone V2a **SIM-4**, 3× rehearsal **SIM-5** — [`sim_sessions.md`](sim_sessions.md) | SentryScan + config-gated lawnmower | **VM V2**: 3× sitl search logs sightings of MOVING markers (V2a = 1 drone in SIM-4; full V2 = SIM-5) |
 | S9 | pyhulax leaves (+FakeDroneAPI/FakeVideoStream) | unit tests green WITHOUT pyhulax installed; audit-grade review | **✅ S9 2026-06-09** — pyhulax_adapter + discovery + pyhulax_video real; 575→ suite green pyhulax-free (bench/real `--dry-run` resolve PyhulaxVideoSource/BenchAdapter without importing pyhulax); adversarial review vs the mapping_drone.py bug list + 4/4 mutation kill-check. Live video wiring (`_WIRED_FRAME_BACKENDS`) deferred to S10 (preflight owns discovery→ip + connect-before-start) |
-| S10 | `preflight.py` + `docs/onsite_test_plan.md` | P0–P10 runnable via `--preflight-only`; bench B1–B8 scripted | pytest + bench-ready |
+| S10 | `preflight.py` + `docs/finals/onsite_test_plan.md` | P0–P10 runnable via `--preflight-only`; bench B1–B8 scripted | **✅ S10 2026-06-09** — preflight P0–P10 + LIVE pyhulax wiring (`_WIRED_FRAME_BACKENDS` += pyhulax, shared DroneAPI, connect-before-stream-start via P4→P6) + idempotent `connect()`/`set_target_ip` + `discovery_timeout_s` config; [`docs/finals/onsite_test_plan.md`](../../docs/finals/onsite_test_plan.md) (P0–P10, B1–B8, gates A–G, hard rules); suite green WITHOUT pyhulax/cv2 |
 | S11 | briefing phases (`track_convoy`, `land_on_pad`) | canned-tested; all tunables in config | pytest + SITL rehearsal |
 
-Then: the 2-hour onsite window (gates A–G; see the plan's onsite section, to be
-expanded into `docs/onsite_test_plan.md` in S10). Hard rules onsite: tune
-config, not code; no new behavior in the last 25 minutes; no multi-drone
-flight without a proven abort.
+Then: the 2-hour onsite window (gates A–G) — full runbook in
+[`docs/finals/onsite_test_plan.md`](../../docs/finals/onsite_test_plan.md) (S10).
+Hard rules onsite: tune config, not code; no new behavior in the last 25
+minutes; no multi-drone flight without a proven abort.
 
 ## Open questions (defaults in force)
 

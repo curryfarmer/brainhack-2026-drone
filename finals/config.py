@@ -128,6 +128,7 @@ class FinalsConfig:
     tick_hz: float = 10.0
     mission_budget_s: float = 600.0
     command_timeout_s: float = 15.0
+    discovery_timeout_s: float = 10.0           # preflight P3 Dola listen window (bench/real)
     min_battery_pct: float = 20.0
     video_channel_order: str = "rgb"            # what .to_rgb() ACTUALLY returns — bench-verified
     camera_hfov_deg: Optional[float] = None     # needed for Sighting.bearing_deg; bench-measured
@@ -283,6 +284,7 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
         required=("profile", "flight_backend", "frame_backend", "detector", "drones"),
         optional=(
             "run_dir", "tick_hz", "mission_budget_s", "command_timeout_s",
+            "discovery_timeout_s",
             "min_battery_pct", "video_channel_order", "camera_hfov_deg",
             "sitl_address", "marker_backend", "replay_dir", "replay_fps",
             "use_uwb", "uwb_serial_port", "guards",
@@ -323,6 +325,7 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
         guards=guards,
         **{k: top[k] for k in (
             "run_dir", "tick_hz", "mission_budget_s", "command_timeout_s",
+            "discovery_timeout_s",
             "min_battery_pct", "video_channel_order", "camera_hfov_deg",
             "sitl_address", "marker_backend", "replay_dir", "replay_fps",
             "use_uwb", "uwb_serial_port",
@@ -485,6 +488,14 @@ def _validate(cfg: FinalsConfig, config_dir: str) -> None:
                         ("command_timeout_s", cfg.command_timeout_s)):
         if not value > 0:
             raise ConfigError(f"{name} must be > 0, got {value}")
+    if (not isinstance(cfg.discovery_timeout_s, (int, float))
+            or isinstance(cfg.discovery_timeout_s, bool)
+            or not math.isfinite(cfg.discovery_timeout_s)
+            or cfg.discovery_timeout_s <= 0):
+        # inf would make preflight P3's Dola listen window never close.
+        raise ConfigError(
+            f"discovery_timeout_s must be finite and > 0 (the preflight P3 "
+            f"Dola listen window), got {cfg.discovery_timeout_s!r}")
     if (not isinstance(cfg.replay_fps, (int, float))
             or isinstance(cfg.replay_fps, bool)
             or not math.isfinite(cfg.replay_fps) or cfg.replay_fps <= 0):

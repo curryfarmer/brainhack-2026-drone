@@ -389,38 +389,85 @@ def test_main_exit_code_1_when_a_drone_fails(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         fmain, "_build_adapter",
-        lambda cfg, drone: MockAdapter(drone.id, fail_at="move:2"))
+        lambda cfg, drone, *, api=None: MockAdapter(drone.id, fail_at="move:2"))
     code = fmain.main(["--profile", "mock", "--phases", "takeoff_demo",
                        "--budget", "30"])
     assert code == 1
 
 
-def test_main_bench_builds_inner_backend_first(tmp_path, monkeypatch):
-    """The BenchAdapter special case: generic flight_cls(drone_id) would die
-    with BenchAdapter's TypeError. Now that PyhulaxAdapter is real (S9), the
-    bench path builds BenchAdapter(PyhulaxAdapter) + phases cleanly and reaches
-    the preflight gate — the S10 stub pointer here proves the wiring got PAST
-    adapter construction (the inner backend built first). The direct
-    BenchAdapter(PyhulaxAdapter) wrap + flight-refusal coverage lives in
-    tests/test_pyhulax_adapter.py."""
-    from finals.main import main
+_FINALS_CONFIG_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs")
+
+
+def _inject_fake_fleet(monkeypatch):
+    """Make a bench/real `--preflight-only` run exercise the WHOLE wiring with
+    no pyhulax, no real Dola, and no cv2 on fake frames: one shared FakeDroneAPI
+    + FakeVideoStream per drone, a fake Dola discovery returning an IP per
+    plane_id, and a no-op marker detector (the real aruco one would call cv2 on
+    the fake _ChannelArray frame in P7)."""
+    import finals.main as fmain
+    import finals.preflight as pf
+    import finals.vision.aruco as aruco
+    from finals.flight.pyhulax_adapter import FakeDroneAPI
+    from finals.vision.pyhulax_video import FakeVideoStream
+
+    monkeypatch.setattr(
+        fmain, "_make_shared_pyhulax_api",
+        lambda cfg: FakeDroneAPI(video_stream=FakeVideoStream()))
+    monkeypatch.setattr(
+        pf, "_default_discover",
+        lambda plane_ids, timeout_s: {p: f"10.0.0.{p}" for p in plane_ids})
+    monkeypatch.setattr(aruco, "make_marker_detector",
+                        lambda backend: (lambda frame, source_id: []))
+
+
+def test_main_bench_preflight_only_runs_the_gate(tmp_path, monkeypatch):
+    """S10 (replaces the bench S10-stub pointer): `--preflight-only` builds the
+    REAL bench fleet — BenchAdapter wrapping PyhulaxAdapter, inner-first (the
+    special case generic flight_cls(drone_id) cannot build) — and runs P0-P9
+    green with fakes injected. Exit 0 + a persisted preflight.json."""
+    pytest.importorskip("cv2")
+    import finals.main as fmain
+    from finals.config import load_config
+    from finals.flight.adapter import BenchAdapter
+    from finals.flight.pyhulax_adapter import FakeDroneAPI, PyhulaxAdapter
+    from finals.vision.pyhulax_video import FakeVideoStream
+
+    # The inner-first wrap, asserted directly (no preflight needed).
+    cfg = load_config(os.path.join(_FINALS_CONFIG_DIR, "bench.json"))
+    adapter = fmain._build_adapter(
+        cfg, cfg.drones[0],
+        api=FakeDroneAPI(video_stream=FakeVideoStream()))
+    assert isinstance(adapter, BenchAdapter)
+    assert isinstance(adapter.inner, PyhulaxAdapter)
 
     monkeypatch.chdir(tmp_path)
-    with pytest.raises(NotImplementedError, match="S10"):
-        main(["--profile", "bench"])
+    _inject_fake_fleet(monkeypatch)
+    code = fmain.main(["--profile", "bench", "--preflight-only"])
+    assert code == 0
+    run_dirs = list((tmp_path / "runs_finals").iterdir())
+    assert any((rd / "preflight.json").exists() for rd in run_dirs), (
+        "preflight-only must persist preflight.json")
 
 
 # (test_main_sitl_points_at_s6 was deleted in S6/SIM-1: MavsdkSitlAdapter is
 # now real — wiring/endpoint coverage lives in tests/test_sitl_adapter.py and
 # the flight path is the VM gate V1, sim_sessions.md SIM-1 evidence.
-# test_main_real_points_at_s9 became _at_s10 in S9: PyhulaxAdapter is now real
-# too — its leaf coverage lives in tests/test_pyhulax_adapter.py, and both
-# bench and real now reach the S10 preflight stub.)
+# test_main_real_points_at_s9 became _at_s10 in S9, then S10 made preflight
+# real too — both bench and real now RUN the gate; full per-gate coverage lives
+# in tests/test_preflight.py.)
 
 
-def test_main_real_points_at_s10(tmp_path, monkeypatch):
-    from finals.main import main
+def test_main_real_preflight_only_runs_the_gate(tmp_path, monkeypatch):
+    """S10 (replaces the real S10-stub pointer): real `--preflight-only` runs
+    P0-P9 green with fakes — still behind the --i-know-this-arms-real-drones
+    gate (it makes hardware contact: connect + failsafe + LED), but P10
+    operator-GO is skipped and nothing flies."""
+    pytest.importorskip("cv2")
+    import finals.main as fmain
 
     monkeypatch.chdir(tmp_path)
-    with pytest.raises(NotImplementedError, match="S10"):
-        main(["--profile", "real", "--i-know-this-arms-real-drones"])
+    _inject_fake_fleet(monkeypatch)
+    code = fmain.main(["--profile", "real",
+                       "--i-know-this-arms-real-drones", "--preflight-only"])
+    assert code == 0

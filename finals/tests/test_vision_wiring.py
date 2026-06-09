@@ -52,10 +52,13 @@ def test_build_guards_video_watchdog_only_for_wired_backends():
     # frame_backend != "none".
     assert has_watchdog(cfg_with("gazebo", profile="sitl",
                                  flight_backend="mavsdk_sitl")) is False
+    # S10: pyhulax IS wired now (PyhulaxVideoSource over the shared DroneAPI) —
+    # bench/real get the VideoWatchdog, exactly like replay.
     assert has_watchdog(cfg_with("pyhulax", profile="real",
-                                 flight_backend="pyhulax")) is False
+                                 flight_backend="pyhulax")) is True
     assert fmain._frames_wired(cfg_with("replay")) is True
     assert fmain._frames_wired(cfg_with("gazebo")) is False
+    assert fmain._frames_wired(cfg_with("pyhulax")) is True
 
 
 # ============================================================

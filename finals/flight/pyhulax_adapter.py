@@ -398,8 +398,32 @@ class PyhulaxAdapter(FlightAdapter):
             self._state.ts = time.monotonic()
         return False
 
+    def set_target_ip(self, ip: str) -> None:
+        """Resolve the target IP AFTER construction (preflight P3 applies the
+        discovery result before P4 connect — see finals/preflight.py). Refused
+        once connected: the IP is a pre-connect input, and silently re-pointing
+        a live adapter would split flight and video across two links."""
+        if not isinstance(ip, str) or not ip:
+            raise ValueError(
+                f"PyhulaxAdapter({self.drone_id!r}): set_target_ip(ip) needs a "
+                f"non-empty str like '192.168.1.50', got {ip!r}")
+        if self._connected:
+            raise FlightError(
+                f"{self.drone_id}: set_target_ip refused — already connected to "
+                f"{self._ip}; disconnect() before re-pointing (IP is a "
+                f"pre-connect input)")
+        self._ip = ip
+
     # ---------------- FlightAdapter contract ----------------
     async def connect(self, timeout_s: float = 10.0) -> None:
+        # Idempotent: preflight (P4) connects and leaves the link up for the
+        # mission, then the agent's run() connect() must NOT re-handshake a live
+        # link (the S9-deferred connect-before-stream-start ordering). A degraded
+        # adapter still reconnects (the _gate_not_degraded "re-connect() to
+        # clear" path) — the guard deliberately excludes it.
+        if self._connected and not self.degraded:
+            self._log("connect: already connected — no-op")
+            return
         detail = f"connect({self._ip})"
         if self._ip is None:
             raise FlightError(
