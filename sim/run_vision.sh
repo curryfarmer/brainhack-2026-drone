@@ -412,8 +412,12 @@ track3() {                 # Workstream B: active chase (track_convoy)
   VWORLD=convoy_3lane
   VCONFIG=finals/configs/sitl3_track_vision.json
   LAUNCH_POSES=( "${LANES3_POSES[@]}" )
+  # CONVOY_LINEAR 0.08 (faster than lanes3's 0.05): track_convoy holds over a
+  # centred car (the nadir deadband), so a near-still car looks like 3 parked
+  # drones — the cars need to actually DRIVE for the chase to read as a chase,
+  # while staying slow enough to stay inside the smallest footprint (alpha 1.2).
   export CONVOY_IDS="7 23 88" CONVOY_ANGULAR=0 \
-         CONVOY_LINEAR="${CONVOY_LINEAR:-0.05}" CONVOY_DELAY="${CONVOY_DELAY:-150}"
+         CONVOY_LINEAR="${CONVOY_LINEAR:-0.08}" CONVOY_DELAY="${CONVOY_DELAY:-150}"
   stageB3 "${1:-360}" normal
 }
 
