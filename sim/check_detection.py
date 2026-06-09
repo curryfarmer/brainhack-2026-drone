@@ -13,6 +13,9 @@ _pb2 modules need otherwise):
     PYTHONNOUSERSITE=1 python3 sim/check_detection.py --secs 40
 
 cv2 on the VM is the apt 4.5.4 build (OLD aruco API); the shim below also works on 4.7+.
+QR CAVEAT: that apt build is NOT linked against QUIRC, so QRCodeDetector can LOCATE a QR
+(returns points) but never DECODES it ("Library QUIRC is not linked" on stderr) — QR
+decode counts are 0 on the VM regardless of distance; QR-located px is still the size data.
 Subscriber pattern mirrors repo-root depth_receiver.py (Node + subscribe(Image, topic,
 cb), latest-frame copy under a lock). This file lives in sim/ BY DESIGN (outside the
 finals conventions/SDK scan) so raw cv2/gz are allowed. Fail-loud: every wait has a
@@ -45,8 +48,7 @@ except Exception as exc:  # noqa: BLE001 - want a loud, specific message here
     sys.exit(2)
 
 # Geometry baked into convoy.sdf — used to turn a camera altitude into a marker DISTANCE.
-DEFAULT_BANDS = {70: 0.7, 120: 1.2, 170: 1.7, 220: 2.2}  # band name -> camera altitude (m)
-# 70 = QR-decode-floor DIAGNOSTIC band (not a sentry altitude); 120/170/220 = sentry bands.
+DEFAULT_BANDS = {120: 1.2, 170: 1.7, 220: 2.2}  # band name -> camera altitude (m), sentry bands
 ROBOT_MARKER_H_M = 0.25                              # convoy marker sits on the chassis top
 PAD_MARKER_H_M = 0.0                                 # pad marker on the ground
 DEFAULT_ROBOT_IDS = [7, 11, 23, 42, 88]

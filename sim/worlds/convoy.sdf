@@ -66,14 +66,9 @@
     <include><uri>model://pad_100</uri><name>pad_100</name><pose>0.8 0.5 0 0 0 0</pose></include>
     <include><uri>model://pad_101</uri><name>pad_101</name><pose>-0.8 0.5 0 0 0 0</pose></include>
 
-    <!-- Camera tower at the origin, looking straight down (pitch +pi/2). The convoy
-         passes nadir at slant distance ~= each camera's altitude.
-         3 SENTRY bands (1.2 / 1.7 / 2.2 m) = the drone search altitudes.
-         1 DIAGNOSTIC band (0.7 m) added to bracket the QR decode floor: at sentry
-         altitudes a <=40 cm QR is < 4 px/module and never decodes (the ArUco-vs-QR
-         finding); 0.7 m is where a 40 cm pad QR clears ~4 px/module, proving the QR
-         pipeline works and bounding the floor. NOT a sentry altitude. -->
-    <include><uri>model://mono_cam_640</uri><name>cam_band_070</name><pose>0 0 0.7 0 1.5707 0</pose></include>
+    <!-- 3 SENTRY cameras at the origin, looking straight down (pitch +pi/2 = +X optical
+         axis -> -Z). The convoy passes nadir at slant distance ~= each camera's altitude
+         (1.2 / 1.7 / 2.2 m = the drone search altitudes), giving px-vs-distance per type. -->
     <include><uri>model://mono_cam_640</uri><name>cam_band_120</name><pose>0 0 1.2 0 1.5707 0</pose></include>
     <include><uri>model://mono_cam_640</uri><name>cam_band_170</name><pose>0 0 1.7 0 1.5707 0</pose></include>
     <include><uri>model://mono_cam_640</uri><name>cam_band_220</name><pose>0 0 2.2 0 1.5707 0</pose></include>

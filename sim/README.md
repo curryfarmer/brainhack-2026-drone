@@ -144,12 +144,19 @@ evidence block in `finals/docs/sim_sessions.md`.
 ## SIM-3 — convoy world (gz-only; NO PX4, NO flight)
 
 A Gazebo-Harmonic world (`worlds/convoy.sdf`) with 5 marker-carrying robots orbiting a
-2 m circle through the origin, a 4-camera down-tower at the origin (0.7 diagnostic +
-1.2 / 1.7 / 2.2 m sentry bands), and 2 landing-pad markers. Proves markers render and
-are readable at the altitude bands → a px-vs-distance table **per marker type** that
-sets the sentry-altitude / ArUco-vs-QR decision. Assets + scripts live under `sim/`
-(outside the conventions scan): `gen_markers.py`, `models/{convoy_robot_*,pad_*,
-mono_cam_640}`, `convoy_driver.py` (rclpy), `check_detection.py` (gz.transport13).
+2 m circle through the origin, a 3-camera down-tower at the origin (1.2 / 1.7 / 2.2 m
+sentry bands), and 2 landing-pad markers. Proves markers render and are readable at the
+altitude bands → a px-vs-distance table **per marker type** that sets the sentry-altitude
+/ ArUco-vs-QR decision. Assets + scripts live under `sim/` (outside the conventions scan):
+`gen_markers.py`, `models/{convoy_robot_*,pad_*,mono_cam_640}`, `convoy_driver.py`
+(rclpy), `check_detection.py` (gz.transport13).
+
+**VM render gotcha (verified):** camera SENSOR geometry only renders under llvmpipe
+(`LIBGL_ALWAYS_SOFTWARE=1`) or ogre1 on this VM — the default ogre2+SVGA3D path emits
+BLANK camera frames (std 0 even on the stock `camera_sensor.sdf`). `run_convoy.sh`
+defaults to llvmpipe + `DISPLAY=:0`. The apt system cv2 4.5.4 also lacks QUIRC, so QR is
+LOCATED but not DECODED on the VM (QR non-viability at sentry altitude is shown by the
+located px being far below the decode floor; see the SIM-3 evidence block).
 
 Three interpreter contexts — **never crossed**: gz launch (any shell) · convoy_driver
 (ROS sourced, system 3.10) · check_detection (`PYTHONNOUSERSITE=1 python3`, system 3.10
