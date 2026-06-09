@@ -87,10 +87,69 @@ stageA() {
   return $rc
 }
 
+ONBOARD_TOPIC="/world/convoy_px4/model/x500_mono_cam_640_0/link/camera_link/sensor/camera/image"
+
+stageB_stop() {
+  stop_bridge
+  if [ -f "$RUN/px4_vision.pid" ]; then
+    kill -9 "$(cat "$RUN/px4_vision.pid")" 2>/dev/null; rm -f "$RUN/px4_vision.pid"
+  fi
+  pkill -9 -f 'bin/px4 -i' 2>/dev/null
+  bash "$REPO/sim/run_convoy.sh" stop 2>/dev/null   # stops the ros bridge + driver
+  pkill -9 -f 'convoy_px4' 2>/dev/null               # PX4's gz server (this world)
+  pkill -9 -f 'g[z] sim' 2>/dev/null                 # last resort (bracket = no self-match)
+  sleep 1
+}
+
+# Stage B (gate V2a): PX4 OWNS the gz server (lockstep -> sensors/EKF healthy)
+# running convoy_px4 under llvmpipe (1 camera renders), spawns the x500 with the
+# onboard mono_cam_640, the convoy drives, the bridge serves the ONBOARD camera,
+# and finals flies sentry_scan logging moving-marker sightings.
+stageB() {
+  local secs="${1:-120}"
+  install_model
+  cp "$REPO/sim/worlds/convoy_px4.sdf" "$HOME/PX4-Autopilot/Tools/simulation/gz/worlds/" 2>/dev/null
+  export DISPLAY="${DISPLAY:-:0}"
+  export GZ_SIM_RESOURCE_PATH="$REPO/sim/models:$HOME/PX4-Autopilot/Tools/simulation/gz/models:${GZ_SIM_RESOURCE_PATH:-}"
+
+  echo "[stageB] launching PX4 (convoy_px4, llvmpipe, lockstep) -> $RUN/px4_vision.log"
+  ( cd "$HOME/PX4-Autopilot" && \
+    LIBGL_ALWAYS_SOFTWARE=1 HEADLESS=1 PX4_SYS_AUTOSTART=4001 \
+      PX4_SIM_MODEL=gz_x500_mono_cam_640 PX4_GZ_WORLD=convoy_px4 \
+      setsid ./build/px4_sitl_default/bin/px4 -i 0 -d > "$RUN/px4_vision.log" 2>&1 & \
+    echo $! > "$RUN/px4_vision.pid" )
+
+  local t0=$SECONDS
+  until gz topic -l 2>/dev/null | grep -q "x500_mono_cam_640_0/link/camera_link/sensor/camera/image"; do
+    if (( SECONDS - t0 > 90 )); then
+      echo "FAIL [stageB]: onboard camera topic never appeared — CHECK: tail $RUN/px4_vision.log" >&2
+      stageB_stop; return 3
+    fi
+    sleep 2
+  done
+  echo "[stageB] camera topic up after $((SECONDS - t0))s; settling EKF 45s"
+  sleep 45
+
+  echo "[stageB] driving the convoy"
+  bash "$REPO/sim/run_convoy.sh" drive "$((secs + 30))" || echo "[stageB] WARN convoy drive failed — markers will be static" >&2
+
+  bridge --topic "$ONBOARD_TOPIC" --port 5600 || { stageB_stop; return 4; }
+
+  echo "[stageB] finals sitl_vision (sentry_scan) budget=${secs}s"
+  local rc=0
+  ( cd "$REPO" && .venv/bin/python -m finals.main --profile sitl \
+      --config finals/configs/sitl_vision.json --budget "$secs" ) || rc=$?
+  stageB_stop
+  echo "[stageB] finals rc=$rc — sightings.csv under $REPO/runs_finals/<latest>/"
+  return $rc
+}
+
 case "${1:-}" in
   install-model) install_model ;;
   bridge)        shift; bridge "$@" ;;
   stop-bridge)   stop_bridge ;;
   stageA)        shift; stageA "$@" ;;
-  *) echo "usage: $0 {install-model|bridge --topic T [--port P]|stop-bridge|stageA [secs]}" >&2; exit 64 ;;
+  stageB)        shift; stageB "$@" ;;
+  stageB-stop)   stageB_stop ;;
+  *) echo "usage: $0 {install-model|bridge --topic T [--port P]|stop-bridge|stageA [secs]|stageB [secs]}" >&2; exit 64 ;;
 esac
