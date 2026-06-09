@@ -353,14 +353,23 @@ stageB3() {
 # S11: 3 PX4 drones over the convoy_3lane world (3 diverging straight lanes).
 # Reuses the full stageB3 flow (launch3 gate + 120 s settle + 3 bridges +
 # finals) with VWORLD/VCONFIG/LAUNCH_POSES overridden and a STRAIGHT convoy
-# (CONVOY_ANGULAR=0) on the 3 lane robots only. CONVOY_LINEAR slow (0.2 m/s)
-# so each car dwells under / is chaseable by its drone.
+# (CONVOY_ANGULAR=0) on the 3 lane robots only.
+#
+# CONVOY_DELAY (150 s): the convoy HOLDS at its spawns through the EKF settle +
+# takeoff and only starts driving once the scan is live. Each drone spawns
+# DIRECTLY OVER its car's spawn (LANES3_POSES, in-footprint), so detection is
+# guaranteed the moment the scan starts (car sitting still under the nadir cam),
+# and the post-delay motion shows the 3 diverging directions. Without the hold
+# the cars (driving from t=0) would leave the footprints before takeoff.
+# CONVOY_LINEAR slow (0.05 m/s) so each car lingers in / is easily chased by its
+# drone. Both env-overridable for VM tuning.
 # ============================================================
 lanes3() {                 # Workstream A: hover + photograph (sentry_scan)
   VWORLD=convoy_3lane
   VCONFIG=finals/configs/sitl3_lanes_vision.json
   LAUNCH_POSES=( "${LANES3_POSES[@]}" )
-  export CONVOY_IDS="7 23 88" CONVOY_ANGULAR=0 CONVOY_LINEAR="${CONVOY_LINEAR:-0.2}"
+  export CONVOY_IDS="7 23 88" CONVOY_ANGULAR=0 \
+         CONVOY_LINEAR="${CONVOY_LINEAR:-0.05}" CONVOY_DELAY="${CONVOY_DELAY:-150}"
   stageB3 "${1:-300}" normal
 }
 
@@ -368,7 +377,8 @@ track3() {                 # Workstream B: active chase (track_convoy)
   VWORLD=convoy_3lane
   VCONFIG=finals/configs/sitl3_track_vision.json
   LAUNCH_POSES=( "${LANES3_POSES[@]}" )
-  export CONVOY_IDS="7 23 88" CONVOY_ANGULAR=0 CONVOY_LINEAR="${CONVOY_LINEAR:-0.2}"
+  export CONVOY_IDS="7 23 88" CONVOY_ANGULAR=0 \
+         CONVOY_LINEAR="${CONVOY_LINEAR:-0.05}" CONVOY_DELAY="${CONVOY_DELAY:-150}"
   stageB3 "${1:-360}" normal
 }
 

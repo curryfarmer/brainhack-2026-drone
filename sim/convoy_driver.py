@@ -37,7 +37,13 @@ DEFAULT_IDS = [7, 11, 23, 42, 88]
 ROUTE = None  # None => constant (LINEAR, ANGULAR); else list of (duration_s, v, w) segments
 
 
-def vel_at(elapsed_s: float, linear: float, angular: float):
+def vel_at(elapsed_s: float, linear: float, angular: float, delay_s: float = 0.0):
+    # Hold still until delay_s (still a PURE function of elapsed -> two runs
+    # identical). S11 uses this so the straight-lane cars stay at their spawns
+    # through the drones' EKF settle and only start driving once the scan is
+    # live — otherwise they drive out of the nadir footprints before takeoff.
+    if elapsed_s < delay_s:
+        return 0.0, 0.0
     if ROUTE is None:
         return linear, angular
     period = sum(d for d, _, _ in ROUTE)
@@ -57,6 +63,8 @@ def main() -> int:
     ap.add_argument("--duration-s", type=float, default=60.0)
     ap.add_argument("--linear", type=float, default=0.4, help="body-frame forward m/s")
     ap.add_argument("--angular", type=float, default=0.2, help="yaw rate rad/s (radius=lin/ang)")
+    ap.add_argument("--delay-s", type=float, default=0.0,
+                    help="hold at spawn (zero velocity) for the first N s, then drive")
     args = ap.parse_args()
 
     try:
@@ -80,14 +88,16 @@ def main() -> int:
             for i in args.ids}
     radius = args.linear / args.angular if args.angular else float("inf")
     print(f"convoy_driver: {len(pubs)} robots, linear={args.linear} m/s angular={args.angular} "
-          f"rad/s (radius {radius:.2f} m), {args.duration_s:.0f}s @ {args.rate_hz:.0f} Hz")
+          f"rad/s (radius {radius:.2f} m), delay={args.delay_s:.0f}s, "
+          f"{args.duration_s:.0f}s @ {args.rate_hz:.0f} Hz")
 
     period = 1.0 / args.rate_hz
     t_start = time.monotonic()
     deadline = t_start + args.duration_s
     try:
         while time.monotonic() < deadline:                 # deadline-bounded (convention)
-            v, w = vel_at(time.monotonic() - t_start, args.linear, args.angular)
+            v, w = vel_at(time.monotonic() - t_start, args.linear, args.angular,
+                          args.delay_s)
             msg = Twist()
             msg.linear.x = float(v)
             msg.angular.z = float(w)

@@ -63,6 +63,7 @@ drive() {
   sleep 2
   python3 "$REPO/sim/convoy_driver.py" --ids "${IDS[@]}" \
     --linear "${CONVOY_LINEAR:-0.4}" --angular "${CONVOY_ANGULAR:-0.2}" \
+    --delay-s "${CONVOY_DELAY:-0}" \
     --duration-s "$secs" > "$RUN/driver.log" 2>&1 &
   echo $! > "$RUN/driver.pid"
 }
