@@ -67,8 +67,10 @@ after SIM-2; full sim after SIM-5.
   `--profile sitl` crash on 3.10. SIM-0 must install `python3.11` + `python3.11-venv`
   (deadsnakes PPA on 22.04) and build the repo venv on it. Known wrinkle deferred to
   SIM-4: the apt gz Python bindings (`gz.transport13`) are compiled for system 3.10 and
-  will NOT import inside a 3.11 venv — irrelevant for headless SIM-0…2; SIM-4
-  (gazebo_video) must solve it and record the solution here.
+  will NOT import inside a 3.11 venv — irrelevant for headless SIM-0…2. **SOLVED in
+  SIM-4**: a sidecar `sim/gz_camera_bridge.py` runs the gz subscriber under system 3.10
+  and forwards raw RGB over a localhost TCP socket to `GazeboRgbSource` in the venv
+  (no gz/cv2 in finals/). See the SIM-4 evidence block.
 - Sync: **clone once in SIM-0** (`git clone <repo-url> ~/brainhack-2026-drone`), then per
   iteration push from Windows → `git -C ~/brainhack-2026-drone pull` on the VM. Fallback if
   VM git/credentials fail: the ZIP drop-in workflow in `docs/quali/deployment.md`.
@@ -97,7 +99,7 @@ after SIM-2; full sim after SIM-5.
 | SIM-1 | **S6** | `MavsdkSitlAdapter` (vendored-with-fixes) + per-drone config schema; **VM V1** + kill drill | SIM-0, S4 (S5 recommended) | ✅ 2026-06-07 |
 | SIM-2 | S6 stretch | `replay_plot.py` (proven on the SIM-1 fixture) → `sitl3.json` → 3× headless swarm + drills — **HEADLESS SIM DONE** | SIM-1, S5 | ✅ 2026-06-09 |
 | SIM-3 | S8 assets | Convoy world: markers (ArUco+QR), robots, pads, band-altitude cams; detection check — **∥ with S4–S7** | SIM-0 | ✅ 2026-06-09 |
-| SIM-4 | **S8** core | `gazebo_video.py` + `search.py`; **V2a**: single drone logs sightings of MOVING markers | SIM-1, SIM-3, S7, S5 | ⬜ |
+| SIM-4 | **S8** core | `gazebo_video.py` + `search.py`; **V2a**: single drone logs sightings of MOVING markers | SIM-1, SIM-3, S7, S5 | ✅ 2026-06-09 |
 | SIM-5 | S8 full | 3 camera-drones, full mission, all drills — **FULL SIM DONE** + residual-gaps list for S10 | SIM-2, SIM-4 | ⬜ |
 
 ## Smoke matrix — what "thoroughly smoked" means per part
@@ -872,6 +874,72 @@ gz.transport13 latest-frame pattern as `sim/check_detection.py` (mirrors root `d
 (d) marker skin is a one-key `gen_markers.py --type {aruco|qr}` reskin (type-agnostic model names);
 (e) the 4th (0.7 m) camera was dropped — a 4-cam llvmpipe world starves one camera's stream.
 
-### SIM-4 — pending
+### SIM-4 — gazebo video + search phase, single-drone vision-in-the-loop (2026-06-09) — V2a PASS
+
+**Scope shipped**: `finals/vision/gazebo_video.py` (GazeboRgbSource), `finals/mission/phases/search.py`
+(SentryScan + OpenLoopLawnmower), `main.py` gazebo wiring + `config.py` `gazebo_video_host/port`,
+`configs/{mock_gazebo,sitl_vision}.json`, tests `test_vision_gazebo.py` + `test_search.py`; sim
+assets `gz_camera_bridge.py`, `px4_models/x500_mono_cam_640`, `worlds/{convoy_px4,empty_cam}.sdf`,
+`run_vision.sh`. `pytest finals/tests` green on Windows (636) AND the VM venv (708 incl. the new tests).
+
+**THE FRAME-TRANSPORT SOLUTION (the deferred 3.11-venv problem, solved)**: `gz.transport13` is
+compiled for system py3.10 and won't import in the finals 3.11 venv; the venv's pip opencv has no
+GStreamer (so cv2 gstreamer pipelines are out) and PX4 gz Harmonic does not auto-stream RTP. So
+finals imports NO gz/cv2 — a **sidecar TCP bridge** (`sim/gz_camera_bridge.py`, system py3.10 +
+`PYTHONNOUSERSITE=1`) runs the PROVEN check_detection.py gz subscriber and forwards length-prefixed
+raw RGB over a localhost TCP socket; `GazeboRgbSource` is a stdlib+numpy CLIENT (numpy lazy → the
+module imports on a bare venv; an injected FakeFrameReceiver keeps the suite green). Wire frame:
+`[u32 total_len][u64 frame_no][u32 w][u32 h][u8 ch][raw RGB]`, latest-drop, no auto-reconnect.
+
+**Stage A (pipeline de-risk, no PX4)** — `run_vision.sh stageA`: convoy world (llvmpipe) + bridge on
+the static `cam_band_170` + `finals --profile mock --config mock_gazebo.json`. The mock flight ends
+instantly (MockAdapter consumes no wall-clock), but the brief window logged **3 real ArUco sightings**
+(robot **7** + pads **100/101**) — proving bridge → GazeboRgbSource → PerceptionLoop → ArUco →
+sightings.csv end-to-end with zero PX4.
+
+**Stage B / gate V2a (full flight)** — `run_vision.sh stageB 110`: ONE PX4 x500 with the onboard
+640×480 down-camera flying `--phases sentry_scan` over the driving convoy. Result: airborne at 1.57 m
+(offboard NO_SETPOINT re-prime fired, as in SIM-2), 16 rotations over a **74.4 s** flight, landed +
+disarmed, `alpha DONE`, **sightings = 1234**. Per marker_id (`runs_finals/20260609_175442`):
+
+```text
+ALL 5 MOVING convoy robots + both pads, every row bearing+yaw+MEASURED-position populated:
+  7:149  11:117  23:114  42:59  88:89   (convoy)    100:588  101:117   (pads)
+  157:1  (the SIM-3 single-frame ArUco false positive — exactly why perception confirms across frames)
+  1234/1234 rows have bearing_deg + drone_yaw_deg; pos_quality=3 (MEASURED, SITL telemetry);
+  drone_alt_m 1.67 at the sentry band; camera_hfov_deg 99.69 (= mono_cam_640 HFOV 1.74 rad) → bearing rays.
+mission.jsonl mirrors 1234 'sighting' events.
+sightings.csv head: alpha,…,aruco,aruco_100,100,153.0;208.0;401.0;455.0,1.0,480;640,113,169.88,…,176.58,3,0.41,-0.31,
+```
+
+**Drills (PASS)**:
+- **Lost-video**: under a live GazeboRgbSource (`healthy=True`), `SIGTERM` the bridge → the reader
+  thread logs "frame stream ended (ConnectionError: bridge closed) — no auto-reconnect", `healthy`
+  flips **False in 0.2 s**, `get_frame()` still returns the last frame (no hang). This is the
+  VideoWatchdog DEGRADE trigger (flight unaffected by design — a blind drone still flies home).
+- **Empty-world**: `empty_cam.sdf` (ground + 1 down-cam, NO markers) → bridge → `finals mock_gazebo`
+  → **sightings=0, alpha DONE** (clean exit; no hallucinated ids from the rendered scene).
+
+**Two world-bring-up findings (the real Stage-B work)**:
+1. **convoy.sdf has only the Sensors (camera) system** — PX4 in it reports Accel/Gyro/baro/compass
+   "missing" (sensors never publish). `convoy_px4.sdf` adds the imu/air-pressure/air-speed/altimeter/
+   magnetometer/navsat/forcetorque/contact systems + a `spherical_coordinates` GPS origin → the x500
+   flies. PX4 must OWN the gz server (`PX4_GZ_WORLD=convoy_px4`, NO standalone) so lockstep drives the
+   sensors; `LIBGL_ALWAYS_SOFTWARE=1` keeps the camera rendering (ogre2 = blank). convoy.sdf untouched.
+2. **Spawn CLEAR of the robot starts**: spawning the drone at the origin (where `convoy_robot_7`
+   starts) pinned it (takeoff reached 0.00 m). Spawn at `(1,0,0.2)` and start the convoy driving
+   BEFORE the EKF settle so robot_7 vacates the origin.
+
+**RTF / render**: with ONE camera (onboard only — `convoy_px4` drops the 3 tower cams; 4 cameras under
+llvmpipe starve the EKF), `/clock` advances ~1 sim-s per wall-s → **RTF ≈ 1.0** on the 4-vCPU VM;
+EKF "missing data" clears within the first ~60 s. Render rung = llvmpipe (`LIBGL_ALWAYS_SOFTWARE=1`),
+never ogre2.
+
+**Notes for SIM-5**: (a) `sitl3_vision.json` = 3× of `sitl_vision.json` with per-drone
+`gazebo_video_port` (5600/5601/5602) + one `gz_camera_bridge.py` per drone on the per-instance camera
+topic `x500_mono_cam_640_<i>`; (b) 3 onboard cameras under llvmpipe is the render-load question SIM-3
+flagged (4 starved) — measure RTF, size `command_timeout_s` from it; (c) distinct `altitude_band_m` +
+`sitl_address`/`mavsdk_grpc_port` per drone (config already validates this); (d) reuse `run_vision.sh`
+stageB shape (PX4 owns the world, spawn each drone clear of robot starts, drive before settle).
 
 ### SIM-5 — pending
