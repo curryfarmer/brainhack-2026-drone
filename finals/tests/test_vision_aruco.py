@@ -1,6 +1,11 @@
 """finals.vision.aruco against the COMMITTED fixtures (generated once by
 finals/tests/fixtures/gen_fixtures.py — the position table below mirrors its
-MARKER_LAYOUT; change one, regenerate + change the other)."""
+MARKER_LAYOUT; change one, regenerate + change the other).
+
+The committed ArUco fixtures are DICT_6X6_250 (gen_fixtures.py), so every legacy
+decode call below pins marker_dict=SIM_DICT — the detector's NEW default is the
+real-field DICT_7X7_1000 (PAD-DICT). The dictionary-resolver, params-whitelist
+and 7x7-vs-6x6 e2e tests live in the PAD-DICT section at the bottom."""
 from __future__ import annotations
 
 import os
@@ -15,6 +20,14 @@ from finals.sightings import SightingLog                         # noqa: E402
 from finals.types import FrameStamped                            # noqa: E402
 from finals.vision.aruco import (detect_aruco, detect_qr,        # noqa: E402
                                  make_marker_detector)
+
+# The committed ArUco fixtures are 6x6; pin every legacy decode to that dict.
+SIM_DICT = "DICT_6X6_250"
+
+
+def _aruco6(frame, drone_id="alpha"):
+    """detect_aruco over the 6x6 fixture dictionary (the legacy default)."""
+    return detect_aruco(frame, drone_id, marker_dict=SIM_DICT)
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "fixtures")
@@ -41,7 +54,7 @@ def load_frame(name: str, frame_number: int = 1, ts: float = 100.0,
 
 @pytest.mark.parametrize("name", ["000.png", "001.png", "003.png"])
 def test_detect_known_markers_ids_and_bboxes(name):
-    sightings = detect_aruco(load_frame(name), "alpha")
+    sightings = _aruco6(load_frame(name))
     expected = LAYOUT[name]
     assert sorted(s.marker_id for s in sightings) == sorted(expected)
     for s in sightings:
@@ -65,14 +78,14 @@ def test_detect_known_markers_ids_and_bboxes(name):
 
 
 def test_blank_frame_returns_empty():
-    assert detect_aruco(load_frame("002.png"), "alpha") == []
+    assert _aruco6(load_frame("002.png")) == []
 
 
 def test_sightings_roundtrip_through_csv(tmp_path):
     """End-to-end np-type leak detector: the CSV codec dispatches on the
     DECLARED field types, so any numpy scalar that survived the casts dies
     here — and reload must reproduce the rows exactly."""
-    sightings = detect_aruco(load_frame("000.png"), "alpha")
+    sightings = _aruco6(load_frame("000.png"))
     csv_path = str(tmp_path / "sightings.csv")
     with SightingLog(csv_path) as log:
         for s in sightings:
@@ -138,7 +151,7 @@ def test_qr_weird_payloads_never_crash_and_never_alias(tmp_path):
 
 
 def test_make_marker_detector_seam():
-    aruco = make_marker_detector("aruco")
+    aruco = make_marker_detector("aruco", marker_dict=SIM_DICT)
     qr = make_marker_detector("qr")
     frame = load_frame("000.png")
     assert sorted(s.marker_id for s in aruco(frame, "a")) == [17, 23, 42]
@@ -152,7 +165,7 @@ def test_make_marker_detector_seam():
 # ============================================================
 def test_no_save_dir_leaves_frame_path_none(tmp_path):
     """The default (save_marker_frames off): minimal Sightings, no files."""
-    detector = make_marker_detector("aruco")            # save_dir omitted
+    detector = make_marker_detector("aruco", marker_dict=SIM_DICT)  # save_dir omitted
     sightings = detector(load_frame("000.png"), "alpha")
     assert sightings and all(s.frame_path is None for s in sightings)
     assert list(tmp_path.iterdir()) == []               # nothing written
@@ -162,7 +175,8 @@ def test_save_marker_frames_writes_annotated_and_stamps_path(tmp_path):
     """save_dir set -> one annotated JPEG per frame-with-markers, and EVERY
     Sighting on that frame carries its path (drawDetectedMarkers draws all)."""
     save_dir = str(tmp_path / "marker_frames" / "alpha")
-    detector = make_marker_detector("aruco", save_dir=save_dir)
+    detector = make_marker_detector("aruco", marker_dict=SIM_DICT,
+                                    save_dir=save_dir)
     assert os.path.isdir(save_dir), "save_dir is created at build time"
     frame = load_frame("000.png", frame_number=5, ts=12.0)
     sightings = detector(frame, "alpha")
@@ -179,7 +193,8 @@ def test_save_marker_frames_writes_annotated_and_stamps_path(tmp_path):
 def test_save_marker_frames_blank_frame_writes_nothing(tmp_path):
     """No markers -> no Sightings AND no file (we only save frames with reads)."""
     save_dir = str(tmp_path / "frames")
-    detector = make_marker_detector("aruco", save_dir=save_dir)
+    detector = make_marker_detector("aruco", marker_dict=SIM_DICT,
+                                    save_dir=save_dir)
     assert detector(load_frame("002.png"), "alpha") == []
     assert list(os.scandir(save_dir)) == []
 
@@ -191,3 +206,122 @@ def test_save_marker_frames_bad_dir_fails_loudly(tmp_path):
     clash.write_text("not a dir")
     with pytest.raises(ConfigError, match="save_dir"):
         make_marker_detector("aruco", save_dir=str(clash / "frames"))
+
+
+# ============================================================
+# PAD-DICT — DICT_7X7_1000 dictionary fix + DetectorParameters whitelist
+# ============================================================
+# The real field is DICT_7X7_1000 (beacons 11/45/51/67/101); the detector USED
+# to hardcode DICT_6X6_250 and read NOTHING off the real field. These tests pin
+# the resolver, the params whitelist, and the bug-existed proof (a 6x6 frame must
+# NOT decode under the 7x7 detector).
+from finals.config import VALID_MARKER_DICTS                     # noqa: E402
+from finals.vision.aruco import (_resolve_detector_params,       # noqa: E402
+                                 _resolve_marker_dict)
+
+REAL_DICT = "DICT_7X7_1000"
+FIELD_IDS = [11, 45, 51, 67, 101]
+_MARKER7_PX = 140                       # 9 modules (7x7+border) -> ~15 px/module
+
+
+def _frame_with_markers(dict_name: str, ids, px: int = _MARKER7_PX,
+                        ts: float = 7.0, frame_number: int = 3) -> FrameStamped:
+    """A 640x480 white canvas with `ids` drawn from `dict_name`, laid out on a
+    grid so none overlap. Generated IN-test (no new committed fixture)."""
+    dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, dict_name))
+    canvas = np.full((480, 640, 3), 255, dtype=np.uint8)
+    # up to 5 markers on a simple grid: cols of `px`+gap, two rows.
+    for i, mid in enumerate(ids):
+        col, row = i % 3, i // 3
+        x = 20 + col * (px + 20)
+        y = 20 + row * (px + 20)
+        marker = cv2.aruco.generateImageMarker(dictionary, mid, px)
+        canvas[y:y + px, x:x + px] = cv2.cvtColor(marker, cv2.COLOR_GRAY2BGR)
+    return FrameStamped(image=canvas, ts=ts, frame_number=frame_number,
+                        source_id="replay")
+
+
+# --- dict-name resolver --------------------------------------------------
+def test_resolve_marker_dict_valid_name_returns_constant():
+    assert _resolve_marker_dict("DICT_7X7_1000") == cv2.aruco.DICT_7X7_1000
+    assert _resolve_marker_dict("DICT_6X6_250") == cv2.aruco.DICT_6X6_250
+
+
+def test_resolve_marker_dict_unknown_name_is_loud():
+    # a typo cv2 would otherwise turn into an AttributeError deep in the thread.
+    with pytest.raises(ConfigError, match="unknown marker_dict"):
+        _resolve_marker_dict("DICT_7x7_1000")          # lowercase x
+    with pytest.raises(ConfigError, match="DICT_7X7_1000"):
+        _resolve_marker_dict("DICT_8X8_250")           # not a real dict
+
+
+def test_valid_marker_dicts_all_resolve_on_this_cv2():
+    """Every name config promises must be a real cv2.aruco constant (the
+    aruco import-time guard asserts this; pinned here too for visibility)."""
+    for name in VALID_MARKER_DICTS:
+        assert _resolve_marker_dict(name) == getattr(cv2.aruco, name)
+
+
+# --- DetectorParameters whitelist ----------------------------------------
+def test_resolve_detector_params_none_is_library_defaults():
+    dp = _resolve_detector_params(None)
+    ref = cv2.aruco.DetectorParameters()
+    assert dp.adaptiveThreshWinSizeMin == ref.adaptiveThreshWinSizeMin
+    assert dp.minMarkerPerimeterRate == ref.minMarkerPerimeterRate
+
+
+def test_resolve_detector_params_applies_whitelisted_overrides():
+    dp = _resolve_detector_params({"adaptiveThreshWinSizeMin": 5,
+                                   "minMarkerPerimeterRate": 0.01})
+    assert dp.adaptiveThreshWinSizeMin == 5
+    assert dp.minMarkerPerimeterRate == pytest.approx(0.01)
+
+
+def test_resolve_detector_params_typo_key_is_loud():
+    # a typo'd field name is a SILENT no-op on the real DetectorParameters —
+    # it must be a loud ConfigError instead (the faint-beacon tuning trap).
+    with pytest.raises(ConfigError, match="minMarkerPerimterRate"):
+        _resolve_detector_params({"minMarkerPerimterRate": 0.01})   # typo'd
+
+
+def test_make_marker_detector_threads_params_typo_is_loud():
+    with pytest.raises(ConfigError, match="unknown key"):
+        make_marker_detector("aruco", marker_dict=REAL_DICT,
+                             aruco_detector_params={"notARealField": 1})
+
+
+def test_make_marker_detector_bad_dict_is_loud():
+    with pytest.raises(ConfigError, match="unknown marker_dict"):
+        make_marker_detector("aruco", marker_dict="DICT_NOPE")
+
+
+# --- the bug-existed proof: 7x7 decodes, 6x6 does NOT under the 7x7 detector --
+def test_seven_by_seven_field_markers_decode_under_7x7():
+    """The campaign-critical fix: the real DICT_7X7_1000 beacons
+    (11/45/51/67/101) decode under the 7x7 detector. (Mutant (a) — default
+    flipped back to 6X6 — fails HERE.)"""
+    detector = make_marker_detector("aruco", marker_dict=REAL_DICT)
+    frame = _frame_with_markers(REAL_DICT, FIELD_IDS)
+    sightings = detector(frame, "alpha")
+    assert sorted(s.marker_id for s in sightings) == sorted(FIELD_IDS)
+    assert all(s.source == "aruco" for s in sightings)
+
+
+def test_six_by_six_frame_does_not_decode_under_7x7():
+    """Proves the bug EXISTED: the committed 6x6 fixtures read NOTHING under the
+    7x7 detector — exactly why a 6x6-hardcoded detector saw nothing on the real
+    7x7 field. (Mutant (b) — resolver ignores config + returns a fixed dict —
+    fails HERE.)"""
+    detector = make_marker_detector("aruco", marker_dict=REAL_DICT)
+    assert detector(load_frame("000.png"), "alpha") == []      # 000.png is 6x6
+
+
+def test_default_marker_dict_is_the_real_field():
+    """make_marker_detector + detect_aruco default to the REAL field (7x7), so a
+    caller that forgets the knob still reads the real beacons, not nothing."""
+    detector = make_marker_detector("aruco")                   # no marker_dict
+    frame = _frame_with_markers(REAL_DICT, FIELD_IDS)
+    assert sorted(s.marker_id for s in detector(frame, "a")) == sorted(FIELD_IDS)
+    # detect_aruco shares the default.
+    assert sorted(s.marker_id for s in detect_aruco(frame, "a")) == \
+        sorted(FIELD_IDS)

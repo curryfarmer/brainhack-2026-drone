@@ -8,6 +8,7 @@
   "mission_budget_s": 600,
   "camera_hfov_deg": 99.69,
   "marker_backend": "aruco",
+  "marker_dict": "DICT_6X6_250",
   "save_marker_frames": true,
   "gazebo_video_host": "127.0.0.1",
   "gazebo_video_port": 5600,

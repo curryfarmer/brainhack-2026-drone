@@ -226,9 +226,16 @@ async def _p2_perception(cfg, state: dict) -> Tuple[bool, str, dict]:
         # Lazy: importing aruco pulls cv2 (whitelisted there, NOT here). A
         # missing cv2 surfaces as a clean ImportError gate failure.
         from finals.vision.aruco import make_marker_detector
-        state["marker_detector"] = make_marker_detector(cfg.marker_backend)
-    detail = f"marker detector '{cfg.marker_backend}' built (primary)"
+        # PAD-DICT: build the detector over the REAL marker_dict + whitelisted
+        # DetectorParameters so P2 proves the configured dictionary resolves on
+        # this cv2 (a bad name fails the gate, props off — never mid-flight).
+        state["marker_detector"] = make_marker_detector(
+            cfg.marker_backend, marker_dict=cfg.marker_dict,
+            aruco_detector_params=cfg.aruco_detector_params)
+    detail = (f"marker detector '{cfg.marker_backend}' built (primary"
+              f"{', dict ' + cfg.marker_dict if cfg.marker_backend == 'aruco' else ''})")
     data = {"marker_backend": cfg.marker_backend,
+            "marker_dict": cfg.marker_dict,
             "detector_backend": cfg.detector.backend}
     if cfg.detector.backend == "ultralytics":
         # load_config already proved the weights file exists + is non-COCO; a
