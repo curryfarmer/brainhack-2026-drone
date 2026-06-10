@@ -1,0 +1,38 @@
+{
+  "_comment": "SINGLE-DRONE FLIGHT TEST (real HULA over pyhulax). The minimal 'ascend -> scan for a landing pad -> land on it' unit test. Phase chain [takeoff, land_on_pad] ONLY — NO navigate, so NO surveyed arena/sector is needed: land_on_pad is a position-blind VISUAL servo and its PAD_ACQUIRE stage is itself a bounded rotate-SCAN of the FOV. SETUP: place the test pad WITHIN the launch point's camera footprint (rotating in place cannot translate to a pad parked metres away). MARKER: vision/aruco.py decodes DICT_7X7_1000 (the field dict) in flight -> the test pad MUST carry a DICT_7X7_1000 marker, and valid_marker_ids below MUST be that marker's id (override via flight_test.py --marker-id, or edit here). camera_hfov_deg 71 = HULA manual. Budgets are a MAX (the orchestrator exits on all-DONE). Run via finals/tools/flight_test.py (it arms the abort + the GO gate); this file is the curated config it launches.",
+  "profile": "real",
+  "flight_backend": "pyhulax",
+  "frame_backend": "pyhulax",
+  "marker_backend": "aruco",
+  "camera_hfov_deg": 71.0,
+  "command_timeout_s": 30,
+  "mission_budget_s": 240,
+  "min_battery_pct": 20,
+  "detector": { "backend": "none" },
+  "guards": {
+    "_comment": "landing_reserve_s 30: MissionClockGuard lands the drone 30 s before the budget so it is never airborne at expiry. battery_warn_pct 30 -> advisory before the 20 % floor. No geofence (no surveyed arena here).",
+    "landing_reserve_s": 30,
+    "battery_warn_pct": 30
+  },
+  "drones": [
+    {
+      "_comment": "The one test airframe. plane_id 1 is a PLACEHOLDER — set it to the real drone's Dola plane_id (flight_test.py --plane-id, or edit). led_rgb red = identity.",
+      "id": "test",
+      "plane_id": 1,
+      "led_rgb": [255, 0, 0],
+      "phases": ["takeoff", "land_on_pad"],
+      "zone": {
+        "takeoff": { "height_cm": 100 },
+        "land_on_pad": {
+          "_comment": "valid_marker_ids [0] is a PLACEHOLDER — set to your DICT_7X7_1000 test-pad marker id (flight_test.py --marker-id N). acquire_timeout_s 40 over total_budget_s 120 gives a deliberate rotate-scan sweep (acquire_scan_step_deg 30 deg, scan_dwell_s 0.8 s) before any blind-land fallback. commit_alt_m 0.5 + k_lateral are ONSITE-CALIBRATED (gate F).",
+          "valid_marker_ids": [0],
+          "commit_alt_m": 0.5,
+          "acquire_timeout_s": 40,
+          "total_budget_s": 120,
+          "acquire_scan_step_deg": 30,
+          "scan_dwell_s": 0.8
+        }
+      }
+    }
+  ]
+}

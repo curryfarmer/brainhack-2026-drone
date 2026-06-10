@@ -1,0 +1,78 @@
+{
+  "_comment": "3-DRONE FLIGHT TEST (real HULA over pyhulax) — the multi-drone sibling of flight_test_real.json. Each drone runs the SAME minimal 'ascend -> in-place scan for a landing pad -> land on it' unit test: phase chain [takeoff, land_on_pad] ONLY. NO navigate, NO arena/sector: there is no lateral translation, so land_on_pad is a position-blind VISUAL servo whose PAD_ACQUIRE stage is a bounded rotate-SCAN of the FOV in place. PLACEMENT (spatial safety): because no drone translates, spatial separation comes from PHYSICAL PLACEMENT, not config — put the 3 drones at well-separated ground spots, each with its OWN DICT_7X7_1000 pad inside ITS camera footprint (a rotating-in-place scan cannot reach a pad parked metres away). DECONFLICTION = TIME: the SafetyController serializes takeoff via the launch-corridor slot (one drone in the C2 zone at a time) and descent via the landing slot (one drone over the pads at a time) — both bounded waits (launch_slot_wait_s / slot_wait_s), never infinite. ALTITUDE BANDS are NOT a separation mechanism here: each drone carries a DISTINCT altitude_band_m ONLY because config.py's multi-drone real-profile separation guard requires EITHER distinct bands OR a sector_deg-on-every-drone (and sector_deg needs an arena, which an in-place scan does not have). The bands are deliberately NEUTRALISED for flight: every drone's zone.takeoff.height_cm is pinned to the SAME 100 cm explicitly (takeoff.from_config uses height_cm when present, so altitude_band_m never reaches the flown height) — all 3 fly to the same height, and real separation is the physical placement + TIME slots above. NETWORK: all 3 drones AND the laptop must be on ONE shared Wi-Fi network with DISTINCT IPs (docs/finals/example_code/hula_connection.py: Dola().get_all_ips() -> {plane_id: ip}; the laptop opens N concurrent control+video links). The solo-AP path 192.168.100.1 reaches only ONE drone and is bring-up ONLY — it cannot run this 3x test. MARKER: vision/aruco.py decodes DICT_7X7_1000 (the field dict) in flight -> each test pad MUST carry a DICT_7X7_1000 marker, and each drone's valid_marker_ids below MUST be ITS pad's marker id. plane_id / valid_marker_ids are PLACEHOLDERS — set them onsite (the real Dola plane_ids + the real pad markers). led_rgb red/green/blue = per-drone identity. camera_hfov_deg 71 = HULA manual. command_timeout_s 30 / mission_budget_s 420 are sized for 3 SERIALIZED takeoffs + 3 SERIALIZED in-place scan-and-lands under real-link latency (a MAX — the orchestrator exits on all-DONE). Run via finals/tools/flight_test.py --drones 3 (it arms the abort + the GO gate); this file is the curated config it launches. For SITL the --sitl --drones 3 path reuses sitl3_landing.json instead.",
+  "profile": "real",
+  "flight_backend": "pyhulax",
+  "frame_backend": "pyhulax",
+  "marker_backend": "aruco",
+  "camera_hfov_deg": 71.0,
+  "command_timeout_s": 30,
+  "mission_budget_s": 420,
+  "min_battery_pct": 20,
+  "detector": { "backend": "none" },
+  "guards": {
+    "_comment": "launch_slot_wait_s / slot_wait_s: the bounded staggered-launch + serialized-landing corridor waits — generous (each drone may queue behind the other two's takeoff/descent) but FINITE (a stuck corridor raises FlightTimeout, never hangs). landing_reserve_s 30: MissionClockGuard lands all 30 s before the budget so nobody is airborne at expiry. battery_warn_pct 30 -> advisory before the 20 % floor. No geofence (no surveyed arena here).",
+    "launch_slot_wait_s": 120,
+    "slot_wait_s": 120,
+    "landing_reserve_s": 30,
+    "battery_warn_pct": 30
+  },
+  "drones": [
+    {
+      "_comment": "drone red. plane_id 1 is a PLACEHOLDER — set to the real Dola plane_id onsite. altitude_band_m 1.0 satisfies the multi-drone separation guard ONLY; zone.takeoff.height_cm 100 pins the FLOWN height (band neutralised). valid_marker_ids [0] is a PLACEHOLDER DICT_7X7_1000 pad id — set to THIS drone's pad marker onsite.",
+      "id": "red",
+      "plane_id": 1,
+      "led_rgb": [255, 0, 0],
+      "altitude_band_m": 1.0,
+      "phases": ["takeoff", "land_on_pad"],
+      "zone": {
+        "takeoff": { "height_cm": 100 },
+        "land_on_pad": {
+          "valid_marker_ids": [0],
+          "commit_alt_m": 0.5,
+          "acquire_timeout_s": 40,
+          "total_budget_s": 120,
+          "acquire_scan_step_deg": 30,
+          "scan_dwell_s": 0.8
+        }
+      }
+    },
+    {
+      "_comment": "drone green. plane_id 2 PLACEHOLDER. altitude_band_m 1.1 = distinct band for the separation guard only; flown height pinned to 100 cm. valid_marker_ids [1] PLACEHOLDER DICT_7X7_1000 pad id — DISTINCT from the other drones' pads (each drone has its OWN pad in its OWN footprint).",
+      "id": "green",
+      "plane_id": 2,
+      "led_rgb": [0, 255, 0],
+      "altitude_band_m": 1.1,
+      "phases": ["takeoff", "land_on_pad"],
+      "zone": {
+        "takeoff": { "height_cm": 100 },
+        "land_on_pad": {
+          "valid_marker_ids": [1],
+          "commit_alt_m": 0.5,
+          "acquire_timeout_s": 40,
+          "total_budget_s": 120,
+          "acquire_scan_step_deg": 30,
+          "scan_dwell_s": 0.8
+        }
+      }
+    },
+    {
+      "_comment": "drone blue. plane_id 3 PLACEHOLDER. altitude_band_m 1.2 = distinct band for the separation guard only; flown height pinned to 100 cm. valid_marker_ids [2] PLACEHOLDER DICT_7X7_1000 pad id — DISTINCT from red/green (its OWN pad in its OWN footprint).",
+      "id": "blue",
+      "plane_id": 3,
+      "led_rgb": [0, 0, 255],
+      "altitude_band_m": 1.2,
+      "phases": ["takeoff", "land_on_pad"],
+      "zone": {
+        "takeoff": { "height_cm": 100 },
+        "land_on_pad": {
+          "valid_marker_ids": [2],
+          "commit_alt_m": 0.5,
+          "acquire_timeout_s": 40,
+          "total_budget_s": 120,
+          "acquire_scan_step_deg": 30,
+          "scan_dwell_s": 0.8
+        }
+      }
+    }
+  ]
+}

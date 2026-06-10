@@ -196,6 +196,64 @@ demos. Run via [`sim/run_landing.sh`](../../sim/run_landing.sh) on the VM:
 
 ---
 
+## Single-drone & 3-drone flight test (ascend → scan → land)
+
+Before the scored runs, prove the whole flight stack on the smallest real
+mission: **ascend → rotate-scan for a landing pad → land on it**.
+[`finals/tools/flight_test.py`](../../finals/tools/flight_test.py) is a thin
+launcher over `finals.main` — it adds NO flight behavior; it curates a config and
+hands off so EVERY safety system runs unchanged (preflight P0–P10, default-deny
+GO, the `q`-abort, the SafetyController landing slot).
+
+**Two safety gates, by design:** (1) `--live` is REQUIRED to fly — without it the
+run is forced to `--dry-run` (resolved plan, exits 0, no props); (2) `finals.main`
+then runs the full preflight + the operator GO prompt before any arm.
+
+**Enter the drone codes at runtime** with `--plane-ids` (no JSON editing):
+
+```bash
+# 1 drone (flight_test_real.json — phases [takeoff, land_on_pad], no navigate):
+python finals/tools/flight_test.py --dry-run                       # plan only
+python finals/tools/flight_test.py --live --plane-id 7             # REAL flight
+
+# 3 drones (flight_test_3x_real.json — same chain ×3, TIME-slot deconfliction):
+python finals/tools/flight_test.py --drones 3 --plane-ids 7 10 12 --dry-run
+python finals/tools/flight_test.py --drones 3 --plane-ids 7 10 12 --live
+```
+
+> **Shared Wi-Fi (BLOCKER for 3×).** Unlike the solo-AP bring-up (`192.168.100.1`
+> reaches only ONE drone), the 3× test needs **all 3 drones AND the laptop on ONE
+> network with distinct IPs** — discovery (`Dola().get_all_ips() → {plane_id:
+> ip}`, per [`connect_all_drones_video.py`](example_code/connect_all_drones_video.py))
+> must find all 3. `--plane-ids 7 10 12` sets each drone's plane_id in fleet
+> order; the single-value `--plane-id`/`--marker-id`/`--height-cm` are 1-drone
+> only and are **refused (exit 2)** under `--drones 3`.
+>
+> **Deconfliction = TIME + placement, NOT altitude bands.** No drone translates,
+> so spatial safety is **physical placement**: stand the drones at well-separated
+> spots, each with its OWN pad inside ITS camera footprint. The SafetyController
+> serializes takeoff (launch slot) and descent (landing slot) in TIME; the
+> distinct `altitude_band_m` exists ONLY to satisfy the multi-drone separation
+> guard (flown height is pinned to 100 cm via `zone.takeoff.height_cm`).
+>
+> **Marker.** The in-flight detector [`vision/aruco.py`](../../finals/vision/aruco.py)
+> decodes **DICT_7X7_1000** (the field dict), so each test pad must carry a
+> **DICT_7X7_1000** marker whose id is that drone's `valid_marker_ids`.
+> (Marker-less pad-mode — `servo_on: "pad"` + `--weights models/pad_v1.pt` — is
+> the alternative the scored `landing_real.json` uses.) Tune `commit_alt_m` /
+> `k_lateral` with the landing-bench gates above — **config, not code**.
+
+The OFFLINE no-flight bring-up that precedes the flight is
+[`finals/tools/hula_smoke.py`](../../finals/tools/hula_smoke.py) (connect →
+telemetry → video → ArUco/YOLO; issues NO flight command). Its ArUco scan is
+**dict-locked to DICT_7X7_1000** by default (`--aruco-dict`; `--all-dicts` = the
+discovery sweep) with the field-id allowlist + per-id frame voting (kills the
+cross-dict double-decode); YOLO takes `--yolo-conf` / `--edge-margin` (rejects a
+hand/arm at the frame edge) / `--yolo-preproc` (gray-world/clahe vs the
+oversaturated cam).
+
+---
+
 ## Config inventory (every shipped profile — what runs it)
 
 `verify_runbook` asserts every `finals/configs/*.json` is named here, so a new
@@ -207,6 +265,8 @@ fleet; the `sitl*`/`mock*`/`replay` configs are VM rehearsals + dev fixtures.
 | [`real.json`](../../finals/configs/real.json) | real | the scored 2B convoy-tag flight (`--profile real`) |
 | [`convoy_real.json`](../../finals/configs/convoy_real.json) | real | 2B convoy-tag real fleet (track_convoy variant) |
 | [`landing_real.json`](../../finals/configs/landing_real.json) | real | the scored 2A LANDING flight (`--profile real`) |
+| [`flight_test_real.json`](../../finals/configs/flight_test_real.json) | real | the single-drone ascend→scan→land flight test ([`flight_test.py`](../../finals/tools/flight_test.py) default) |
+| [`flight_test_3x_real.json`](../../finals/configs/flight_test_3x_real.json) | real | the 3-drone ascend→in-place-scan→land flight test (`flight_test.py --drones 3`); TIME-slot + placement deconfliction |
 | [`bench.json`](../../finals/configs/bench.json) | bench | the props-OFF B1–B8 bench tool (`--profile bench --preflight-only`) |
 | [`sitl1_landing.json`](../../finals/configs/sitl1_landing.json) | sitl | gate L1 / viewtest 1-drone landing rehearsal |
 | [`sitl3_landing.json`](../../finals/configs/sitl3_landing.json) | sitl | gate L2 3-drone staggered+serialized landing |

@@ -51,12 +51,19 @@ FINALS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # instead), emergency_land (the one sanctioned swallow in the flight stack),
 # and disconnect teardown. flight/discovery.py and vision/pyhulax_video.py stay
 # OFF this list by design — both are typed-only.
+# flight-test widening (reviewed): tools/hula_smoke.py — the OFFLINE no-flight
+# bring-up smoke must survive ARBITRARY per-drone/per-frame failures from the
+# open error sets it touches (cv2 decode, ultralytics inference, pyhulax connect/
+# telemetry, socket/Dola discovery) and keep diagnosing the rest of the fleet.
+# Every catch logs the full traceback and issues NO flight command — it is a
+# read-only probe, never in the flight path. Same justification as detector.py.
 EXCEPT_EXCEPTION_WHITELIST = {
     os.path.join("finals", "guards.py"),
     os.path.join("finals", "mission", "orchestrator.py"),
     os.path.join("finals", "vision", "detector.py"),
     os.path.join("finals", "flight", "sitl_adapter.py"),
     os.path.join("finals", "flight", "pyhulax_adapter.py"),
+    os.path.join("finals", "tools", "hula_smoke.py"),
 }
 
 # Modules that may import SDK/heavy-I/O packages at module top level.
