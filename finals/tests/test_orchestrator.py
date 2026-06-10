@@ -353,6 +353,163 @@ def test_constructor_rejects_bad_wiring(tmp_path):
 
 
 # ============================================================
+# 8b. WS-7A — soft-zone handover matcher (per-tick)
+# ============================================================
+from finals.mission.convoy_registry import ConvoyRegistry   # noqa: E402
+
+T0 = 1000.0
+
+
+def _matcher_orch(tmp_path, events, *, sectors, drones=("alpha", "bravo")):
+    """An Orchestrator wired with a ConvoyRegistry + per-drone sectors, for
+    unit-testing _match_handovers directly (no flight). Agents are real
+    DroneAgents (the constructor validates them) but never run."""
+    reg = ConvoyRegistry()
+    agents = [DroneAgent(d, MockAdapter(d), [TakeoffDemo()], events)
+              for d in drones]
+    orch = Orchestrator(agents, events, str(tmp_path), budget_s=10.0,
+                        convoy_registry=reg, drone_sectors=sectors)
+    return orch, reg
+
+
+def test_matcher_offers_flagged_convoy_to_idle_neighbour(tmp_path):
+    with EventLog(str(tmp_path)) as events:
+        # alpha owns north (0 +/-30); bravo owns east (-90 +/-30).
+        orch, reg = _matcher_orch(
+            tmp_path, events,
+            sectors={"alpha": [0.0, 30.0], "bravo": [-90.0, 30.0]})
+        reg.claim("alpha", 7, T0)
+        # The convoy left alpha's sector at bearing -90 == squarely bravo's wedge.
+        reg.flag_exited("alpha", 7, T0 + 1, exit_bearing_deg=-90.0)
+        orch._match_handovers(T0 + 1)
+        # bravo (idle) is offered the convoy; alpha still owns it for now.
+        assert reg.snapshot(T0 + 1)["offered"] == {"7": "bravo"}
+        assert reg.owner_of(7, T0 + 1) == "alpha"
+        # bravo's acquire claims it -> transfer; alpha releases on its next renew.
+        assert reg.claim("bravo", 7, T0 + 2) is True
+        assert reg.owner_of(7, T0 + 2) == "bravo"
+
+
+def test_matcher_no_idle_neighbour_stays_flagged_with_owner(tmp_path):
+    with EventLog(str(tmp_path)) as events:
+        orch, reg = _matcher_orch(
+            tmp_path, events,
+            sectors={"alpha": [0.0, 30.0], "bravo": [-90.0, 30.0]})
+        reg.claim("alpha", 7, T0)
+        reg.claim("bravo", 11, T0)               # bravo is BUSY (not idle)
+        reg.flag_exited("alpha", 7, T0 + 1, exit_bearing_deg=-90.0)
+        orch._match_handovers(T0 + 1)
+        # No idle neighbour -> NO offer; the convoy stays flagged with alpha.
+        snap = reg.snapshot(T0 + 1)
+        assert snap["offered"] == {}
+        assert snap["exited_zone"] == [7]
+        assert reg.owner_of(7, T0 + 1) == "alpha"
+
+
+def test_matcher_no_neighbour_owns_the_exit_bearing_stays_flagged(tmp_path):
+    with EventLog(str(tmp_path)) as events:
+        # bravo is idle but its wedge (east) does NOT cover bearing +90 (west).
+        orch, reg = _matcher_orch(
+            tmp_path, events,
+            sectors={"alpha": [0.0, 30.0], "bravo": [-90.0, 30.0]})
+        reg.claim("alpha", 7, T0)
+        reg.flag_exited("alpha", 7, T0 + 1, exit_bearing_deg=90.0)
+        orch._match_handovers(T0 + 1)
+        assert reg.snapshot(T0 + 1)["offered"] == {}
+        assert reg.owner_of(7, T0 + 1) == "alpha"
+
+
+def test_matcher_is_noop_without_sectors(tmp_path):
+    with EventLog(str(tmp_path)) as events:
+        orch, reg = _matcher_orch(tmp_path, events, sectors=None)
+        reg.claim("alpha", 7, T0)
+        reg.flag_exited("alpha", 7, T0 + 1, exit_bearing_deg=-90.0)
+        orch._match_handovers(T0 + 1)              # no sectors -> no-op
+        assert reg.snapshot(T0 + 1)["offered"] == {}
+
+
+def test_matcher_does_not_offer_to_self_or_to_busy_drone(tmp_path):
+    with EventLog(str(tmp_path)) as events:
+        # Three drones; charlie's wedge also covers -90 but charlie is BUSY.
+        orch, reg = _matcher_orch(
+            tmp_path, events,
+            sectors={"alpha": [0.0, 30.0], "bravo": [-90.0, 30.0],
+                     "charlie": [-90.0, 30.0]},
+            drones=("alpha", "bravo", "charlie"))
+        reg.claim("alpha", 7, T0)
+        reg.claim("charlie", 11, T0)             # charlie busy
+        reg.flag_exited("alpha", 7, T0 + 1, exit_bearing_deg=-90.0)
+        orch._match_handovers(T0 + 1)
+        # Only bravo (idle, matching wedge) is offered — never charlie (busy),
+        # never alpha (the owner).
+        assert reg.snapshot(T0 + 1)["offered"] == {"7": "bravo"}
+
+
+class _FlagExitPhase(MissionPhase):
+    """Claims a convoy through the shared registry, flags it exited its sector,
+    then waits — so the orchestrator's per-tick matcher can offer it to the idle
+    neighbour during a real run()."""
+
+    name = "flag_exit"
+
+    def __init__(self, reg, convoy_id, exit_bearing):
+        self._reg = reg
+        self._cid = convoy_id
+        self._bearing = exit_bearing
+        self._did = False
+
+    def step(self, ctx: AgentContext) -> Action:
+        if not self._did:
+            self._did = True
+            self._reg.claim(ctx.drone_id, self._cid, ctx.now)
+            self._reg.flag_exited(ctx.drone_id, self._cid, ctx.now,
+                                  exit_bearing_deg=self._bearing)
+            return Takeoff(height_cm=80)
+        return Wait(duration_s=0.02)
+
+
+def test_matcher_runs_in_the_live_tick_loop(tmp_path):
+    """End-to-end: a flagged-exit convoy is offered to the idle neighbour DURING
+    run() (not just via a direct _match_handovers call), and the offer + the
+    convoy_handover_offered event land in the heartbeat / log."""
+    run_dir = str(tmp_path)
+    reg = ConvoyRegistry()
+    with EventLog(run_dir) as events:
+        # alpha flags convoy 7 out of its north sector at bearing -90 (bravo's
+        # east sector). bravo just waits — it is idle, the handover target.
+        alpha = DroneAgent("alpha", MockAdapter("alpha"),
+                           [_FlagExitPhase(reg, 7, -90.0)], events)
+        bravo = DroneAgent("bravo", MockAdapter("bravo"),
+                           [WaitForeverPhase()], events)
+        orch = Orchestrator([alpha, bravo], events, run_dir, budget_s=0.3,
+                            heartbeat_period_s=0.02, convoy_registry=reg,
+                            drone_sectors={"alpha": [0.0, 30.0],
+                                           "bravo": [-90.0, 30.0]})
+        asyncio.run(orch.run())
+
+    kinds = [e["event"] for e in mission_events(run_dir)]
+    assert "convoy_handover_offered" in kinds
+    offer = next(e["data"] for e in mission_events(run_dir)
+                 if e["event"] == "convoy_handover_offered")
+    assert offer["convoy_id"] == 7
+    assert offer["from_drone"] == "alpha" and offer["to_drone"] == "bravo"
+
+
+def test_constructor_rejects_sector_for_unknown_drone(tmp_path):
+    with EventLog(str(tmp_path)) as events:
+        agents = [DroneAgent("alpha", MockAdapter("alpha"), [TakeoffDemo()],
+                             events)]
+        with pytest.raises(ValueError, match="not one of the agents"):
+            Orchestrator(agents, events, str(tmp_path), budget_s=10.0,
+                         convoy_registry=ConvoyRegistry(),
+                         drone_sectors={"ghost": [0.0, 30.0]})
+        with pytest.raises(ValueError, match="center_deg, half_width_deg"):
+            Orchestrator(agents, events, str(tmp_path), budget_s=10.0,
+                         convoy_registry=ConvoyRegistry(),
+                         drone_sectors={"alpha": [0.0]})
+
+
+# ============================================================
 # 9. finals.main wiring — the composition root end to end
 # ============================================================
 def test_main_mock_runs_end_to_end(tmp_path, monkeypatch, capsys):

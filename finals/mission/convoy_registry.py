@@ -85,6 +85,21 @@ class ConvoyEntry:
     claimed_ts: Optional[float] = None
     last_heartbeat_ts: Optional[float] = None
     serviced_ts: Optional[float] = None
+    # --- WS-7A soft-zone handover (only meaningful while CLAIMED) ---
+    #: The current owner flagged that the convoy left its assigned sector. The
+    #: owner KEEPS tracking it (soft zoning, never a hard cut) while the
+    #: orchestrator looks for an idle neighbour to hand it to.
+    exited_zone: bool = False
+    #: Bearing-from-C2 (deg, CCW+, the in_sector/Sighting.bearing_deg
+    #: convention) the owner last saw the convoy at when it flagged the exit, so
+    #: the orchestrator can decide WHICH neighbour's sector it entered without
+    #: re-reading sightings. None until flagged.
+    exit_bearing_deg: Optional[float] = None
+    #: A pending handover offer: the idle neighbour the orchestrator picked.
+    #: Only that drone may claim this convoy while the offer stands; cleared on
+    #: accept, on the owner releasing, or when the owner re-enters its sector.
+    offered_to: Optional[str] = None
+    offered_ts: Optional[float] = None
 
 
 class ConvoyRegistry:
@@ -134,6 +149,18 @@ class ConvoyRegistry:
                 f"monotonic timestamp (time.monotonic()); the registry never "
                 f"reads the clock itself")
 
+    @staticmethod
+    def _check_bearing(bearing_deg: Optional[float]) -> None:
+        if bearing_deg is None:
+            return                                          # bearing is optional
+        if (not isinstance(bearing_deg, (int, float))
+                or isinstance(bearing_deg, bool)
+                or not math.isfinite(bearing_deg)):
+            raise RegistryError(
+                f"ConvoyRegistry: exit_bearing_deg={bearing_deg!r} invalid — "
+                f"must be None or a finite number (deg from C2, CCW+, the "
+                f"Sighting.bearing_deg convention) — check the flagging phase")
+
     # ---------------- internal helpers (caller holds the lock) ----------------
     def _entry(self, convoy_id: int) -> ConvoyEntry:
         """Get-or-create the entry for an id (lazily, on first sighting/claim)."""
@@ -152,6 +179,17 @@ class ConvoyRegistry:
             if hb is None or (now - hb) > self.lock_ttl_s:
                 return ConvoyStatus.LOST
         return entry.status
+
+    @staticmethod
+    def _clear_handover(entry: ConvoyEntry) -> None:
+        """Wipe all soft-zone handover state on an entry (caller holds the lock).
+        Called whenever ownership turns over or resets — a fresh owner starts
+        in-zone with no pending offer, so a stale flag/offer can never leak
+        across a claim/release/expire boundary."""
+        entry.exited_zone = False
+        entry.exit_bearing_deg = None
+        entry.offered_to = None
+        entry.offered_ts = None
 
     # ---------------- core API ----------------
     def seed(self, convoy_ids: Iterable[int]) -> None:
@@ -187,8 +225,15 @@ class ConvoyRegistry:
                 if entry.owner_drone == drone_id:
                     entry.last_heartbeat_ts = now      # idempotent refresh
                     return True
+                # A live OTHER drone holds it. The ONE exception is a standing
+                # soft-zone handover offer to THIS drone: accept it (atomic
+                # transfer under the same lock — the offeree's normal acquire
+                # loop drives the handover through claim, no separate call).
+                if entry.offered_to == drone_id:
+                    return self._take_offer(entry, drone_id, now)
                 return False                           # a live owner holds it
-            # UNCLAIMED or (effectively) LOST -> grant.
+            # UNCLAIMED or (effectively) LOST -> grant a fresh lock.
+            self._clear_handover(entry)                # fresh owner starts clean
             entry.status = ConvoyStatus.CLAIMED
             entry.owner_drone = drone_id
             entry.claimed_ts = now
@@ -232,12 +277,154 @@ class ConvoyRegistry:
             if entry is None or entry.owner_drone != drone_id:
                 return False                           # not ours to release
             entry.owner_drone = None
+            self._clear_handover(entry)                # offer/flag die with owner
             if serviced:
                 entry.status = ConvoyStatus.SERVICED
                 entry.serviced_ts = now
             else:
                 entry.status = ConvoyStatus.UNCLAIMED
             return True
+
+    # ---------------- WS-7A soft-zone handover ----------------
+    def flag_exited(self, drone_id: str, convoy_id: int, now: float, *,
+                    exited: bool = True,
+                    exit_bearing_deg: Optional[float] = None) -> None:
+        """The CURRENT OWNER marks that its tracked convoy left (exited=True) or
+        re-entered (exited=False) its assigned sector. Soft zoning: the owner
+        KEEPS tracking — this only records the flag (+ the bearing-from-C2 the
+        convoy was last seen at) so the orchestrator can look for an idle
+        neighbour to hand it to. exited=False clears any standing offer too (the
+        convoy came back; no handover needed).
+
+        Fail loud: only the live owner may flag its own convoy. A non-owner
+        (or stale owner) flagging is a programming error — RegistryError naming
+        WHAT/WHICH/WHY/CHECK — NOT a silent no-op, because a wrong-drone flag
+        would offer away a convoy nobody is actually tracking."""
+        self._check_drone(drone_id)
+        self._check_convoy(convoy_id)
+        self._check_now(now)
+        if not isinstance(exited, bool):
+            raise RegistryError(
+                f"ConvoyRegistry.flag_exited: exited={exited!r} invalid — must "
+                f"be a bool (True=left my sector, False=re-entered) — check the "
+                f"track_convoy soft-zone call")
+        self._check_bearing(exit_bearing_deg)
+        with self._lock:
+            entry = self._entries.get(convoy_id)
+            if (entry is None or entry.owner_drone != drone_id
+                    or self._effective_status(entry, now)
+                    is not ConvoyStatus.CLAIMED):
+                owner = entry.owner_drone if entry is not None else None
+                raise RegistryError(
+                    f"ConvoyRegistry.flag_exited: drone {drone_id!r} cannot flag "
+                    f"convoy {convoy_id} — it is owned by {owner!r}, not this "
+                    f"drone (or its lock went stale) — only the live owner may "
+                    f"flag a zone exit; CHECK the track_convoy/registry wiring "
+                    f"(the phase must hold a fresh claim before flagging)")
+            entry.exited_zone = exited
+            if exited:
+                entry.exit_bearing_deg = exit_bearing_deg
+            else:
+                # Came back in-zone: drop the flag, the recorded bearing, and any
+                # pending offer (the handover is moot).
+                entry.exit_bearing_deg = None
+                entry.offered_to = None
+                entry.offered_ts = None
+
+    def offer_to(self, convoy_id: int, target_drone: str, now: float) -> None:
+        """Mark an EXITED convoy as offered to an idle neighbour (the
+        orchestrator matcher calls this). Records the offeree; the offeree's
+        normal acquire loop (claimable_ids -> claim) then takes ownership via
+        accept_offer. Re-offering refreshes the target/timestamp (the matcher
+        runs every tick).
+
+        Fail loud: the convoy must be CLAIMED (a live owner is still tracking it)
+        and flagged exited_zone — offering a convoy nobody owns, or one still
+        in-zone, is a matcher bug. target_drone must be a different drone than
+        the owner (you cannot hand a convoy to itself)."""
+        self._check_convoy(convoy_id)
+        self._check_drone(target_drone)
+        self._check_now(now)
+        with self._lock:
+            entry = self._entries.get(convoy_id)
+            if (entry is None
+                    or self._effective_status(entry, now)
+                    is not ConvoyStatus.CLAIMED):
+                raise RegistryError(
+                    f"ConvoyRegistry.offer_to: convoy {convoy_id} is not CLAIMED "
+                    f"(no live owner is tracking it) — cannot offer it to "
+                    f"{target_drone!r}; CHECK the matcher (only flagged, owned "
+                    f"convoys are offerable)")
+            if not entry.exited_zone:
+                raise RegistryError(
+                    f"ConvoyRegistry.offer_to: convoy {convoy_id} is not flagged "
+                    f"exited_zone — only a convoy its owner flagged as having "
+                    f"left its sector may be offered to {target_drone!r}; CHECK "
+                    f"the matcher (it must read flagged_exits first)")
+            if entry.owner_drone == target_drone:
+                raise RegistryError(
+                    f"ConvoyRegistry.offer_to: convoy {convoy_id} cannot be "
+                    f"offered to its own owner {target_drone!r} — the offeree "
+                    f"must be a DIFFERENT (idle neighbour) drone; CHECK the "
+                    f"matcher's neighbour selection")
+            entry.offered_to = target_drone
+            entry.offered_ts = now
+
+    def accept_offer(self, drone_id: str, convoy_id: int, now: float) -> bool:
+        """The OFFERED drone atomically takes ownership of a convoy handed to it.
+        Transfers the lock to drone_id under the registry lock and clears the
+        offer + exited flag. Returns True on a successful transfer; False — NOT
+        an error — when the offer is stale or rescinded (a different drone is the
+        offeree, the convoy is no longer CLAIMED, or no offer stands), an
+        expected race the caller just retries/re-acquires past.
+
+        track_convoy reaches this through claim() (claimable_ids surfaces the
+        offer, claim() transfers it); accept_offer is the explicit entry point +
+        the unit-testable transfer core."""
+        self._check_drone(drone_id)
+        self._check_convoy(convoy_id)
+        self._check_now(now)
+        with self._lock:
+            entry = self._entries.get(convoy_id)
+            if entry is None or entry.offered_to != drone_id:
+                return False                           # not offered to us
+            if self._effective_status(entry, now) is not ConvoyStatus.CLAIMED:
+                return False                           # owner already gone/stale
+            return self._take_offer(entry, drone_id, now)
+
+    def _take_offer(self, entry: ConvoyEntry, drone_id: str,
+                    now: float) -> bool:
+        """Transfer a standing offer to drone_id (caller holds the lock and has
+        already confirmed entry.offered_to == drone_id and the entry is live
+        CLAIMED). The ONE place ownership moves on a handover, so the offeree
+        guard lives here: an offeree mismatch is a hard assert, never a silent
+        wrong-drone transfer."""
+        assert entry.offered_to == drone_id, (
+            f"_take_offer: convoy {entry.convoy_id} offered_to "
+            f"{entry.offered_to!r} != claimer {drone_id!r} — transfer guard")
+        entry.owner_drone = drone_id
+        entry.claimed_ts = now
+        entry.last_heartbeat_ts = now
+        self._clear_handover(entry)                    # fresh owner starts clean
+        return True
+
+    def flagged_exits(self, now: float) -> List[tuple]:
+        """The orchestrator matcher's pull: every CLAIMED convoy whose owner has
+        flagged it exited its sector, as (convoy_id, owner_drone,
+        exit_bearing_deg, offered_to). Non-mutating; sorted by convoy_id for a
+        deterministic match order. Stale/lost owners are skipped (effective
+        status folds in heartbeat staleness), so a dropped drone's flag never
+        triggers a handover from a convoy nobody is tracking."""
+        self._check_now(now)
+        out: List[tuple] = []
+        with self._lock:
+            for cid, e in sorted(self._entries.items()):
+                if (e.exited_zone
+                        and self._effective_status(e, now)
+                        is ConvoyStatus.CLAIMED):
+                    out.append((cid, e.owner_drone, e.exit_bearing_deg,
+                                e.offered_to))
+        return out
 
     def expire(self, now: float) -> List[int]:
         """Materialize staleness: flip every CLAIMED entry with no heartbeat for
@@ -252,6 +439,7 @@ class ConvoyRegistry:
                     if hb is None or (now - hb) > self.lock_ttl_s:
                         entry.status = ConvoyStatus.LOST
                         entry.owner_drone = None
+                        self._clear_handover(entry)    # owner gone -> offer dead
                         flipped.append(entry.convoy_id)
         return sorted(flipped)
 
@@ -259,8 +447,10 @@ class ConvoyRegistry:
     def claimable_ids(self, drone_id: str, now: float,
                       candidates: Iterable[int]) -> List[int]:
         """Of `candidates` (e.g. the ids a drone is seeing this tick), those it
-        could claim right now: UNCLAIMED, (effectively) LOST, or already its own.
-        Excludes SERVICED and ids a live OTHER drone holds. Non-mutating."""
+        could claim right now: UNCLAIMED, (effectively) LOST, already its own, OR
+        a live OTHER drone's convoy that has been OFFERED to this drone (a
+        soft-zone handover — claim() will transfer it). Excludes SERVICED and
+        ids a live other drone holds with no offer to us. Non-mutating."""
         self._check_drone(drone_id)
         self._check_now(now)
         cand = list(candidates)
@@ -276,8 +466,10 @@ class ConvoyRegistry:
                 eff = self._effective_status(entry, now)
                 if eff in (ConvoyStatus.UNCLAIMED, ConvoyStatus.LOST):
                     out.append(cid)
-                elif eff is ConvoyStatus.CLAIMED and entry.owner_drone == drone_id:
-                    out.append(cid)
+                elif eff is ConvoyStatus.CLAIMED and (
+                        entry.owner_drone == drone_id
+                        or entry.offered_to == drone_id):
+                    out.append(cid)                    # ours, or handed to us
         return out
 
     def owner_of(self, convoy_id: int, now: float) -> Optional[str]:
@@ -327,6 +519,7 @@ class ConvoyRegistry:
             self._check_now(now)
         with self._lock:
             serviced, in_flight, lost, unclaimed = [], {}, [], []
+            exited, offered = [], {}
             for cid, e in sorted(self._entries.items()):
                 eff = (self._effective_status(e, now)
                        if now is not None else e.status)
@@ -334,6 +527,13 @@ class ConvoyRegistry:
                     serviced.append(cid)
                 elif eff is ConvoyStatus.CLAIMED:
                     in_flight[str(cid)] = e.owner_drone
+                    # WS-7A: surface the soft-zone handover state so the
+                    # heartbeat shows which convoys left their owner's sector and
+                    # which are mid-handover to a neighbour.
+                    if e.exited_zone:
+                        exited.append(cid)
+                    if e.offered_to is not None:
+                        offered[str(cid)] = e.offered_to
                 elif eff is ConvoyStatus.LOST:
                     lost.append(cid)
                 else:
@@ -348,6 +548,8 @@ class ConvoyRegistry:
                 "lost": lost,
                 "unclaimed": unclaimed,
                 "remaining": remaining,
+                "exited_zone": exited,
+                "offered": offered,
                 "done": done,
             }
 

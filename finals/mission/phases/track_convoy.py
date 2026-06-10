@@ -99,6 +99,7 @@ class TrackConvoy(MissionPhase):
                  lost_timeout_s: float = 4.0,
                  investigate_budget_s: float = 90.0,
                  min_sightings_to_pass: int = 0,
+                 sector_deg: "Optional[List[float]]" = None,
                  registry: "Optional[ConvoyRegistry]" = None):
         def _bad(key: str, value, why: str) -> ConfigError:
             return ConfigError(
@@ -160,6 +161,7 @@ class TrackConvoy(MissionPhase):
             raise _bad("registry", type(registry).__name__,
                        "must be a ConvoyRegistry or None (needs "
                        "claim/renew/release/claimable_ids)")
+        sector = self._validate_sector(sector_deg, _bad)
 
         self.height_cm = height_cm
         self.track_marker_ids = (set(track_marker_ids)
@@ -185,6 +187,13 @@ class TrackConvoy(MissionPhase):
         #: bind_registry so dynamic assignment turns on without a config-shape
         #: change. See the class docstring.
         self.registry = registry
+        #: WS-7A soft-zone: this drone's assigned sector as
+        #: (center_deg, half_width_deg), or None = no soft-zoning (today's
+        #: byte-for-byte behavior). from_config leaves it None; main._build_phases
+        #: injects drone_cfg.sector_deg via bind_sector. With it set AND a
+        #: registry bound, TRACK flags the registry when the tracked convoy's
+        #: bearing leaves the wedge (still KEEPS tracking — soft, never a cut).
+        self.sector_deg = sector
 
         # --- mutable per-mission state (a fresh instance per drone) ---
         self._state = "init"
@@ -198,8 +207,38 @@ class TrackConvoy(MissionPhase):
         self._chase_used_cm = 0
         self._seen_count = 0
         self._lost_events = 0
+        #: WS-7A: re-acquires triggered by an INTENTIONAL handover (the lock
+        #: moved to the neighbour we exited toward), counted apart from
+        #: _lost_events (lock expired / stolen) so the give-up message
+        #: distinguishes a cooperative handoff from a real loss.
+        self._handover_events = 0
         self._prev_bearing: Optional[float] = None
         self._prev_bearing_ts: Optional[float] = None
+        #: WS-7A: whether we've ALREADY told the registry the current target left
+        #: our sector — so we flag the exit edge ONCE and the re-entry edge ONCE,
+        #: not on every tick. Reset whenever the target id changes.
+        self._exited_flagged = False
+
+    @staticmethod
+    def _validate_sector(sector_deg, _bad):
+        """Validate an optional [center_deg, half_width_deg] sector and return it
+        as a (center, half_width) float tuple, or None. Same shape as
+        config._parse_drone's sector_deg check — fail loud so a malformed wedge
+        dies at construction, never silently disables soft-zoning mid-flight."""
+        if sector_deg is None:
+            return None
+        if (not isinstance(sector_deg, (list, tuple)) or len(sector_deg) != 2
+                or any(not isinstance(v, (int, float)) or isinstance(v, bool)
+                       or not math.isfinite(v) for v in sector_deg)):
+            raise _bad("sector_deg", sector_deg,
+                       "must be null or [center_deg, half_width_deg] (two "
+                       "finite numbers, deg, CCW+)")
+        center, half = float(sector_deg[0]), float(sector_deg[1])
+        if half < 0:
+            raise _bad("sector_deg", sector_deg,
+                       "half_width_deg must be >= 0 (a negative wedge would "
+                       "flag every convoy as out-of-sector)")
+        return (center, half)
 
     @classmethod
     def from_config(cls, drone_cfg: "DroneConfig",
@@ -225,6 +264,18 @@ class TrackConvoy(MissionPhase):
                 f"track_convoy.bind_registry: {type(registry).__name__!r} is not "
                 f"a ConvoyRegistry (needs claim/renew/release/claimable_ids)")
         self.registry = registry
+
+    def bind_sector(self, sector_deg: "Optional[List[float]]") -> None:
+        """Inject this drone's assigned sector after from_config (done by
+        main._build_phases from drone_cfg.sector_deg). With a sector AND a
+        registry bound, TRACK soft-zones: it flags the registry when the tracked
+        convoy's bearing leaves the wedge (KEEPS tracking) so an idle neighbour
+        can be handed it. None = no soft-zoning (today's behavior). Validated
+        loud + idempotent — same discipline as bind_registry."""
+        def _bad(key, value, why):
+            return ConfigError(
+                f"track_convoy.bind_sector: {key}={value!r} invalid — {why}")
+        self.sector_deg = self._validate_sector(sector_deg, _bad)
 
     def on_enter(self, ctx: AgentContext) -> None:
         self._t_enter = ctx.now
@@ -299,6 +350,7 @@ class TrackConvoy(MissionPhase):
             self._target_id = locked
             self._state = "track"
             self._t_last_seen = ctx.now
+            self._exited_flagged = False   # fresh target starts in-zone
             return None                    # steer this same tick
         if acq_elapsed > self.acquire_budget_s:
             return self._finish(
@@ -317,14 +369,19 @@ class TrackConvoy(MissionPhase):
             self._seen_count += len(fresh)
             if (self.registry is not None and not self.registry.renew(
                     ctx.drone_id, self._target_id, ctx.now)):
-                # Our lock expired / was stolen / was handed off out from under
-                # us. We no longer own it (so no release), but we must stop
-                # tracking it and re-acquire whatever we can still claim.
-                self._lost_events += 1
-                self._target_id = None
-                self._obs.clear()
-                self._enter_acquire(ctx)
+                # Our lock moved off us. Distinguish the two reasons (the lock is
+                # the same, the cause is not): an INTENTIONAL soft-zone handover
+                # (a neighbour accepted the convoy we flagged out of our sector,
+                # so it is now CLAIMED by someone else) vs a real LOSS (expired /
+                # stolen — now unowned). Either way we no longer own it (no
+                # release), drop it and re-acquire whatever we can still claim.
+                if self._handed_over(ctx):
+                    self._handover_events += 1
+                else:
+                    self._lost_events += 1
+                self._drop_target(ctx)
                 return Hover(duration_s=self.reacquire_dwell_s)
+            self._soft_zone(ctx, fresh)   # flag the exit/re-entry edge (WS-7A)
             return self._steer(ctx, fresh)
         # lost this tick (no fresh sighting)
         assert self._t_last_seen is not None
@@ -334,10 +391,18 @@ class TrackConvoy(MissionPhase):
             # can pick the convoy up while we re-find it (expire() would free it
             # eventually anyway; releasing now is the cooperative path).
             self._release(ctx, serviced=False)
-            self._target_id = None
-            self._obs.clear()
-            self._enter_acquire(ctx)       # fresh acquire_budget for the re-find
+            self._drop_target(ctx)         # fresh acquire_budget for the re-find
         return Hover(duration_s=self.reacquire_dwell_s)
+
+    def _drop_target(self, ctx: AgentContext) -> None:
+        """Stop tracking the current target and re-enter ACQUIRE with a fresh
+        budget. Shared by every re-acquire path (renew-False handover/loss, the
+        no-sighting timeout) so the soft-zone exit flag is always reset with the
+        target it referred to."""
+        self._target_id = None
+        self._obs.clear()
+        self._exited_flagged = False
+        self._enter_acquire(ctx)
 
     def _steer(self, ctx: AgentContext, fresh: List) -> Action:
         usable = [s for s in fresh if s.bearing_deg is not None]
@@ -426,6 +491,49 @@ class TrackConvoy(MissionPhase):
             self.registry.release(ctx.drone_id, self._target_id, ctx.now,
                                   serviced=serviced)
 
+    def _handed_over(self, ctx: AgentContext) -> bool:
+        """True iff our just-lost lock moved to ANOTHER drone (an intentional
+        soft-zone handover) rather than expiring/being freed (a real loss). Read
+        from the registry: a CLAIMED-by-someone-else entry == handed over. Best
+        effort — any registry quirk reads as a plain loss, never crashes."""
+        if self.registry is None or self._target_id is None:
+            return False
+        owner = self.registry.owner_of(self._target_id, ctx.now)
+        return owner is not None and owner != ctx.drone_id
+
+    def _soft_zone(self, ctx: AgentContext, fresh: List) -> None:
+        """WS-7A soft zoning: from the freshest sighting's bearing, decide if the
+        tracked convoy is IN or OUT of THIS drone's sector and flag the registry
+        ONCE per edge. Pure book-keeping — it NEVER drops the lock or changes the
+        steer (soft, never a hard cut); the orchestrator matcher reads the flag
+        and looks for an idle neighbour. No-op without both a sector and a
+        registry bound (default = today's behavior), or if the freshest sighting
+        has no bearing (can't decide -> leave the flag as-is)."""
+        if (self.sector_deg is None or self.registry is None
+                or self._target_id is None):
+            return
+        usable = [s for s in fresh if s.bearing_deg is not None]
+        if not usable:
+            return                         # no bearing this tick -> can't decide
+        from finals.mission.planning.frame import bearing_in_sector
+        bearing = max(usable, key=lambda x: x.ts).bearing_deg
+        center, half = self.sector_deg
+        inside = bearing_in_sector(bearing, center, half)
+        if not inside and not self._exited_flagged:
+            # EXIT edge: the convoy just left our wedge. Flag it (carrying the
+            # bearing so the matcher knows which neighbour it entered) and keep
+            # tracking. flag_exited raises only on a wiring bug (we are the owner
+            # here — renew() just succeeded), so let it surface loudly.
+            self.registry.flag_exited(ctx.drone_id, self._target_id, ctx.now,
+                                      exited=True, exit_bearing_deg=bearing)
+            self._exited_flagged = True
+        elif inside and self._exited_flagged:
+            # RE-ENTRY edge: it came back before any neighbour took it. Clear the
+            # flag + any standing offer; we keep it.
+            self.registry.flag_exited(ctx.drone_id, self._target_id, ctx.now,
+                                      exited=False)
+            self._exited_flagged = False
+
     def _lead(self, bearing: float, ts: float) -> float:
         """Azimuth lead for a moving target from the bearing rate (0 unless
         lead_gain > 0). Updates the previous-bearing memory each call."""
@@ -464,7 +572,8 @@ class TrackConvoy(MissionPhase):
         (subject to the min_sightings_to_pass guard in _finish)."""
         msg = (f"track_convoy[{ctx.drone_id}]: tracked id={self._target_id} "
                f"({self._seen_count} sighting(s), chased {self._chase_used_cm} cm, "
-               f"{self._lost_events} reacquire(s)) — {why}")
+               f"{self._lost_events} reacquire(s), "
+               f"{self._handover_events} handover(s)) — {why}")
         return self._finish(ctx, msg, serviced=True)
 
     def _finish(self, ctx: AgentContext, done_msg: str, *,

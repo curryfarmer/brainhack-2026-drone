@@ -245,3 +245,157 @@ def test_registry_error_is_a_finals_error():
 def test_status_enum_values_are_json_strings():
     assert ConvoyStatus.SERVICED.value == "serviced"
     assert ConvoyStatus.CLAIMED == "claimed"          # str-Enum equality
+
+
+# ============================================================
+# WS-7A — soft-zone handover (flag / offer / accept / transfer)
+# ============================================================
+def test_flag_exited_only_by_owner():
+    reg = ConvoyRegistry()
+    reg.claim("alpha", 7, T0)
+    # bravo does not own 7 -> flagging is a programming error, raises loud.
+    with pytest.raises(RegistryError):
+        reg.flag_exited("bravo", 7, T0 + 1)
+    # The owner may flag; soft zoning -> ownership is UNCHANGED, just flagged.
+    reg.flag_exited("alpha", 7, T0 + 1, exit_bearing_deg=30.0)
+    assert reg.owner_of(7, T0 + 1) == "alpha"
+    assert reg.snapshot(T0 + 1)["exited_zone"] == [7]
+
+
+def test_flag_exited_on_unowned_convoy_raises():
+    reg = ConvoyRegistry(known_ids=[7])
+    # Nobody owns 7 yet -> no live owner to flag.
+    with pytest.raises(RegistryError):
+        reg.flag_exited("alpha", 7, T0)
+
+
+def test_flag_exited_false_clears_flag_and_offer():
+    reg = ConvoyRegistry()
+    reg.claim("alpha", 7, T0)
+    reg.flag_exited("alpha", 7, T0 + 1, exit_bearing_deg=30.0)
+    reg.offer_to(7, "bravo", T0 + 1)
+    assert reg.snapshot(T0 + 1)["offered"] == {"7": "bravo"}
+    # Convoy came back into alpha's sector before bravo took it.
+    reg.flag_exited("alpha", 7, T0 + 2, exited=False)
+    snap = reg.snapshot(T0 + 2)
+    assert snap["exited_zone"] == [] and snap["offered"] == {}
+    assert reg.owner_of(7, T0 + 2) == "alpha"
+
+
+def test_offer_then_offeree_accepts_transfers_ownership():
+    reg = ConvoyRegistry()
+    reg.claim("alpha", 7, T0)
+    reg.flag_exited("alpha", 7, T0 + 1, exit_bearing_deg=-120.0)
+    reg.offer_to(7, "bravo", T0 + 1)
+    # Only the offeree may take it; the transfer is atomic and clears the flag.
+    assert reg.accept_offer("bravo", 7, T0 + 2) is True
+    assert reg.owner_of(7, T0 + 2) == "bravo"
+    snap = reg.snapshot(T0 + 2)
+    assert snap["exited_zone"] == [] and snap["offered"] == {}
+
+
+def test_offer_is_claimable_only_by_offeree_and_claim_transfers():
+    reg = ConvoyRegistry()
+    reg.claim("alpha", 7, T0)
+    reg.flag_exited("alpha", 7, T0 + 1, exit_bearing_deg=90.0)
+    reg.offer_to(7, "bravo", T0 + 1)
+    # An offered convoy is claimable ONLY by its offeree (not a third drone).
+    assert reg.claimable_ids("bravo", T0 + 1, [7]) == [7]
+    assert reg.claimable_ids("charlie", T0 + 1, [7]) == []
+    # bravo's normal acquire path (claim) drives the handover transfer.
+    assert reg.claim("bravo", 7, T0 + 2) is True
+    assert reg.owner_of(7, T0 + 2) == "bravo"
+
+
+def test_accept_offer_by_non_offeree_returns_false_no_transfer():
+    reg = ConvoyRegistry()
+    reg.claim("alpha", 7, T0)
+    reg.flag_exited("alpha", 7, T0 + 1, exit_bearing_deg=90.0)
+    reg.offer_to(7, "bravo", T0 + 1)
+    # charlie was NOT the offeree: an expected race, returns False, no transfer.
+    assert reg.accept_offer("charlie", 7, T0 + 2) is False
+    assert reg.owner_of(7, T0 + 2) == "alpha"
+
+
+def test_stale_offer_after_owner_released_returns_false():
+    reg = ConvoyRegistry()
+    reg.claim("alpha", 7, T0)
+    reg.flag_exited("alpha", 7, T0 + 1, exit_bearing_deg=90.0)
+    reg.offer_to(7, "bravo", T0 + 1)
+    # The owner released the convoy (e.g. lost it) before bravo accepted: the
+    # offer is rescinded with the owner -> accept is a False race, not an error.
+    reg.release("alpha", 7, T0 + 2, serviced=False)
+    assert reg.accept_offer("bravo", 7, T0 + 3) is False
+    # 7 is back UNCLAIMED (no stale offer leaked); bravo can plain-claim it.
+    assert reg.snapshot(T0 + 3)["offered"] == {}
+    assert reg.claim("bravo", 7, T0 + 3) is True
+
+
+def test_expire_clears_handover_state():
+    reg = ConvoyRegistry(lock_ttl_s=10.0)
+    reg.claim("alpha", 7, T0)
+    reg.flag_exited("alpha", 7, T0 + 1, exit_bearing_deg=90.0)
+    reg.offer_to(7, "bravo", T0 + 1)
+    # alpha drops Wi-Fi: the lock expires, taking the flag + offer with it.
+    assert reg.expire(T0 + 12) == [7]
+    snap = reg.snapshot(T0 + 12)
+    assert snap["exited_zone"] == [] and snap["offered"] == {}
+    assert reg.flagged_exits(T0 + 12) == []
+
+
+def test_offer_to_unflagged_or_self_raises():
+    reg = ConvoyRegistry()
+    reg.claim("alpha", 7, T0)
+    # Not flagged exited -> not offerable (matcher bug).
+    with pytest.raises(RegistryError):
+        reg.offer_to(7, "bravo", T0 + 1)
+    reg.flag_exited("alpha", 7, T0 + 1, exit_bearing_deg=90.0)
+    # Cannot offer a convoy to its own owner.
+    with pytest.raises(RegistryError):
+        reg.offer_to(7, "alpha", T0 + 1)
+
+
+def test_concurrent_accept_offer_exactly_one_winner():
+    """The offeree's own threads racing accept_offer must transfer exactly once;
+    a non-offeree thread never wins. Kills a 'transfer to any claimer' mutation."""
+    reg = ConvoyRegistry()
+    reg.claim("alpha", 7, T0)
+    reg.flag_exited("alpha", 7, T0 + 1, exit_bearing_deg=90.0)
+    reg.offer_to(7, "bravo", T0 + 1)
+    winners = []
+    barrier = threading.Barrier(16)
+
+    def race(name: str) -> None:
+        barrier.wait()
+        if reg.accept_offer(name, 7, T0 + 2):
+            winners.append(name)
+
+    # 8 bravo threads (the offeree) + 8 charlie threads (a non-offeree).
+    names = [("bravo" if i % 2 == 0 else "charlie") for i in range(16)]
+    threads = [threading.Thread(target=race, args=(n,)) for n in names]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert winners == ["bravo"], f"exactly one bravo win, got {winners}"
+    assert reg.owner_of(7, T0 + 2) == "bravo"
+
+
+def test_flagged_exits_skips_stale_owner():
+    reg = ConvoyRegistry(lock_ttl_s=10.0)
+    reg.claim("alpha", 7, T0)
+    reg.flag_exited("alpha", 7, T0 + 1, exit_bearing_deg=45.0)
+    # In-window: the flagged exit is reported with its bearing + owner.
+    assert reg.flagged_exits(T0 + 2) == [(7, "alpha", 45.0, None)]
+    # Past the ttl with no renew: the owner is effectively LOST -> not reported
+    # (a dropped drone's flag never triggers a phantom handover).
+    assert reg.flagged_exits(T0 + 20) == []
+
+
+def test_flag_exited_bad_bearing_raises():
+    reg = ConvoyRegistry()
+    reg.claim("alpha", 7, T0)
+    for bad in (float("inf"), float("nan"), True, "north"):
+        with pytest.raises(RegistryError):
+            reg.flag_exited("alpha", 7, T0 + 1, exit_bearing_deg=bad)

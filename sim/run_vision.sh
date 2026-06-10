@@ -456,6 +456,43 @@ dyn5() {                   # mode: normal | kill (LOST->re-claim drill)
   stageB3 "$secs" "$mode"
 }
 
+# ============================================================
+# WS-7A: SOFT-ZONE HANDOVER (the user's stretch). Identical dynamic flight rig
+# to dyn3 (convoy_3lane, 3 drones, track_convoy dynamic, shared ConvoyRegistry)
+# but the config adds per-drone advisory SECTORS (sitl3_handover_vision.json +
+# arena sitl_handover). The demo: a car drives a slow ARC that carries it OUT of
+# its owner's wedge and INTO an idle neighbour's wedge mid-run. Expected
+# behaviour in the heartbeat (convoys block) + mission.jsonl:
+#   1. the owner FLAGS the convoy exited_zone (it KEEPS tracking) — snapshot
+#      "exited_zone": [<id>];
+#   2. the orchestrator matcher logs convoy_handover_offered (from->to) and the
+#      snapshot shows "offered": {"<id>": "<neighbour>"};
+#   3. the idle neighbour claims it -> ownership in "in_flight" moves to the
+#      neighbour; the original owner re-acquires (its give-up line counts a
+#      handover, not a loss).
+# If NO neighbour is idle, the convoy stays flagged with its owner (still
+# tracked) — the 'keep tracking but flagged' path.
+#
+# CONVOY_ROUTE is a GLOBAL 'dur,v,w; ...' path (v = m/s forward, w = rad/s yaw)
+# applied to every driven car (sim/convoy_driver.py --route). The default below
+# = drive straight ~30 s (cars settle in their own wedges, each drone claims its
+# lane car), then a sustained LEFT yaw (w>0 = CCW) that swings the cars' heading
+# so a car crosses a wedge boundary into the neighbour's sector, then straight
+# again. SLOW so track_convoy keeps the car centred through the turn. The exact
+# turn that crosses a boundary depends on the gz spawn bearings + the wedge
+# centres in sitl3_handover_vision.json — VM-TUNE the route + the sector_deg
+# wedges together at gate F (config only, never code).
+# ============================================================
+handover3() {
+  VWORLD=convoy_3lane
+  VCONFIG=finals/configs/sitl3_handover_vision.json
+  LAUNCH_POSES=( "${LANES3_POSES[@]}" )
+  export CONVOY_IDS="7 23 88" \
+         CONVOY_LINEAR="${CONVOY_LINEAR:-0.06}" CONVOY_DELAY="${CONVOY_DELAY:-150}" \
+         CONVOY_ROUTE="${CONVOY_ROUTE:-30,0.06,0.0; 40,0.05,0.18; 60,0.06,0.0}"
+  stageB3 "${1:-360}" normal
+}
+
 case "${1:-}" in
   install-model) install_model ;;
   bridge)        shift; bridge "$@" ;;
@@ -476,5 +513,7 @@ case "${1:-}" in
   dyn3-gui)      shift; export GZ_GUI=1; dyn3 "${1:-360}" ;;
   dyn5)          shift; dyn5 "${1:-420}" normal ;;               # WS-5 5-car contention
   dyn5-kill)     shift; dyn5 "${1:-420}" kill ;;                 # WS-5 LOST->re-claim drill
-  *) echo "usage: $0 {install-model|bridge --topic T [--port P]|stop-bridge|stageA [secs]|stageB [secs]|probe3 [secs]|stageB3 [secs]|abort3 [secs]|kill3 [secs]|stageB3-stop|lanes3 [secs]|track3 [secs]|lanes3-gui [secs]|track3-gui [secs]|dyn3 [secs]|dyn3-gui [secs]|dyn5 [secs]|dyn5-kill [secs]}" >&2; exit 64 ;;
+  handover3)     shift; handover3 "${1:-360}" ;;                 # WS-7A soft-zone handover
+  handover3-gui) shift; export GZ_GUI=1; handover3 "${1:-360}" ;;
+  *) echo "usage: $0 {install-model|bridge --topic T [--port P]|stop-bridge|stageA [secs]|stageB [secs]|probe3 [secs]|stageB3 [secs]|abort3 [secs]|kill3 [secs]|stageB3-stop|lanes3 [secs]|track3 [secs]|lanes3-gui [secs]|track3-gui [secs]|dyn3 [secs]|dyn3-gui [secs]|dyn5 [secs]|dyn5-kill [secs]|handover3 [secs]|handover3-gui [secs]}" >&2; exit 64 ;;
 esac

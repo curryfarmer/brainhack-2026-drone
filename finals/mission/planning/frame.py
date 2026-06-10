@@ -122,6 +122,46 @@ def bearing_from_c2_deg(point_m: Point, c2_origin_m: Point) -> float:
     return _wrap180(math.degrees(math.atan2(-d_east, d_north)))
 
 
+def bearing_in_sector(bearing_deg: float,
+                      sector_center_deg: float,
+                      sector_half_width_deg: float) -> bool:
+    """ADVISORY-ONLY angular wedge test: is a heading (deg, CCW+, 0 = +north,
+    the Sighting.bearing_deg / bearing_from_c2_deg convention) inside a sector?
+
+    The pure-angle core of in_sector(), exposed for POSITION-BLIND callers
+    (track_convoy on real HULA: pos_quality is NONE, so there is no NED point —
+    only the sighting's bearing). A heading is IN the wedge iff the shortest
+    wrapped angular gap to `sector_center_deg` is <= the half-width. CLOSED on
+    the boundary (generous, never a hard cut — same as in_sector). A half-width
+    >= 180 is "the whole circle" -> always True; a negative / non-finite
+    half-width or a non-finite centre/bearing is a config bug -> ConfigError
+    (a silent always-False sector would strand a drone).
+    """
+    if (not isinstance(sector_half_width_deg, (int, float))
+            or isinstance(sector_half_width_deg, bool)
+            or not math.isfinite(sector_half_width_deg)
+            or sector_half_width_deg < 0):
+        raise ConfigError(
+            f"bearing_in_sector: sector_half_width_deg must be a finite number "
+            f">= 0 (degrees, the wedge half-angle), got {sector_half_width_deg!r}")
+    if (not isinstance(sector_center_deg, (int, float))
+            or isinstance(sector_center_deg, bool)
+            or not math.isfinite(sector_center_deg)):
+        raise ConfigError(
+            f"bearing_in_sector: sector_center_deg must be a finite number "
+            f"(deg, CCW+), got {sector_center_deg!r}")
+    if (not isinstance(bearing_deg, (int, float))
+            or isinstance(bearing_deg, bool)
+            or not math.isfinite(bearing_deg)):
+        raise ConfigError(
+            f"bearing_in_sector: bearing_deg must be a finite number "
+            f"(deg, CCW+), got {bearing_deg!r}")
+    if sector_half_width_deg >= 180.0:
+        return True
+    delta = abs(_wrap180(float(bearing_deg) - float(sector_center_deg)))
+    return delta <= sector_half_width_deg
+
+
 def in_sector(point_m: Point,
               c2_origin_m: Point,
               sector_center_deg: float,
@@ -145,30 +185,21 @@ def in_sector(point_m: Point,
     sector would strand a drone). The point exactly AT C2 has no bearing and is
     treated as IN every sector (it is the shared origin).
     """
-    if (not isinstance(sector_half_width_deg, (int, float))
-            or isinstance(sector_half_width_deg, bool)
-            or not math.isfinite(sector_half_width_deg)
-            or sector_half_width_deg < 0):
-        raise ConfigError(
-            f"in_sector: sector_half_width_deg must be a finite number >= 0 "
-            f"(degrees, the wedge half-angle), got {sector_half_width_deg!r}")
-    if (not isinstance(sector_center_deg, (int, float))
-            or isinstance(sector_center_deg, bool)
-            or not math.isfinite(sector_center_deg)):
-        raise ConfigError(
-            f"in_sector: sector_center_deg must be a finite number "
-            f"(deg, CCW+), got {sector_center_deg!r}")
-    if sector_half_width_deg >= 180.0:
-        return True
     # The shared origin has no defined bearing; it belongs to every drone's
-    # wedge (it is where they all boot). Short-circuit so an at-C2 estimate is
-    # never spuriously flagged outside a narrow sector (bearing_from_c2_deg
-    # returns 0.0 there, which a non-zero-centred wedge would reject).
-    if point_m[0] == c2_origin_m[0] and point_m[1] == c2_origin_m[1]:
-        return True
-    bearing = bearing_from_c2_deg(point_m, c2_origin_m)
-    delta = abs(_wrap180(bearing - float(sector_center_deg)))
-    return delta <= sector_half_width_deg
+    # wedge (it is where they all boot). bearing_from_c2_deg returns 0.0 there,
+    # which a non-zero-centred narrow wedge would wrongly reject — so AT C2 we
+    # feed the centre heading (guaranteed inside) instead of 0.0. Everywhere
+    # else we feed the real bearing-from-C2. The validation + wedge math (incl.
+    # the half-width >= 180 = whole-circle short-circuit) lives in
+    # bearing_in_sector — ONE source of truth, so a malformed sector still
+    # raises ConfigError even AT C2.
+    at_c2 = (point_m[0] == c2_origin_m[0] and point_m[1] == c2_origin_m[1])
+    bearing = (float(sector_center_deg)
+               if at_c2 and isinstance(sector_center_deg, (int, float))
+               and not isinstance(sector_center_deg, bool)
+               and math.isfinite(sector_center_deg)
+               else bearing_from_c2_deg(point_m, c2_origin_m))
+    return bearing_in_sector(bearing, sector_center_deg, sector_half_width_deg)
 
 
 def _wrap180(angle_deg: float) -> float:

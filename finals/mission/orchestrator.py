@@ -107,6 +107,7 @@ class Orchestrator:
                  swarm_guards: Sequence[Guard] = (),
                  abort_event: Optional[threading.Event] = None,
                  convoy_registry: Optional["ConvoyRegistry"] = None,
+                 drone_sectors: Optional[Dict[str, Sequence[float]]] = None,
                  clock: Callable[[], float] = time.monotonic):
         if not isinstance(agents, list) or not agents \
                 or not all(isinstance(a, DroneAgent) for a in agents):
@@ -157,6 +158,12 @@ class Orchestrator:
         # beat so a drone that dropped Wi-Fi frees its convoy; snapshotted into
         # the heartbeat as the swarm-wide ownership view.
         self._registry = convoy_registry
+        # WS-7A soft-zone handover: per-drone assigned sector
+        # {drone_id: (center_deg, half_width_deg)}, used by the per-tick matcher
+        # to find which idle neighbour a flagged-exited convoy entered. Empty/
+        # None = no soft-zoning (the matcher is a no-op). Validated loud: a
+        # sector for an unknown drone or a malformed wedge is a wiring bug.
+        self._drone_sectors = self._validate_sectors(drone_sectors, ids)
         self._clock = clock
 
         # Per-run counters (reset by run(); instance state, never module
@@ -175,6 +182,44 @@ class Orchestrator:
         # request_stop_threadsafe plumbing — set by run(), used cross-thread.
         self._loop_ref: Optional[asyncio.AbstractEventLoop] = None
         self._stop_ref: Optional[asyncio.Event] = None
+
+    @staticmethod
+    def _validate_sectors(drone_sectors: Optional[Dict[str, Sequence[float]]],
+                          ids: Sequence[str]) -> Dict[str, tuple]:
+        """Validate the optional per-drone sector map and normalize to
+        {drone_id: (center_deg, half_width_deg)}. None/empty -> {} (no
+        soft-zoning). A sector for an unknown drone, a wrong-length entry, or a
+        non-finite / negative-half-width value is a wiring bug -> ValueError
+        (loud, like every other constructor guard here)."""
+        if not drone_sectors:
+            return {}
+        if not isinstance(drone_sectors, dict):
+            raise ValueError(
+                f"Orchestrator: drone_sectors must be a dict "
+                f"{{drone_id: [center_deg, half_width_deg]}} or None, got "
+                f"{type(drone_sectors).__name__!r} — check the main.py wiring")
+        known = set(ids)
+        out: Dict[str, tuple] = {}
+        for did, sec in drone_sectors.items():
+            if did not in known:
+                raise ValueError(
+                    f"Orchestrator: drone_sectors has an entry for {did!r} which "
+                    f"is not one of the agents {sorted(known)} — check the "
+                    f"main.py sector wiring")
+            if (not isinstance(sec, (list, tuple)) or len(sec) != 2
+                    or any(not isinstance(v, (int, float))
+                           or isinstance(v, bool) or not math.isfinite(v)
+                           for v in sec)):
+                raise ValueError(
+                    f"Orchestrator: drone_sectors[{did!r}]={sec!r} must be "
+                    f"[center_deg, half_width_deg] (two finite numbers, deg) — "
+                    f"check the config sector_deg")
+            if sec[1] < 0:
+                raise ValueError(
+                    f"Orchestrator: drone_sectors[{did!r}] half_width_deg="
+                    f"{sec[1]!r} must be >= 0 — a negative wedge matches nothing")
+            out[did] = (float(sec[0]), float(sec[1]))
+        return out
 
     # ---------------- logging helpers (never let forensics kill flight) ----
     def _log_mission(self, event: str, **data) -> None:
@@ -338,6 +383,10 @@ class Orchestrator:
                                           convoy_ids=lost,
                                           note="no heartbeat for lock_ttl_s — "
                                                "freed for re-claim")
+                        # WS-7A: after expire (so a just-freed convoy is not
+                        # offered), match flagged-exited convoys to idle
+                        # neighbours. Wrapped by the same tick-body net below.
+                        self._match_handovers(now)
                     self._drain_bus()
                     self._last_tick_latency_s = time.perf_counter() - t0
                     self._write_heartbeat(now, stop.is_set())
@@ -451,6 +500,77 @@ class Orchestrator:
         self._print_summary()
 
     # ---------------- per-tick work ----------------
+    def _match_handovers(self, now: float) -> None:
+        """WS-7A soft-zone matcher — runs each beat beside expire(). For every
+        convoy a drone flagged as having left its sector, find the IDLE neighbour
+        whose sector the convoy ENTERED (from the flagged exit bearing) and offer
+        it the convoy; the neighbour's acquire loop takes it via claim(). If no
+        idle neighbour's sector contains the bearing, the convoy stays flagged
+        and its original owner keeps tracking (the 'keep tracking but flagged'
+        path). No-op without a registry, a sector map, or any flagged exit.
+
+        'Idle' = owns NOTHING in the registry (inferred from owner_of over the
+        known ids — no agent.py change). Offering is idempotent (re-offering the
+        same neighbour just refreshes); a convoy already offered to a still-idle,
+        still-matching neighbour is left alone."""
+        if self._registry is None or not self._drone_sectors:
+            return
+        from finals.mission.planning.frame import bearing_in_sector
+        flagged = self._registry.flagged_exits(now)
+        if not flagged:
+            return
+        idle = self._idle_drones(now)
+        for convoy_id, owner, exit_bearing, offered_to in flagged:
+            if exit_bearing is None:
+                continue                   # owner had no bearing to match on
+            target = self._neighbour_for(exit_bearing, owner, idle,
+                                         bearing_in_sector)
+            if target is None:
+                continue                   # nobody idle owns that wedge -> stay
+            if target == offered_to:
+                continue                   # already offered to this neighbour
+            try:
+                self._registry.offer_to(convoy_id, target, now)
+            except Exception:
+                # A matcher race (the owner re-entered / lost the lock between
+                # flagged_exits and offer_to) must never down the supervision
+                # loop; log with traceback and move on. The convoy stays where
+                # it is and is retried next beat.
+                self._net(f"handover offer convoy {convoy_id} -> {target}")
+                continue
+            self._try_log(_MISSION_ID, "convoy_handover_offered",
+                          convoy_id=convoy_id, from_drone=owner,
+                          to_drone=target, exit_bearing_deg=round(exit_bearing, 2),
+                          note="convoy left owner's sector; offered to an idle "
+                               "neighbour whose sector it entered")
+            # The offeree only TRANSFERS the lock on its own next acquire (claim
+            # honours the offer); the original owner releases then. We do NOT
+            # force-release here — the owner keeps tracking until the handover
+            # actually completes, so a never-taken offer never strands a convoy.
+
+    def _idle_drones(self, now: float) -> set:
+        """The drones that own NO convoy right now (the handover candidates).
+        Inferred from the registry snapshot's in_flight map (drone -> convoy),
+        so no agent.py state is read. A drone with a sector but no current lock
+        is idle."""
+        snap = self._registry.snapshot(now)
+        busy = set(snap.get("in_flight", {}).values())
+        return {did for did in self._drone_sectors if did not in busy}
+
+    def _neighbour_for(self, bearing_deg: float, owner: Optional[str],
+                       idle: set, in_sector_fn: Callable) -> Optional[str]:
+        """The idle drone (other than `owner`) whose sector CONTAINS the exit
+        bearing — the neighbour the convoy entered. None if no idle drone's wedge
+        covers it. Deterministic: ids checked in sorted order, first match wins
+        (sectors should not overlap, but a tie must be stable)."""
+        for did in sorted(idle):
+            if did == owner:
+                continue
+            center, half = self._drone_sectors[did]
+            if in_sector_fn(bearing_deg, center, half):
+                return did
+        return None
+
     def _drain_bus(self) -> None:
         """Seq-cursor drain (lossless by construction — see SightingBus):
         every sighting published since the last tick, logged exactly once."""
