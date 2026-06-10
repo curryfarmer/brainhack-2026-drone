@@ -1,1 +1,1 @@
-yolov10n.pt
+models/pad_v1.pt
