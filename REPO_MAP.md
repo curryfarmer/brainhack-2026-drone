@@ -37,3 +37,4 @@ notebooks), **drone smokes** (`get_*.py`, `takeoff_and_land.py`, `basic_offboard
 - `finals/docs/module_map.md` — per-module status table (start-here for a finals session).
 - `docs/finals/onsite_test_plan.md` — the 2-hour window runbook (preflight P0–P10, gates A–G).
 - `docs/finals/smokes.md` — smoke-test catalog (SIM-SITL / ONSITE-HARDWARE / PRECOMP).
+- `docs/finals/e2e_coverage.md` — what is software-proven (1689 green) vs VM/cage-only gates.
