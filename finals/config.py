@@ -86,10 +86,11 @@ VALID_ARUCO_PARAM_KEYS = frozenset((
     "minSideLengthCanonicalImg", "minMarkerLengthRatioOriginalImg",
 ))
 # Optional DEPTH seam (SENSE-IR). "none" = the monocular HULA swarm path —
-# degrade-absent, mission logic must never require depth. SENSE-IR extends this
-# tuple when a real DepthSource backend is confirmed (the example_code RealSense
-# is the MAPPING drone, not this swarm). Reserved here as a Step 0 contract.
-VALID_DEPTH_BACKENDS = ("none",)
+# degrade-absent, mission logic must never require depth. "fake" = the
+# dependency-free FakeDepthSource (SITL/test rig; exercises the seam without an
+# SDK). A real "realsense" backend stays OUT (the example_code RealSense is the
+# MAPPING drone, not this swarm) — added only the day the swarm carries depth.
+VALID_DEPTH_BACKENDS = ("none", "fake")
 
 # Each profile pins its flight backend — both appear in the JSON so a human
 # reading the file sees the whole story, and the loader cross-checks them so a
@@ -151,6 +152,15 @@ class GuardsConfig:
     launch_slot_wait_s: float = 120.0       # max wait for the C2 launch
                                             # corridor slot (NAV-8 staggered
                                             # launch); bounded, never infinite
+    # SENSE-IR ProximityGuard (the HULA 4-directional IR obstacle sensor ->
+    # advisory->LAND ladder). OFF by default: a synthetic IR feed is wired in
+    # SITL/tests and the LIVE pyhulax IR read is an ONSITE gate (pyhulax exposes
+    # no IR getter today — see finals/flight/pyhulax_adapter.py). land_cm must be
+    # < warn_cm (clear -> warn -> land as an obstacle approaches); both in the
+    # ~30-50 cm sensor window.
+    proximity_enable: bool = False
+    proximity_warn_cm: float = 40.0         # ADVISORY at/under this range
+    proximity_land_cm: float = 25.0         # LAND_THIS at/under this range
 
 
 @dataclass
@@ -453,7 +463,8 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
                   "landing_reserve_s", "phase_timeout_s", "geofence_radius_m",
                   "geofence_alt_m", "loop_overrun_factor", "loop_overrun_ticks",
                   "land_retry_period_s", "land_retry_window_s", "slot_wait_s",
-                  "launch_slot_wait_s"),
+                  "launch_slot_wait_s", "proximity_enable", "proximity_warn_cm",
+                  "proximity_land_cm"),
         where=f"{path}: guards",
     )
     guards = GuardsConfig(**guards_data)
@@ -1016,3 +1027,19 @@ def _validate_guards(cfg: FinalsConfig) -> None:
             f"ladder would never retry")
     _num("slot_wait_s", g.slot_wait_s)
     _num("launch_slot_wait_s", g.launch_slot_wait_s)
+    # SENSE-IR ProximityGuard. Validate the thresholds even when disabled, so a
+    # bad value is caught on the ground (--dry-run) the moment someone enables
+    # it — not on the first IR tick mid-flight (the weights-guard philosophy).
+    if not isinstance(g.proximity_enable, bool):
+        raise ConfigError(
+            f"guards.proximity_enable must be a bool (the SENSE-IR IR "
+            f"obstacle guard on/off), got {g.proximity_enable!r}")
+    _num("proximity_warn_cm", g.proximity_warn_cm)
+    _num("proximity_land_cm", g.proximity_land_cm)
+    if g.proximity_land_cm >= g.proximity_warn_cm:
+        raise ConfigError(
+            f"guards.proximity_land_cm ({g.proximity_land_cm}) >= "
+            f"proximity_warn_cm ({g.proximity_warn_cm}) — the LAND hard-stop "
+            f"must be CLOSER than the ADVISORY warning (the ladder goes "
+            f"clear -> warn -> land as an obstacle approaches); swap/fix the "
+            f"two IR ranges")

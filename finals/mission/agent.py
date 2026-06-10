@@ -65,6 +65,14 @@ Surface (S4, implemented):
   PerceptionLoop.shed, whose contract is to NEVER raise (anything else
   raising from the hook propagates to the orchestrator's net like any
   agent bug — fail loud).
+- IR proximity plumbing (SENSE-IR): proximity_fn (when wired) feeds the
+  latest HULA 4-directional IR ProximityReading into
+  GuardContext.proximity each guard evaluation — the ProximityGuard's
+  input. Same injectable shape as frame_ts_fn: a callable returning the
+  latest reading (or None when no IR feed exists — degrade-absent). The
+  reading must share the agent's monotonic clock domain for its ts to be
+  meaningful (the synthetic feed stamps with the same time.monotonic;
+  tests inject a fixed reading directly).
 - SafetyController (S5): when wired, Land commands (phase-commanded and
   the final descent) route through it — the landing slot (at most one
   NORMAL landing at a time) plus the bounded land-retry ladder. That path
@@ -121,8 +129,8 @@ from typing import Callable, List, Optional, Sequence
 from finals.errors import FlightError, FlightTimeout, SensorTimeout
 from finals.events import EventLog
 from finals.flight.adapter import FlightAdapter
-from finals.guards import (Guard, GuardContext, SafetyController, Trip,
-                           TripAction, evaluate_guards)
+from finals.guards import (Guard, GuardContext, ProximityReading,
+                           SafetyController, Trip, TripAction, evaluate_guards)
 from finals.mission.phase import AgentContext, MissionPhase
 from finals.sightings import SightingBus
 from finals.types import (Abort, Action, Done, Hover, Land, Move, Rotate,
@@ -159,6 +167,8 @@ class DroneAgent:
                  safety: Optional[SafetyController] = None,
                  frame_ts_fn: Optional[Callable[[], Optional[float]]] = None,
                  on_degrade: Optional[Callable[[Trip], None]] = None,
+                 proximity_fn: Optional[
+                     Callable[[], "Optional[ProximityReading]"]] = None,
                  hold_poll_s: float = 0.5,
                  clock: Callable[[], float] = time.monotonic):
         if not isinstance(drone_id, str) or not drone_id:
@@ -197,12 +207,13 @@ class DroneAgent:
                 f"or None, got {type(safety).__name__!r} — check the main.py "
                 f"wiring")
         for hook_name, hook in (("frame_ts_fn", frame_ts_fn),
-                                ("on_degrade", on_degrade)):
+                                ("on_degrade", on_degrade),
+                                ("proximity_fn", proximity_fn)):
             if hook is not None and not callable(hook):
                 raise ValueError(
                     f"DroneAgent({drone_id!r}): {hook_name} must be callable "
-                    f"or None, got {hook!r} — check the main.py vision "
-                    f"wiring (S7)")
+                    f"or None, got {hook!r} — check the main.py vision/IR "
+                    f"wiring (S7 / SENSE-IR)")
 
         self.drone_id = drone_id
         self._adapter = adapter
@@ -216,6 +227,7 @@ class DroneAgent:
         self._safety = safety
         self._frame_ts_fn = frame_ts_fn
         self._on_degrade = on_degrade
+        self._proximity_fn = proximity_fn
         self._hold_poll_s = float(hold_poll_s)
         self._clock = clock
 
@@ -379,7 +391,10 @@ class DroneAgent:
                                      else None),
                     last_frame_ts=(self._frame_ts_fn()
                                    if self._frame_ts_fn is not None
-                                   else None)))
+                                   else None),
+                    proximity=(self._proximity_fn()
+                               if self._proximity_fn is not None
+                               else None)))
                 if trips:
                     worst = max(trips, key=lambda tr: tr.action)
                     for tr in trips:
