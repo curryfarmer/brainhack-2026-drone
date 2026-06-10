@@ -24,11 +24,20 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, Sequence, Tuple
+from typing import Any, Dict, FrozenSet, Optional, Sequence, Tuple
 
 from finals.errors import ConfigError
 
 Point = Tuple[float, float]  # (north_m, east_m)
+
+#: The five STATIC field-beacon ArUco ids the organizers published (2026-06-10;
+#: docs/field_markers.md). NAV-FIX exposes this as a SOFT, OPT-IN config rule —
+#: `ArenaMap.from_dict(..., known_marker_ids=KNOWN_FIELD_MARKER_IDS)` rejects any
+#: marker id outside the set, catching a fat-fingered beacon-coordinate paste at
+#: gate D. DEFAULT (known_marker_ids=None) imposes NO restriction so the sim
+#: arenas + the test fixtures (which use placeholder ids like 7) stay green; the
+#: real landing arena opts in. (We OWN Marker — this never touches Gate.)
+KNOWN_FIELD_MARKER_IDS: FrozenSet[int] = frozenset({11, 45, 51, 67, 101})
 
 
 # ============================================================
@@ -180,7 +189,14 @@ class Marker:
     point_m: Point
 
     @classmethod
-    def from_dict(cls, raw: Any, index: int) -> "Marker":
+    def from_dict(cls, raw: Any, index: int,
+                  known_ids: "Optional[FrozenSet[int]]" = None) -> "Marker":
+        """Parse one marker dict. `known_ids` is the NAV-FIX SOFT, OPT-IN rule:
+        when a frozenset is supplied (the real arena passes
+        KNOWN_FIELD_MARKER_IDS), an id outside it is a loud ConfigError —
+        catching a mistyped beacon coordinate before it anchors a wrong
+        position-fix or a wrong landing region. DEFAULT None = no restriction
+        (sim arenas / test fixtures with placeholder ids stay valid)."""
         where = f"arena.markers[{index}]"
         data = _arena_keys(raw, required=("id", "point_m"), optional=(),
                            where=where)
@@ -189,6 +205,13 @@ class Marker:
             raise ConfigError(
                 f"{where}.id must be an int ArUco marker id (the beacon code, "
                 f"e.g. 11/45/51/67/101), got {mid!r}")
+        if known_ids is not None and mid not in known_ids:
+            raise ConfigError(
+                f"{where}.id {mid} is not one of the known field-beacon ids "
+                f"{sorted(known_ids)} — this arena opted into the strict "
+                f"known-marker rule (KNOWN_FIELD_MARKER_IDS). Fix the id (a "
+                f"mistyped beacon would anchor a wrong position-fix / landing "
+                f"region) or drop the strict rule for this arena.")
         return cls(id=mid, point_m=_point(data["point_m"], f"{where}.point_m"))
 
 
@@ -252,14 +275,37 @@ class ArenaMap:
     gates: Tuple[Gate, ...] = ()       # NAV-ARCH: traversable arch openings (Step 0)
 
     @classmethod
-    def from_dict(cls, raw: Any, *, name: str) -> "ArenaMap":
+    def from_dict(cls, raw: Any, *, name: str,
+                  known_marker_ids: "Optional[FrozenSet[int]]" = None
+                  ) -> "ArenaMap":
+        """Parse + HARDEN an arena map (see the NAV-2 semantic rules below).
+
+        NAV-FIX known-marker rule (SOFT, OPT-IN), resolved in priority order:
+        (1) an explicit `known_marker_ids` arg from a caller wins; else
+        (2) a top-level JSON key `"strict_marker_ids": true` opts the arena into
+            KNOWN_FIELD_MARKER_IDS (the real field-arena config self-declares
+            this so a mistyped beacon id fails at gate D).
+        With NEITHER, there is NO restriction (sim arenas + fixtures, which use
+        placeholder ids, stay valid)."""
         where = f"arena {name!r}"
         data = _arena_keys(
             raw,
             required=("bounds_m", "c2_origin_m", "c2_heading_deg"),
-            optional=("keep_out", "pads", "lanes", "markers", "gates"),
+            optional=("keep_out", "pads", "lanes", "markers", "gates",
+                      "strict_marker_ids"),
             where=where,
         )
+        # Resolve the known-marker rule: explicit arg wins; else honour the
+        # JSON opt-in flag. A non-bool flag is a config bug (loud).
+        if known_marker_ids is None and "strict_marker_ids" in data:
+            flag = data["strict_marker_ids"]
+            if not isinstance(flag, bool):
+                raise ConfigError(
+                    f"{where}.strict_marker_ids must be a boolean (true opts "
+                    f"into the known field-beacon id rule "
+                    f"{sorted(KNOWN_FIELD_MARKER_IDS)}), got {flag!r}")
+            if flag:
+                known_marker_ids = KNOWN_FIELD_MARKER_IDS
         bounds = data["bounds_m"]
         if (not isinstance(bounds, (list, tuple)) or len(bounds) != 4
                 or any(not isinstance(c, (int, float)) or isinstance(c, bool)
@@ -298,7 +344,7 @@ class ArenaMap:
                   for j, pt in enumerate(_as_list(line, f"{where}.lanes[{i}]")))
             for i, line in enumerate(lanes_raw)
         )
-        markers = tuple(Marker.from_dict(m, i)
+        markers = tuple(Marker.from_dict(m, i, known_ids=known_marker_ids)
                         for i, m in enumerate(_as_list(
                             data.get("markers", []), f"{where}.markers")))
         gates = tuple(Gate.from_dict(g, i)

@@ -365,14 +365,14 @@ def test_from_config_unknown_pad_id_lists_available():
 
 
 def test_from_config_neither_goal_source_fails():
-    with pytest.raises(ConfigError, match="NEITHER"):
+    with pytest.raises(ConfigError, match="sets NO goal"):
         Navigate.from_config(_drone({"navigate": {"inflation_m": 0.5}}),
                              _cfg(_arena()))
 
 
 def test_from_config_both_goal_sources_fails():
     arena = _arena(pads=[_pad("H1", (3.0, 4.0))])
-    with pytest.raises(ConfigError, match="BOTH"):
+    with pytest.raises(ConfigError, match="MULTIPLE goal sources"):
         Navigate.from_config(
             _drone({"navigate": {"pad_id": "H1", "goal_ne_m": [1.0, 1.0]}}),
             _cfg(arena))

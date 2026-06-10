@@ -42,9 +42,11 @@ finals/docs/module_map.md (S11 NAV map-sensing row). PURE: stdlib only.
 from __future__ import annotations
 
 import math
-from typing import Dict, Sequence, Tuple
+from typing import Dict, Iterable, Optional, Sequence, Tuple
 
-from finals.mission.planning.types import KeepOut, Point
+from finals.mission.planning.types import KeepOut, Marker, Point
+
+Bounds = Tuple[float, float, float, float]  # (north_min, east_min, north_max, east_max)
 
 # Each call lists the function's onsite gate / data source in its docstring so a
 # future session does not have to re-derive the interface.
@@ -67,10 +69,18 @@ def position_fix_from_marker(marker_world_m: Point, bearing_deg: float,
                         + altitude by similar triangles), metres.
 
     Returns the drone's (north_m, east_m). Geometry uses the project heading
-    convention (visibility_graph): a step of range r at compass bearing b
-    advances (dN, dE) = (r*cos b, -r*sin b). The marker sits at that offset FROM
-    the drone, so the drone is the marker MINUS it:
-        drone = (M_n - r*cos b, M_e + r*sin b).
+    convention — SAME source of truth as flight/dead_reckon.py's FORWARD map:
+    at heading theta, a FORWARD step of d advances (dN, dE) = (d*cos theta,
+    -d*sin theta) (dead_reckon `_integrate_move`, psi_NED = -yaw_deg). A
+    sighting at absolute compass bearing b is the drone "facing b and looking
+    forward" at the marker, so the marker sits at that FORWARD offset FROM the
+    drone:  M = drone + (r*cos b, -r*sin b).  Inverting:
+        drone = M - (r*cos b, -r*sin b) = (M_n - r*cos b, M_e + r*sin b).
+    SIGN CHECK (pinned by test_map_sensing 3-4-5 + due-north/east fixtures): a
+    marker due NORTH (b=0) of a drone at origin -> M=(r,0) -> drone=(r-r, 0)=
+    origin; a marker due EAST (b=-90, since dE=-r*sin b>0) -> drone=origin. A
+    flipped sign on EITHER term moves the recovered pose to the wrong side and
+    those fixtures go red (mutation kill-check (a)).
 
     Fail loud on non-finite / negative range (a degenerate fix would silently
     teleport the dead-reckoner). PURE — the cv2 decode + range estimate are the
@@ -123,6 +133,100 @@ def keep_outs_from_overhead_corners(
         ko = KeepOut.from_dict({"id": cid, "polygon_m": list(ring)}, index=cid)
         out.append(ko)
     return tuple(out)
+
+
+def bounds_from_markers_and_cage(
+        markers: "Iterable",
+        cage_bounds_m: Optional[Bounds] = None,
+        *, margin_m: float = 0.0) -> Bounds:
+    """Lever L2 — DERIVE arena bounds_m that PROVABLY enclose every marker (plus
+    an optional surveyed cage rectangle), instead of a footlength guess.
+
+    The 5 field beacons sit at SURVEYED interior coords (docs/field_markers.md
+    L2), so the bounds MUST contain them — that is a ground-truth constraint, not
+    an estimate. This returns the smallest axis-aligned rectangle (then grown by
+    `margin_m`) that covers:
+      * every marker point, AND
+      * the cage rectangle, when a surveyed `cage_bounds_m`
+        (north_min, east_min, north_max, east_max) is supplied.
+    So bounds = union(marker extent, cage) +/- margin. With a cage given, the
+    cage normally dominates (the markers are interior) and the result == the
+    cage grown by margin; passing NO cage yields the tight marker hull (a useful
+    lower bound before the cage tape is measured).
+
+    `markers` is any iterable of Marker (use arena.markers directly) or of
+    (north_m, east_m) pairs. At least one marker is required (an empty hull has
+    no rectangle — refuse loudly rather than return a degenerate bound). margin_m
+    must be finite >= 0. The result is ALWAYS a valid bounds_m (north_min <
+    north_max, east_min < east_max) UNLESS every input collapses to a single
+    point AND margin_m == 0 — that case raises (a zero-area arena), telling the
+    operator to widen the cage or add a margin.
+
+    PURE stdlib. The caller feeds the result into ArenaMap.from_dict, whose
+    NAV-2 markers-within-bounds check then becomes a TAUTOLOGY by construction
+    (the bound was built to contain them) — exactly the "bounds from the markers,
+    not a guess" property. (The full cage rectangle still needs the tape; this
+    pins scale/origin/containment, see field_markers.md L2.)
+    """
+    if (not isinstance(margin_m, (int, float)) or isinstance(margin_m, bool)
+            or not math.isfinite(margin_m) or margin_m < 0):
+        raise ValueError(
+            f"map_sensing.bounds_from_markers_and_cage: margin_m must be a "
+            f"finite number >= 0 (m), got {margin_m!r}")
+    pts = [_marker_point(m) for m in markers]
+    if not pts:
+        raise ValueError(
+            "map_sensing.bounds_from_markers_and_cage: need at least one marker "
+            "to derive bounds (an empty marker set has no extent) — pass the "
+            "field beacons (arena.markers) or a list of [north_m, east_m] pairs")
+    norths = [p[0] for p in pts]
+    easts = [p[1] for p in pts]
+    n_min, n_max = min(norths), max(norths)
+    e_min, e_max = min(easts), max(easts)
+    if cage_bounds_m is not None:
+        c_nmin, c_emin, c_nmax, c_emax = _require_bounds(
+            cage_bounds_m, "cage_bounds_m")
+        n_min, e_min = min(n_min, c_nmin), min(e_min, c_emin)
+        n_max, e_max = max(n_max, c_nmax), max(e_max, c_emax)
+    n_min, e_min = n_min - margin_m, e_min - margin_m
+    n_max, e_max = n_max + margin_m, e_max + margin_m
+    if not (n_min < n_max and e_min < e_max):
+        # All inputs collapsed to a single point and no margin grew it — a
+        # zero-area arena is not flyable. Fail loud (the NAV-2 from_dict would
+        # reject this bound anyway; catch it HERE with an actionable message).
+        raise ValueError(
+            f"map_sensing.bounds_from_markers_and_cage: derived a degenerate "
+            f"(zero-area) bound {(n_min, e_min, n_max, e_max)} — the markers "
+            f"(and cage, if any) are collinear/coincident on an axis and "
+            f"margin_m={margin_m} did not grow it. Supply the cage rectangle or "
+            f"a margin_m > 0.")
+    return (n_min, e_min, n_max, e_max)
+
+
+def _marker_point(m) -> Point:
+    """Accept either a Marker (use its point_m) or a raw (north_m, east_m) pair.
+    Always re-validates finiteness via _require_point: a Marker is normally built
+    by the validated from_dict, but a directly-constructed Marker(id, (nan, 0))
+    would otherwise let a NaN slip into min/max and silently poison the derived
+    bound (NaN < x is always False)."""
+    raw = m.point_m if isinstance(m, Marker) else m
+    return _require_point(raw, "marker point")
+
+
+def _require_bounds(raw, where: str) -> Bounds:
+    if (not isinstance(raw, (list, tuple)) or len(raw) != 4
+            or any(not isinstance(c, (int, float)) or isinstance(c, bool)
+                   or not math.isfinite(c) for c in raw)):
+        raise ValueError(
+            f"map_sensing: {where} must be a finite [north_min, east_min, "
+            f"north_max, east_max] 4-tuple, got {raw!r}")
+    n_min, e_min, n_max, e_max = (float(raw[0]), float(raw[1]),
+                                  float(raw[2]), float(raw[3]))
+    if not (n_min <= n_max and e_min <= e_max):
+        raise ValueError(
+            f"map_sensing: {where} is inverted ({raw!r}) — expected "
+            f"north_min <= north_max and east_min <= east_max")
+    return (n_min, e_min, n_max, e_max)
 
 
 def _require_point(raw, where: str) -> Point:
