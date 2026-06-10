@@ -106,6 +106,35 @@ def test_replay_with_canned_detector_adds_yolo_rows(tmp_path):
     assert {s.marker_id for s in rows if s.source == "aruco"} == {17, 23, 42}
 
 
+def test_replay_canned_pad_detection_matches_pad_servo_contract(tmp_path):
+    """PAD-DETECT data contract: the EXISTING canned/yolo detector backend, fed
+    a scripted 'landing_pad' detection, publishes exactly the Sighting shape the
+    pad servo (land_on_pad servo_on='pad') consumes — source 'yolo', the pad
+    class_name, marker_id None, a real bbox. The model WEIGHTS are a data
+    artifact the user trains; this proves the pipeline that delivers their
+    output to the phase."""
+    script = [{"after_n_submits": 2, "detections": [{
+        "bbox": [250.0, 180.0, 390.0, 300.0], "confidence": 0.88,
+        "class_id": 0, "class_name": "landing_pad"}]}]
+    script_path = tmp_path / "pad_script.json"
+    script_path.write_text(json.dumps(script), encoding="utf-8")
+
+    code = main(["--profile", "replay", "--config", write_replay_config(
+        tmp_path,
+        detector={"backend": "canned", "canned_script": str(script_path)})])
+    assert code == 0
+    rows = csv_rows(only_run_dir(tmp_path))
+    pad_rows = [s for s in rows if s.source == "yolo"]
+    assert len(pad_rows) == 1
+    pad = pad_rows[0]
+    # The exact contract land_on_pad._pad_sightings filters on + servos.
+    assert pad.source == "yolo"
+    assert pad.class_name == "landing_pad"             # in a pad_classes set
+    assert pad.marker_id is None                       # a pad has no marker id
+    assert pad.bbox_xyxy == (250.0, 180.0, 390.0, 300.0)
+    assert pad.confidence == 0.88
+
+
 def test_replay_qr_backend(tmp_path):
     code = main(["--profile", "replay", "--config", write_replay_config(
         tmp_path,

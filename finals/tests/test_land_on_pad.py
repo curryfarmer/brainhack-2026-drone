@@ -40,6 +40,19 @@ def _sighting(marker_id, *, cx=320.0, cy=240.0, half=20.0, frame=(480, 640),
         confidence=1.0, frame_shape=frame)
 
 
+def _pad_sighting(class_name="landing_pad", *, cx=320.0, cy=240.0, half=20.0,
+                  frame=(480, 640), drone_id="alpha", source="yolo",
+                  confidence=0.9):
+    """A YOLO pad-blob Sighting (source 'yolo', marker_id None, class_name the
+    model's pad class) centred at (cx, cy) with a square bbox. This is the
+    PAD-DETECT servo target in servo_on='pad' mode."""
+    return Sighting(
+        drone_id=drone_id, ts=time.monotonic(), source=source,
+        class_name=class_name, marker_id=None,
+        bbox_xyxy=(cx - half, cy - half, cx + half, cy + half),
+        confidence=confidence, frame_shape=frame)
+
+
 def make_ctx(*, sightings=None, altitude_m=2.0, is_flying=True,
              elapsed_s=0.0, last_action=None, last_action_ok=None,
              last_action_error=None, drone_id="alpha"):
@@ -693,3 +706,255 @@ def test_agent_lands_done_on_a_scripted_good_approach(tmp_path):
     # phase_done reason is the VERIFIED landing, not UNVERIFIED.
     phase = land
     assert phase._fallback_reason is None
+
+
+# ============================================================
+# PAD-DETECT — servo_on="pad" (YOLO pad-class servo) target selection,
+# config validation, and a canned/scripted pad-sighting E2E.
+# ============================================================
+def _pad_phase(**kw):
+    """A LandOnPad in pad-servo mode with the small _phase defaults. Still needs
+    a valid_marker_ids (the constructor requires one — the beacon validity path
+    is PAD-VALID's, unchanged), but the SERVO geometry comes from the YOLO pad
+    class set."""
+    base = dict(servo_on="pad", pad_classes=["landing_pad"])
+    base.update(kw)
+    return _phase(**base)
+
+
+# ---------------- servo_on / pad_classes config validation ----------------
+def test_servo_on_defaults_to_marker():
+    """Omitting servo_on -> 'marker' (the legacy beacon-bbox behaviour). DEFAULT
+    backward-compat: every existing config that never set servo_on still servos
+    on the marker."""
+    p = _phase()
+    assert p.servo_on == "marker"
+    assert p.pad_classes == frozenset()
+
+
+def test_servo_on_pad_stores_pad_classes_as_frozenset():
+    p = _pad_phase(pad_classes=["landing_pad", "pad_A3"])
+    assert p.servo_on == "pad"
+    assert p.pad_classes == frozenset({"landing_pad", "pad_A3"})
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"servo_on": "Pad"},                    # wrong case
+    {"servo_on": "yolo"},                   # plausible-but-wrong typo
+    {"servo_on": "marker_pad"},
+    {"servo_on": ""},
+    {"servo_on": None},
+    {"servo_on": 1},
+])
+def test_bad_servo_on_is_loud(kwargs):
+    base = dict(valid_marker_ids=[7], pad_classes=["landing_pad"])
+    base.update(kwargs)
+    with pytest.raises(ConfigError, match="servo_on"):
+        LandOnPad(**base)
+
+
+@pytest.mark.parametrize("pad_classes", [
+    None,                                   # missing in pad mode
+    [],                                     # empty in pad mode
+    "landing_pad",                          # a bare string, not a list
+    ["landing_pad", ""],                    # an empty class name
+    ["landing_pad", 7],                     # a non-string entry
+    ["landing_pad", "bad\nname"],           # a newline (CSV/codec landmine)
+])
+def test_pad_mode_bad_pad_classes_is_loud(pad_classes):
+    with pytest.raises(ConfigError, match="pad_classes"):
+        LandOnPad(valid_marker_ids=[7], servo_on="pad", pad_classes=pad_classes)
+
+
+def test_marker_mode_ignores_missing_pad_classes():
+    """In the default marker mode pad_classes is unused; omitting it is fine."""
+    p = LandOnPad(valid_marker_ids=[7])     # no pad_classes
+    assert p.servo_on == "marker"
+    assert p.pad_classes == frozenset()
+
+
+def test_marker_mode_rejects_malformed_pad_classes():
+    """Even unused, a malformed pad_classes (would become a landmine if servo_on
+    flips to 'pad' later) is rejected loudly."""
+    with pytest.raises(ConfigError, match="pad_classes"):
+        LandOnPad(valid_marker_ids=[7], servo_on="marker",
+                  pad_classes=[1, 2, 3])
+
+
+def test_from_config_pad_mode_tunables():
+    zone = {"land_on_pad": {"valid_marker_ids": [7], "servo_on": "pad",
+                            "pad_classes": ["landing_pad"]}}
+    p = LandOnPad.from_config(_drone(zone=zone), cfg=None)
+    assert p.servo_on == "pad" and p.pad_classes == frozenset({"landing_pad"})
+
+
+# ---------------- _servo_target selection ----------------
+def test_servo_target_pad_mode_picks_yolo_pad_bbox():
+    """In pad mode the servo target is the YOLO pad sighting's bbox."""
+    p = _pad_phase()
+    pad = _pad_sighting(cx=600.0, half=25.0)
+    ctx = make_ctx(sightings=[pad])
+    target = p._servo_target(ctx)
+    assert target is pad
+    assert target.bbox_xyxy == pad.bbox_xyxy
+
+
+def test_servo_target_pad_mode_ignores_non_pad_yolo_class():
+    """A YOLO sighting whose class is NOT in pad_classes (e.g. a robomaster)
+    must NOT be a servo target. Mutation (a): a target selector that ignores
+    pad_classes (accepts any yolo class) FAILS here."""
+    p = _pad_phase(pad_classes=["landing_pad"])
+    ctx = make_ctx(sightings=[_pad_sighting(class_name="robomaster")])
+    assert p._servo_target(ctx) is None
+    assert p._servo_candidates(ctx) == []
+
+
+def test_servo_target_pad_mode_ignores_marker_sightings():
+    """In pad mode an ArUco beacon sighting (source 'aruco', a marker id) is NOT
+    a servo target — only YOLO pad-class blobs are. The beacon drives VALIDITY,
+    not geometry."""
+    p = _pad_phase()
+    ctx = make_ctx(sightings=[_sighting(7, cx=600.0)])   # valid marker, no pad
+    assert p._servo_target(ctx) is None
+
+
+def test_servo_target_pad_mode_requires_yolo_source():
+    """The pad filter is source=='yolo' AND class_name in pad_classes. A
+    sighting carrying the pad CLASS but a non-yolo source (e.g. a 'pad' colour
+    blob or an 'aruco' beacon mislabelled) is NOT a target — pins the source
+    half of the filter (kills a 'class_name only, any source' over-broad
+    mutant)."""
+    p = _pad_phase(pad_classes=["landing_pad"])
+    colour_blob = _pad_sighting(class_name="landing_pad", source="pad")
+    aruco_named = _pad_sighting(class_name="landing_pad", source="aruco")
+    ctx = make_ctx(sightings=[colour_blob, aruco_named])
+    assert p._servo_target(ctx) is None
+    assert p._pad_sightings(ctx) == []
+
+
+def test_servo_target_marker_mode_uses_valid_marker_bbox():
+    """In marker mode (default) the servo target is the valid marker bbox, and
+    a YOLO pad sighting is IGNORED — marker-mode behaviour is unchanged."""
+    p = _phase(valid_marker_ids=[7])
+    marker = _sighting(7, cx=600.0)
+    ctx = make_ctx(sightings=[marker, _pad_sighting(cx=100.0)])
+    target = p._servo_target(ctx)
+    assert target is marker                  # the marker, never the yolo pad
+
+
+def test_servo_target_absent_returns_none_both_modes():
+    """No servo candidate in frame -> None (the centre/descend 'lost' gate)."""
+    assert _pad_phase()._servo_target(make_ctx(sightings=[])) is None
+    assert _phase()._servo_target(make_ctx(sightings=[])) is None
+
+
+def test_pad_mode_picks_largest_bbox_deterministically():
+    """Two YOLO pads in frame -> the LARGER bbox (closest) wins. Mutation (c):
+    a wrong area sign would pick the smaller one."""
+    p = _pad_phase()
+    big = _pad_sighting(class_name="landing_pad", cx=320.0, half=40.0)
+    small = _pad_sighting(class_name="landing_pad", cx=320.0, half=10.0)
+    target = p._servo_target(make_ctx(sightings=[small, big]))
+    assert target is big
+
+
+def test_pad_mode_equal_area_tie_break_lowest_class_name():
+    """Equal-area YOLO pads -> deterministic tie-break on the LOWEST class_name.
+    Mutation (c): a flipped tie-break sign picks the wrong one."""
+    p = _pad_phase(pad_classes=["pad_A", "pad_B"])
+    a = _pad_sighting(class_name="pad_A", cx=320.0, half=20.0)
+    b = _pad_sighting(class_name="pad_B", cx=320.0, half=20.0)   # equal area
+    assert p._pick_target([b, a]).class_name == "pad_A"
+    assert p._pick_target([a, b]).class_name == "pad_A"          # order-stable
+
+
+def test_pad_mode_acquires_on_yolo_stream_then_centers():
+    """A pure YOLO pad stream (NO beacon in frame) acquires on the N-of-M
+    window and centres — proves the acquire window keys off the pad sighting in
+    pad mode. Mutation (b): if pad mode silently fell back to the marker path,
+    this empty-of-markers stream would NEVER acquire."""
+    p = _pad_phase(acquire_min_hits=2, acquire_window_frames=3)
+    p.step(make_ctx(sightings=[_pad_sighting(cx=320.0)]))        # hit 1
+    assert p._sub is _SubState.PAD_ACQUIRE
+    a = p.step(make_ctx(sightings=[_pad_sighting(cx=320.0)]))    # hit 2 -> center
+    assert p._sub is _SubState.PAD_CENTER
+    assert p._target_marker_id is None                          # a pad has none
+    assert "landing_pad" in (p._target_label or "")
+    assert isinstance(a, Hover)                                  # centred, holding
+
+
+def test_pad_mode_off_centre_pad_moves_toward_it():
+    """A YOLO pad to the RIGHT of frame centre -> Move(RIGHT) (chase the blob),
+    same servo geometry as the marker path."""
+    p = _pad_phase(acquire_min_hits=1, acquire_window_frames=3)
+    p.step(make_ctx(sightings=[_pad_sighting(cx=320.0)]))       # acquire+center
+    a = p.step(make_ctx(sightings=[_pad_sighting(cx=600.0)]))   # right of 320
+    assert isinstance(a, Move) and a.direction == Direction.RIGHT
+
+
+def test_pad_mode_decoy_class_only_frame_is_lost():
+    """During PAD_CENTER a frame carrying ONLY a non-pad yolo class (a decoy) is
+    treated as LOST -> back to PAD_ACQUIRE, never centered on the decoy.
+    Mutation (a): a selector that ignores pad_classes would centre on it."""
+    p = _pad_phase(acquire_min_hits=1, acquire_window_frames=3)
+    p.step(make_ctx(sightings=[_pad_sighting(cx=320.0)]))       # acquire+center
+    p._center_streak = 2
+    a = p.step(make_ctx(sightings=[_pad_sighting(class_name="robomaster",
+                                                 cx=600.0)]))
+    assert p._sub is _SubState.PAD_ACQUIRE
+    assert p._center_streak == 0
+    assert not (isinstance(a, Move) and a.direction in (Direction.LEFT,
+                                                        Direction.RIGHT))
+
+
+def test_pad_mode_pad_plus_decoy_centers_on_pad_only():
+    """A decoy yolo class + a real pad in the SAME frame: centre on the PAD,
+    never the decoy. Mutation (a): ignoring pad_classes lets the decoy drive
+    _pick_target."""
+    p = _pad_phase(pad_classes=["landing_pad"], acquire_min_hits=1,
+                   acquire_window_frames=3)
+    p.step(make_ctx(sightings=[_pad_sighting(cx=320.0)]))       # acquire+center
+    p._center_streak = 0
+    a = p.step(make_ctx(sightings=[
+        _pad_sighting(class_name="robomaster", cx=620.0, half=40.0),  # big decoy
+        _pad_sighting(class_name="landing_pad", cx=320.0, half=10.0)]))  # centred
+    # centred on the pad -> no lateral chase of the far-right decoy.
+    assert not (isinstance(a, Move) and a.direction is Direction.RIGHT)
+
+
+# ---------------- pad-mode E2E over MockAdapter (canned pad stream) ----------
+class _PadStreamBus(SightingBus):
+    """Surfaces ONE fresh CENTRED YOLO pad sighting per tick (a perception loop
+    that sees the pad dead-centre every frame). The pad-mode analogue of
+    _CentredPadBus — no markers at all, only the YOLO pad class."""
+
+    def drain_after(self, seq, drone_id=None):
+        return seq + 1, [_pad_sighting(cx=320.0, drone_id=drone_id or "alpha")]
+
+
+def test_pad_mode_agent_lands_done_on_canned_pad_stream(tmp_path):
+    """E2E: in servo_on='pad' mode, a stream of CENTRED YOLO pad sightings (one
+    per tick, NO beacons) drives takeoff -> CENTER converges -> DESCEND gates ->
+    LAND_COMMIT, ending is_flying False + DONE (verified), never the Fallback.
+    Mirrors test_agent_lands_done_on_a_scripted_good_approach but in pad mode."""
+    bus = _PadStreamBus()
+    land = _pad_phase(commit_alt_m=0.5, descend_step_cm=50,
+                      center_persist_frames=2, descend_persist_frames=2,
+                      acquire_min_hits=2, acquire_window_frames=3,
+                      scan_dwell_s=0.001)
+    adapter = MockAdapter("alpha")
+    with EventLog(str(tmp_path)) as events:
+        agent = DroneAgent("alpha", adapter, [_Takeoff(200), land], events,
+                           bus=bus)
+        _run_agent(agent, budget_s=20.0)
+        asyncio.run(agent.shutdown())
+
+    assert agent.state is AgentState.DONE
+    assert not adapter.is_flying
+    names = [c[0] for c in adapter.calls]
+    assert "takeoff" in names
+    assert "land" in names                         # a real landing committed
+    assert any(n == "move" for n in names)         # descend/center moves flew
+    assert land._fallback_reason is None           # VERIFIED, not Fallback
+    assert land._target_marker_id is None          # a pad has no marker id
+    assert "landing_pad" in (land._target_label or "")
