@@ -397,7 +397,7 @@ async def run_fleet(log: _Log, summary: dict, args, outdir: Path,
             else:
                 log.line(f"single drone discovered: plane_id {pid}")
 
-    channel_order = "bgr" if args.fake else args.channel_order
+    channel_order = "bgr" if args.fake else "rgb"
 
     # ---- STAGE 3: connect every drone (power ON) --------------------------
     log.rule(f"STAGE 3/8  connect {len(targets)} drone(s)  [power ON]")
@@ -584,41 +584,6 @@ def _build_aruco_detectors(log, only: Optional[str] = None):
     return detectors
 
 
-def _touches_border(xyxy, w: int, h: int, margin: int) -> bool:
-    """True if the bbox is within `margin` px of any frame edge — a hand/arm
-    entering from a corner trips this; a centered landing pad does not. The
-    border-reject that keeps a low --yolo-conf from re-introducing the corner FP."""
-    x0, y0, x1, y1 = xyxy
-    return (x0 <= margin or y0 <= margin
-            or x1 >= w - margin or y1 >= h - margin)
-
-
-def _normalize_for_yolo(image, mode: str):
-    """Fight the drone cam's oversaturation BEFORE YOLO. 'gray-world' rescales
-    each channel to a common mean (cheap white-balance); 'clahe' equalizes the L
-    channel in LAB (local contrast). 'none' returns the frame unchanged. Always
-    returns a BGR uint8 array (gray-world/clahe return a fresh copy; the caller's
-    frame is never mutated)."""
-    if mode == "none":
-        return image
-    import cv2
-    import numpy as np
-    if mode == "gray-world":
-        out = image.astype(np.float32)
-        means = [float(out[:, :, c].mean()) for c in range(3)]
-        target = sum(means) / 3.0
-        for c in range(3):
-            if means[c] > 1e-6:
-                out[:, :, c] *= target / means[c]
-        return np.clip(out, 0, 255).astype(np.uint8)
-    if mode == "clahe":
-        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        return cv2.cvtColor(cv2.merge((clahe.apply(l), a, b)), cv2.COLOR_LAB2BGR)
-    return image
-
-
 def scan_fleet(log, summary, fleet: List[_Drone], outdir, args, weights) -> None:
     """LIVE scan: start all streams, then for the full --scan-secs window grab
     frames and run ArUco (every frame) + YOLO (throttled) INLINE, logging hits
@@ -729,45 +694,34 @@ def scan_fleet(log, summary, fleet: List[_Drone], outdir, args, weights) -> None
                                     annot)
                         dr.saved += 1
                         saved_this = True
-            # ---- YOLO throttled (conf knob + border-reject + preproc) ----
+            # ---- YOLO throttled (conf knob; raw frame in — pad quality + the
+            # hand-in-corner FP are fixed at the MODEL now via retrain, not by
+            # post-processing the boxes) ----
             if model is not None and now - st[did]["last_yolo_t"] >= yolo_period:
                 st[did]["last_yolo_t"] = now
-                infer_img = _normalize_for_yolo(fs.image, args.yolo_preproc)
                 try:
-                    results = model(infer_img, verbose=False, conf=args.yolo_conf)
+                    results = model(fs.image, verbose=False, conf=args.yolo_conf)
                 except Exception:
                     log.exc(f"YOLO infer[{did}]")
                     results = []
-                h, w = fs.image.shape[:2]
                 for r in results:
                     boxes = r.boxes
                     if boxes is None or len(boxes) == 0:
                         continue
-                    accepted: List[Tuple[str, float]] = []
-                    rejected: List[Tuple[str, float]] = []
+                    seen: List[Tuple[str, float]] = []
                     fresh = False
                     for b in boxes:
                         cn = model.names[int(b.cls[0])]
                         cf = float(b.conf[0])
-                        xyxy = [float(v) for v in b.xyxy[0].tolist()]
-                        if args.edge_margin > 0 and _touches_border(
-                                xyxy, w, h, args.edge_margin):
-                            rejected.append((cn, cf))   # hand/arm at the edge
-                            continue
-                        accepted.append((cn, cf))
+                        seen.append((cn, cf))
                         if cn not in dr.yolo_classes:
                             fresh = True
                         if cf > dr.yolo_classes.get(cn, 0.0):
                             dr.yolo_classes[cn] = cf
-                    if accepted:
-                        pairs = ", ".join(f"{cn}:{cf:.2f}" for cn, cf in accepted)
-                        extra = (f"  (edge-rejected {len(rejected)}: "
-                                 f"{', '.join(c for c, _ in rejected)})"
-                                 if rejected else "")
-                        log.line(f"  [{did}] t={elapsed:5.1f}s  YOLO -> "
-                                 f"{pairs}{extra}")
-                        # r.plot() draws on the (normalized) frame the model saw,
-                        # so the saved JPEG matches inference, not the raw frame.
+                    if seen:
+                        pairs = ", ".join(f"{cn}:{cf:.2f}" for cn, cf in seen)
+                        log.line(f"  [{did}] t={elapsed:5.1f}s  YOLO -> {pairs}")
+                        # r.plot() draws the model's own boxes on the frame it saw.
                         if dr.saved < max_save and (fresh or not saved_this):
                             try:
                                 cv2.imwrite(str(framedirs[did]
@@ -777,11 +731,6 @@ def scan_fleet(log, summary, fleet: List[_Drone], outdir, args, weights) -> None
                                 saved_this = True
                             except Exception:
                                 log.exc(f"save yolo[{did}]")
-                    elif rejected:
-                        names = ", ".join(f"{cn}:{cf:.2f}" for cn, cf in rejected)
-                        log.line(f"  [{did}] t={elapsed:5.1f}s  YOLO edge-rejected "
-                                 f"{len(rejected)} border box(es) [{names}] — "
-                                 f"likely a hand/arm at the frame edge, ignored")
             # ---- periodic raw sample (proof-of-life even with no detections) ----
             if (not saved_this and dr.saved < max_save
                     and now - st[did]["last_sample_t"] >= sample_period):
@@ -813,10 +762,7 @@ def scan_fleet(log, summary, fleet: List[_Drone], outdir, args, weights) -> None
             log.error(f"[{did}] NO frames in {scan_secs:.0f}s — camera/link/decode")
         elif dr.last_image is not None:
             h, w = dr.last_image.shape[:2]
-            means = [round(float(dr.last_image[:, :, c].mean()), 1)
-                     for c in range(3)]
             rec["shape"] = [w, h]
-            rec["channel_means"] = means
             log.line(f"  [{did}] {dr.frames_seen} frames in {elapsed:.0f}s "
                      f"(~{dr.fps} fps), {dr.saved} saved, {w}x{h}, "
                      f"healthy={healthy}")
@@ -861,10 +807,9 @@ def _report_yolo(log, summary, dr: _Drone) -> None:
     pairs = ", ".join(f"{k}(peak {v:.2f})" for k, v in classes.items())
     log.line(f"  [{dr.id}] classes seen: {pairs}")
     if max(classes.values()) < 0.5:
-        log.line(f"  [{dr.id}] peak YOLO conf < 0.50 — if the cam looks color-"
-                 f"swapped recheck --channel-order (see channel_means above), try "
-                 f"--yolo-preproc gray-world; durable fix = fine-tune on the saved "
-                 f"frames with hand/background hard negatives (runbook)")
+        log.line(f"  [{dr.id}] peak YOLO conf < 0.50 — durable fix = retrain on "
+                 f"real drone-cam frames with hand/background hard negatives, then "
+                 f"redeploy via pipeline.py (models/yolo_<ts>/ is auto-picked)")
 
 
 # (periodic depth logger removed on main — depth is the SENSE-IR seam in
@@ -930,24 +875,14 @@ def _parse_args(argv) -> argparse.Namespace:
                    help="scan ALL candidate dicts (the bring-up discovery sweep) "
                         "instead of locking to --aruco-dict; expect cross-dict "
                         "ghosts in the output")
-    # ---- YOLO (oversaturation + hand-in-corner false positive) ----
+    # ---- YOLO (pad quality + the hand-in-corner FP are fixed at the model via
+    # retrain now, NOT by post-processing — only the conf threshold is exposed) ----
     p.add_argument("--yolo-conf", type=float, default=0.25,
                    help="YOLO confidence threshold for the scan (default 0.25)")
-    p.add_argument("--edge-margin", type=int, default=8,
-                   help="reject YOLO boxes within N px of any frame edge — kills "
-                        "the hand/arm-in-corner false positive (0 disables; "
-                        "default 8)")
-    p.add_argument("--yolo-preproc", default="none",
-                   choices=("none", "gray-world", "clahe"),
-                   help="normalize the frame before YOLO to fight the drone cam's "
-                        "oversaturation (default none; try gray-world or clahe)")
     p.add_argument("--connect-timeout", type=float, default=15.0,
                    help="per-drone connect timeout seconds (default 15)")
     p.add_argument("--video-timeout", type=float, default=15.0,
                    help="first-frame timeout seconds (default 15)")
-    p.add_argument("--channel-order", default="rgb", choices=("rgb", "bgr"),
-                   help="what stream.to_rgb() actually returns (bench-verify; "
-                        "default rgb)")
     p.add_argument("--weights", default=None,
                    help="YOLO .pt path (default: auto-detect a local one)")
     p.add_argument("--no-yolo", action="store_true", help="skip the YOLO stage")

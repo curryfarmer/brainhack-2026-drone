@@ -251,9 +251,10 @@ The OFFLINE no-flight bring-up that precedes the flight is
 telemetry → video → ArUco/YOLO; issues NO flight command). Its ArUco scan is
 **dict-locked to DICT_7X7_1000** by default (`--aruco-dict`; `--all-dicts` = the
 discovery sweep) with the field-id allowlist + per-id frame voting (kills the
-cross-dict double-decode); YOLO takes `--yolo-conf` / `--edge-margin` (rejects a
-hand/arm at the frame edge) / `--yolo-preproc` (gray-world/clahe vs the
-oversaturated cam).
+cross-dict double-decode); YOLO exposes only `--yolo-conf` — the durable pad
+quality + hand-in-corner false-positive fix is a **model retrain** (real drone-cam
+frames + hand/background hard negatives, redeployed via `pipeline.py`), not box
+post-processing.
 
 ---
 
