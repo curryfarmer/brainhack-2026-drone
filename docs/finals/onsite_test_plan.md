@@ -256,6 +256,22 @@ quality + hand-in-corner false-positive fix is a **model retrain** (real drone-c
 frames + hand/background hard negatives, redeployed via `pipeline.py`), not box
 post-processing.
 
+The same tool carries three dev-bench modes: **`--video-only`** is the FIRST thing
+to run if preflight P6 trips (`no first video frame`) — it reports time-to-first-
+frame + fps/healthy/retries and prints the fixes (firewall OFF for inbound UDP,
+power-cycle to clear a stale `bind_client`, raise `--video-timeout`, one stream per
+drone); **`--capture`** is the retraining photographer (raw frames of pad → hand →
+background into `<id>/capture/` for labelling + `pipeline.py`); **`--dedup-report`**
+writes `dedup_report.json` (per-id stability + dominant-vs-ghost; with `--all-dicts`
+it is the cross-dict double-decode proof artifact). For a live eyeball of the feed,
+[`live_view.py`](../../finals/tools/live_view.py) (`--ip` / `--plane-id`; `--headless
+--frames N` over SSH) opens a real-time window with the ArUco + pad overlays, ghost
+flagging, and the per-id dedup HUD (hotkeys a/y/d/s/q) — read-only, NO flight. For
+propless flight plumbing, [`bench_flight.py`](../../finals/tools/bench_flight.py)
+`--props-off-confirmed` (`--mock` for CI) scripts takeoff/hover/rotate/land and logs
+each command + PRE/POST telemetry to a JSONL that `replay_plot.py` draws unchanged —
+it proves command acceptance + yaw response (props OFF, so altitude won't climb).
+
 ---
 
 ## Config inventory (every shipped profile — what runs it)
