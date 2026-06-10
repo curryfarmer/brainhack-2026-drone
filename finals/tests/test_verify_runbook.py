@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 
 import pytest
 
@@ -334,6 +336,21 @@ def test_main_no_suite_exits_zero(capsys):
 def test_main_smoke_without_run_dir_exits_nonzero(capsys):
     rc = vr.main(["--no-suite", "--smoke"])
     assert rc == 1
+
+
+def test_runs_by_path_not_only_dash_m():
+    """Invoking the tool BY PATH (python finals/tools/verify_runbook.py), not only
+    as a module (python -m ...), must still import `finals` and PASS. A path run
+    puts the tool's OWN dir on sys.path[0] and NEVER adds the cwd — so even from
+    the repo root the lazy `from finals...` imports die with a ModuleNotFoundError
+    unless the tool bootstraps the repo root onto sys.path. Run with cwd=REPO (the
+    documented invocation dir, where the config-relative replay_dir resolves);
+    that still exercises the bootstrap because cwd is not on a path run's sys.path."""
+    proc = subprocess.run(
+        [sys.executable, vr.__file__, "--no-suite"],
+        cwd=REPO, capture_output=True, text=True)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert "VERDICT: PASS" in proc.stdout
 
 
 def _read(path: str) -> str:

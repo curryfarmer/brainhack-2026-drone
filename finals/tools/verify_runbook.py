@@ -71,6 +71,14 @@ from typing import Dict, List, Optional, Tuple
 _THIS = os.path.abspath(__file__)
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(_THIS)))
 
+# Make `finals` importable when this file is run by PATH
+# (`python finals/tools/verify_runbook.py`), not only as a module
+# (`python -m finals.tools.verify_runbook`). A path run puts THIS dir on
+# sys.path[0] instead of the repo root, so the lazy `from finals...` imports
+# below would die with a confusing ModuleNotFoundError instead of running.
+if REPO not in sys.path:
+    sys.path.insert(0, REPO)
+
 RUNBOOK_REL = os.path.join("docs", "finals", "onsite_test_plan.md")
 CONFIGS_GLOB = os.path.join("finals", "configs", "*.json")
 ARENAS_DIR = os.path.join("finals", "configs", "arenas")

@@ -170,6 +170,7 @@ Run via [`sim/run_vision.sh`](../../sim/run_vision.sh) and
 | **S-track** | 3 drones actively `track_convoy` (real bearing-pursuit chase, S11 Workstream B) | [`sitl3_track_vision.json`](../../finals/configs/sitl3_track_vision.json) | `bash sim/run_vision.sh track3` |
 | **S-dyn3** | WS-5 DYNAMIC self-assignment, clean case: 3 drones over 3 cars, no hardcoded mapping → 3 distinct owners, serviced 3/3 (the C2 `ConvoyRegistry` single-winner CAS) | [`sitl3_dyn3_vision.json`](../../finals/configs/sitl3_dyn3_vision.json) | `bash sim/run_vision.sh dyn3` |
 | **S-dyn5** | WS-5 contention: 3 drones over 5 cars → 3 distinct claims + 2 unclaimed; `dyn5-kill` frees a LOST car → re-claim | [`sitl3_dyn5_vision.json`](../../finals/configs/sitl3_dyn5_vision.json) | `bash sim/run_vision.sh dyn5` (`dyn5-kill`) |
+| **S-handover** | WS-7A SOFT-ZONE handover: a car curves OUT of one drone's `sector_deg` wedge → owner flags `exited_zone` (keeps tracking) → C2 offers it to the IDLE neighbour whose sector it entered → `accept_offer` transfers ownership under the registry lock | [`sitl3_handover_vision.json`](../../finals/configs/sitl3_handover_vision.json) · arena [`sitl_handover.json`](../../finals/configs/arenas/sitl_handover.json) | `bash sim/run_vision.sh handover3` |
 
 ### Warm-up follow-convoy sims (WS-4 — `navigate` then `track_convoy`)
 
@@ -217,6 +218,7 @@ fleet; the `sitl*`/`mock*`/`replay` configs are VM rehearsals + dev fixtures.
 | [`sitl3_track_vision.json`](../../finals/configs/sitl3_track_vision.json) | sitl | S-track active chase (S11 B) |
 | [`sitl3_dyn3_vision.json`](../../finals/configs/sitl3_dyn3_vision.json) | sitl | S-dyn3 dynamic self-assign (3 cars) |
 | [`sitl3_dyn5_vision.json`](../../finals/configs/sitl3_dyn5_vision.json) | sitl | S-dyn5 dynamic self-assign (5 cars / contention) |
+| [`sitl3_handover_vision.json`](../../finals/configs/sitl3_handover_vision.json) | sitl | S-handover soft-zone handover (WS-7A) |
 | [`sitl.json`](../../finals/configs/sitl.json) | sitl | minimal single-drone SITL smoke (`--profile sitl --dry-run`) |
 | [`sitl3.json`](../../finals/configs/sitl3.json) | sitl | 3-drone headless SITL band rehearsal |
 | [`mock.json`](../../finals/configs/mock.json) | mock | laptop-only mock flight (no SDK; CI smoke) |
