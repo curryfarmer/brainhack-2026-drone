@@ -39,6 +39,12 @@ sim/run/
 
 # Model weights (large; live under models/ which is already ignored)
 *.pt
+# EXCEPT the committed landing-pad model. landing_real.json ships detector
+# backend "ultralytics" + weights "models/pad_v1.pt", so the scored Challenge-2A
+# landing works on a bare checkout with NO --weights flag / separate-channel
+# fetch. This negation must stay AFTER both `models/*.pt` and `*.pt` (last match
+# wins). Regenerate via pipeline.py if retrained; the path/name is the contract.
+!models/pad_v1.pt
 # Briefing source + extraction scratch (share via separate channel)
 *.pptx
 .pptx_extract/
