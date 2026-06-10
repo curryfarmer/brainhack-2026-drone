@@ -711,23 +711,26 @@ def _validate_pad_targets(cfg: FinalsConfig) -> None:
       (a) two drones target the SAME pad_id (they cannot both score one pad);
       (b) a drone's navigate pad_id names a pad with valid==False (a red pad is
           never a scored landing target — land_on_pad would never acquire it);
-      (c) the arena has FEWER valid pads than the number of drones navigating to
-          a pad (distinct valid targets cannot be satisfied).
+      (c) the arena has FEWER valid pads than the number of drones that LAND on
+          a pad (a land_on_pad phase), so distinct valid targets cannot be
+          satisfied.
     Drones whose navigate goal is goal_ne_m (a coord, not a pad_id) are EXEMPT
-    from (a)/(b) but still counted toward (c)'s navigating-drone tally. Enforced
-    only when the arena is present (no arena -> navigate refuses at phase-build,
-    a separate guard)."""
+    from (a)/(b). A drone is counted toward (c) IFF it has a land_on_pad phase —
+    the phase that actually consumes a pad. A navigate-only drone (e.g.
+    navigate -> track_convoy, the WS-4 followbox warm-up) lands on NO pad and
+    consumes NO slot. Enforced only when the arena is present (no arena ->
+    navigate refuses at phase-build, a separate guard)."""
     arena = cfg.arena
     if arena is None:
         return
     # Drones whose navigate goal is a pad_id (the ones (a)/(b) apply to)...
     pad_targets = [(d.id, _navigate_pad_id(d)) for d in cfg.drones]
     pad_targets = [(did, pid) for did, pid in pad_targets if pid is not None]
-    # ...and the full count of drones that navigate to ANY goal (pad OR coord),
-    # for the (c) capacity check. A coord-goal drone still consumes a slot.
-    navigating = [d for d in cfg.drones
-                  if "navigate" in d.phases
-                  and isinstance(d.zone.get("navigate"), dict)]
+    # ...and the drones that actually LAND on a pad: the land_on_pad phase is
+    # what consumes a valid pad, NOT navigate. A navigate-only drone (navigate ->
+    # track_convoy, the WS-4 followbox warm-up) lands on no pad, so it is not a
+    # capacity consumer even though it transits the arena.
+    landing_on_pad = [d for d in cfg.drones if "land_on_pad" in d.phases]
 
     pads_by_id = {p.id: p for p in arena.pads}
     valid_pad_ids = {p.id for p in arena.pads if p.valid}
@@ -757,15 +760,15 @@ def _validate_pad_targets(cfg: FinalsConfig) -> None:
                 f"{sorted(valid_pad_ids)}).")
         seen[pid] = did
 
-    # (c) capacity — the arena must hold >= one valid pad per navigating drone.
-    if len(valid_pad_ids) < len(navigating):
+    # (c) capacity — the arena must hold >= one valid pad per pad-landing drone.
+    if len(valid_pad_ids) < len(landing_on_pad):
         raise ConfigError(
             f"too few valid landing pads: arena {cfg.arena_name!r} has only "
             f"{len(valid_pad_ids)} VALID (green) pad(s) {sorted(valid_pad_ids)} "
-            f"but {len(navigating)} drone(s) "
-            f"{[d.id for d in navigating]} navigate to a pad — distinct valid "
+            f"but {len(landing_on_pad)} drone(s) "
+            f"{[d.id for d in landing_on_pad]} land on a pad — distinct valid "
             f"targets cannot be satisfied (some drone would have no green pad to "
-            f"land on). CHECK: add valid pads to the arena or drop a navigate "
+            f"land on). CHECK: add valid pads to the arena or drop a land_on_pad "
             f"phase.")
 
 

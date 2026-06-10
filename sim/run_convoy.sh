@@ -61,9 +61,13 @@ drive() {
   ros2 run ros_gz_bridge parameter_bridge "${bridge_args[@]}" > "$RUN/bridge.log" 2>&1 &
   echo $! > "$RUN/bridge.pid"
   sleep 2
+  # CONVOY_ROUTE (followbox_multi: an irregular snaking path 'dur,v,w; ...')
+  # OVERRIDES --linear/--angular when set; otherwise the constant-velocity path.
+  local route_args=()
+  [ -n "${CONVOY_ROUTE:-}" ] && route_args=(--route "$CONVOY_ROUTE")
   python3 "$REPO/sim/convoy_driver.py" --ids "${IDS[@]}" \
     --linear "${CONVOY_LINEAR:-0.4}" --angular "${CONVOY_ANGULAR:-0.2}" \
-    --delay-s "${CONVOY_DELAY:-0}" \
+    --delay-s "${CONVOY_DELAY:-0}" "${route_args[@]}" \
     --duration-s "$secs" > "$RUN/driver.log" 2>&1 &
   echo $! > "$RUN/driver.pid"
 }

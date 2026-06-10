@@ -1,0 +1,14 @@
+{
+  "_comment": "WS-4 SIM-A warm-up arena — the finals (north_m, east_m) mirror of sim/worlds/followbox1_px4.sdf. Authored DIRECTLY in the compass/gz frame (arena north = gz +Y, arena east = gz +X; a gz pose (x=E, y=N) is arena (north=y, east=x)) so NO rotation is needed. c2_origin_m is gz (0,0) = where alpha launches. ONE crate keep_out mirrors the gz crate footprint (gz E in [-0.5,0.5], N in [1.5,2.5]); inflation_m 0.5 (config) grows it so the straight C2->goal line (both at east 0) is blocked and the planner must detour. NO pads: this warm-up ends in track_convoy (follow convoy_robot_7 at gz(0,4)), not a pad landing. bounds_m [min_north,min_east,max_north,max_east] generously contain C2 + crate + car + the eastward detour. RE-MEASURE + overwrite onsite at gate F (tune config, not code). KEEP keep_out IN SYNC with the SDF crate footprint (WS-7B asserts it).",
+  "bounds_m": [-1.0, -2.5, 5.5, 2.5],
+  "c2_origin_m": [0.0, 0.0],
+  "c2_heading_deg": 0.0,
+  "keep_out": [
+    {
+      "_comment": "crate: gz box centre (E=0, N=2), 1.0x1.0 footprint -> arena ring north 1.5..2.5, east -0.5..0.5.",
+      "id": "crate",
+      "polygon_m": [[1.5, -0.5], [2.5, -0.5], [2.5, 0.5], [1.5, 0.5]]
+    }
+  ],
+  "pads": []
+}

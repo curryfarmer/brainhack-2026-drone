@@ -1,0 +1,43 @@
+{
+  "_comment": "WS-4 SIM-A warm-up: ONE PX4 SITL camera-drone flying the user's warm-up sim #1 [takeoff -> navigate around ONE crate -> track_convoy follows ONE car] in sim/worlds/followbox1_px4.sdf. = the transport wiring of configs/sitl1_landing.json (mavsdk_sitl + gazebo frames via a gz->TCP bridge + ArUco) but phases end in track_convoy (follow convoy_robot_7), not land_on_pad. ONE drone => ONE onboard camera renders comfortably under llvmpipe (RTF ~1.0), so this is the clean end-to-end warm-up. alpha takes off to ~2.2 m (a usable nadir track footprint, per the S11 band lesson), navigates to goal_ne_m [3.0, 0.0] which sits behind the 3.0 m crate (the visibility-graph planner MUST detour around the inflated keep-out = the obstacle-avoidance money shot), then locks ArUco 7 and bearing-pursues the car. arena_name sitl_followbox1 mirrors the SDF (north=gz+Y, east=gz+X). track_convoy tunables track charlie-class (band 2.2 was the S11 best tracker). The car is driven by run_landing.sh followbox1 (CONVOY_IDS=7 CONVOY_LINEAR=0.08 CONVOY_DELAY=150). Budgets are WALL seconds; the orchestrator exits on all-DONE so they are a MAX. VM-TUNE goal/band/CONVOY_* at gate F.",
+  "profile": "sitl",
+  "flight_backend": "mavsdk_sitl",
+  "frame_backend": "gazebo",
+  "sitl_address": "udpin://0.0.0.0:14540",
+  "command_timeout_s": 120,
+  "mission_budget_s": 600,
+  "camera_hfov_deg": 99.69,
+  "marker_backend": "aruco",
+  "save_marker_frames": true,
+  "arena_name": "sitl_followbox1",
+  "gazebo_video_host": "127.0.0.1",
+  "gazebo_video_port": 5600,
+  "detector": { "backend": "none" },
+  "guards": {
+    "launch_slot_wait_s": 240,
+    "slot_wait_s": 240,
+    "landing_reserve_s": 60,
+    "geofence_radius_m": 10.0
+  },
+  "drones": [
+    {
+      "_comment": "alpha i0 -> udpin 14540, gRPC 50051, bridge 5600. takeoff 220 cm (track altitude) -> navigate past the crate (detour) -> track convoy_robot_7. altitude_band_m 2.2 = the S11 best-tracker footprint.",
+      "id": "alpha", "plane_id": 1, "led_rgb": [255, 0, 0],
+      "altitude_band_m": 2.2,
+      "phases": ["takeoff", "navigate", "track_convoy"],
+      "sitl_address": "udpin://0.0.0.0:14540", "mavsdk_grpc_port": 50051,
+      "gazebo_video_port": 5600,
+      "sector_deg": [0.0, 360.0],
+      "zone": {
+        "takeoff": { "height_cm": 220 },
+        "navigate": { "goal_ne_m": [3.0, 0.0], "inflation_m": 0.5, "max_leg_cm": 100, "total_budget_s": 180 },
+        "track_convoy": {
+          "track_marker_ids": [7],
+          "approach_enabled": true, "approach_cm": 40, "max_step_deg": 25,
+          "track_dwell_s": 0.5, "lost_timeout_s": 8.0,
+          "max_chase_cm": 800, "investigate_budget_s": 120.0
+        }
+      }
+    }
+  ]
+}

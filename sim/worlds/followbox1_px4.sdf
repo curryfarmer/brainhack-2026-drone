@@ -1,0 +1,131 @@
+<?xml version="1.0"?>
+<!-- WS-4 SIM-A warm-up world, PX4-FLYABLE: takeoff -> navigate around ONE box
+     -> follow ONE convoy car. The user's warm-up sim #1.
+
+     Forked from sim/worlds/landing_px4.sdf (the proven PX4-flyable camera world:
+     same flight-sensor system plugins + ENU spherical_coordinates so PX4 SITL
+     flies, same llvmpipe-rendered onboard camera path). What CHANGED:
+       - the 3 STATIC landing pads are GONE (this warm-up ends in track_convoy,
+         not land_on_pad — no pad targets);
+       - ONE moving convoy car (convoy_robot_7, the SIM-3/4/5 VelocityControl
+         model with its ArUco-7 marker) spawns BEHIND the crate at gz(0, 4);
+       - the CRATE stays at gz(0, 2) (1.0x1.0x1.5 m, taller than the ~1.1 m flight
+         height = a real no-overfly 2-D keep-out) so the straight C2->car line is
+         blocked and alpha's visibility-graph planner MUST detour around the
+         inflated keep-out (the obstacle-avoidance the user asked for), THEN
+         track_convoy locks car 7 and follows it.
+
+     FRAME MAPPING (binding — the arena JSON mirrors this):
+       gz is ENU: pose is "x(EAST) y(NORTH) z(UP) r p yaw". The finals arena frame
+       is (north_m, east_m). A gz pose (x=E, y=N) is arena (north=y, east=x).
+       c2_origin_m in finals/configs/arenas/sitl_followbox1.json is gz (0,0).
+
+     The convoy car is driven over ROS->gz: run_landing.sh followbox1 starts this
+     world (PX4 OWNS the gz server for lockstep), then calls
+       CONVOY_IDS=7 CONVOY_LINEAR=0.08 CONVOY_DELAY=150 bash sim/run_convoy.sh drive
+     which bridges /model/convoy_robot_7/cmd_vel and drives car 7 slowly NORTH
+     after a settle delay (so it stays in the nadir footprint through EKF settle,
+     the S11 --delay-s fix). Re-tune CONVOY_* + the spawn on the VM (gate F).
+
+     World NAME is "followbox1_px4" -> camera/clock topics are
+     /world/followbox1_px4/...; run_landing.sh + the bridge use that name. -->
+<sdf version="1.9">
+  <world name="followbox1_px4">
+
+    <!-- Camera render + the flight-sensor systems PX4 needs (same set as
+         landing_px4.sdf; without Imu/AirPressure/Magnetometer/NavSat the x500
+         sensors never publish and PX4 preflight fails "sensor missing"). -->
+    <plugin filename="gz-sim-physics-system"           name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system"     name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system"           name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-imu-system"               name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-air-pressure-system"      name="gz::sim::systems::AirPressure"/>
+    <plugin filename="gz-sim-air-speed-system"         name="gz::sim::systems::AirSpeed"/>
+    <plugin filename="gz-sim-altimeter-system"         name="gz::sim::systems::Altimeter"/>
+    <plugin filename="gz-sim-magnetometer-system"      name="gz::sim::systems::Magnetometer"/>
+    <plugin filename="gz-sim-navsat-system"            name="gz::sim::systems::NavSat"/>
+    <plugin filename="gz-sim-forcetorque-system"       name="gz::sim::systems::ForceTorque"/>
+    <plugin filename="gz-sim-contact-system"           name="gz::sim::systems::Contact"/>
+
+    <!-- GPS/NavSat origin (PX4 needs a global origin to fuse position). -->
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>47.397971057728974</latitude_deg>
+      <longitude_deg>8.546163739800146</longitude_deg>
+      <elevation>0</elevation>
+    </spherical_coordinates>
+
+    <scene>
+      <ambient>0.5 0.5 0.5 1</ambient>
+      <background>0.7 0.7 0.75 1</background>
+      <grid>false</grid>
+    </scene>
+
+    <light type="directional" name="sun">
+      <cast_shadows>false</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>1 1 1 1</diffuse>
+      <specular>0.3 0.3 0.3 1</specular>
+      <direction>0.2 0.2 -1.0</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="col">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+        </collision>
+        <visual name="vis">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+          <material><diffuse>0.5 0.5 0.5 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- CRATE obstacle: gz (E=0, N=2) = arena (north=2, east=0). 1.0x1.0 footprint
+         x 3.0 m TALL (z centre 1.5) => taller than the ~2.2 m convoy-track altitude,
+         so even a tracking-height drone cannot overfly it and MUST detour (the
+         landing crate is 1.5 m because that mission flies ~1.1 m; this warm-up
+         tracks a car, which needs ~2.2 m for a usable nadir footprint, so the
+         crate is raised to stay a genuine no-overfly obstacle). It blocks the
+         straight C2->car line (both at east 0). The arena keep_out polygon mirrors
+         the FOOTPRINT (north 1.5..2.5, east -0.5..0.5; height does not change the
+         2-D keep-out) — KEEP THE TWO IN SYNC (WS-7B asserts it). Orange in footage. -->
+    <model name="crate">
+      <static>true</static>
+      <pose>0 2 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="col">
+          <geometry><box><size>1.0 1.0 3.0</size></box></geometry>
+        </collision>
+        <visual name="vis">
+          <geometry><box><size>1.0 1.0 3.0</size></box></geometry>
+          <material>
+            <ambient>0.55 0.27 0.07 1</ambient>
+            <diffuse>0.72 0.40 0.12 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ONE convoy car BEHIND the crate: convoy_robot_7 at gz(0, 4.0) = arena
+         (north 4.0, east 0.0). Yaw 0 = facing +X (EAST); run_convoy.sh drive gives
+         body-forward linear.x, so to drive the car NORTH (further from C2, a clean
+         chase away from the drone) spawn it facing +Y by yaw pi/2 (1.5708). The
+         ArUco-7 marker on its top is what track_convoy locks. -->
+    <include>
+      <uri>model://convoy_robot_7</uri><name>convoy_robot_7</name>
+      <pose>0 4.0 0 0 0 1.5708</pose>
+    </include>
+
+    <!-- NO static tower/spectator cameras (single-thread gz render is the lockstep
+         bottleneck on the VM; extra cameras starve the flight). 1 drone = 1 onboard
+         mono_cam_640. -->
+
+  </world>
+</sdf>

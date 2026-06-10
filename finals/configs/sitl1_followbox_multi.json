@@ -1,0 +1,43 @@
+{
+  "_comment": "WS-4 SIM-B warm-up: ONE PX4 SITL camera-drone flying the user's warm-up sim #2 [takeoff -> navigate WEAVING past 3 crates -> track_convoy follows ONE car driving an IRREGULAR path]. = sitl1_followbox1.json wiring but in sim/worlds/followbox_multi_px4.sdf (3-crate slalom) with goal_ne_m [5.2, 0.0] past all three crates, and the car driven by an irregular CONVOY_ROUTE (run_landing.sh followboxmulti sets CONVOY_ROUTE). The visibility-graph planner weaves between the crates (multi-leg detour), then alpha locks ArUco 7 and bearing-pursues the snaking car. arena_name sitl_followbox_multi mirrors the SDF. ONE drone (1 cam, RTF ~1.0). Budgets are WALL-second maxima. VM-TUNE crate spacing / goal / CONVOY_ROUTE at gate F.",
+  "profile": "sitl",
+  "flight_backend": "mavsdk_sitl",
+  "frame_backend": "gazebo",
+  "sitl_address": "udpin://0.0.0.0:14540",
+  "command_timeout_s": 120,
+  "mission_budget_s": 600,
+  "camera_hfov_deg": 99.69,
+  "marker_backend": "aruco",
+  "save_marker_frames": true,
+  "arena_name": "sitl_followbox_multi",
+  "gazebo_video_host": "127.0.0.1",
+  "gazebo_video_port": 5600,
+  "detector": { "backend": "none" },
+  "guards": {
+    "launch_slot_wait_s": 240,
+    "slot_wait_s": 240,
+    "landing_reserve_s": 60,
+    "geofence_radius_m": 12.0
+  },
+  "drones": [
+    {
+      "_comment": "alpha i0 -> udpin 14540, gRPC 50051, bridge 5600. takeoff 220 cm -> navigate weaving past 3 crates to goal_ne_m [5.2,0] -> track convoy_robot_7.",
+      "id": "alpha", "plane_id": 1, "led_rgb": [255, 0, 0],
+      "altitude_band_m": 2.2,
+      "phases": ["takeoff", "navigate", "track_convoy"],
+      "sitl_address": "udpin://0.0.0.0:14540", "mavsdk_grpc_port": 50051,
+      "gazebo_video_port": 5600,
+      "sector_deg": [0.0, 360.0],
+      "zone": {
+        "takeoff": { "height_cm": 220 },
+        "navigate": { "goal_ne_m": [5.2, 0.0], "inflation_m": 0.5, "max_leg_cm": 100, "total_budget_s": 240 },
+        "track_convoy": {
+          "track_marker_ids": [7],
+          "approach_enabled": true, "approach_cm": 40, "max_step_deg": 25,
+          "track_dwell_s": 0.5, "lost_timeout_s": 8.0,
+          "max_chase_cm": 800, "investigate_budget_s": 120.0
+        }
+      }
+    }
+  ]
+}

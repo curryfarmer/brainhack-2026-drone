@@ -37,6 +37,49 @@ DEFAULT_IDS = [7, 11, 23, 42, 88]
 ROUTE = None  # None => constant (LINEAR, ANGULAR); else list of (duration_s, v, w) segments
 
 
+def parse_route(spec: str):
+    """Parse a --route spec 'dur,v,w; dur,v,w; ...' into [(dur, v, w), ...].
+
+    Each segment is `duration_s, linear_mps, angular_radps` (body-frame, the
+    same VelocityControl inputs vel_at feeds). Segments are separated by ';',
+    fields by ','. The car drives segment 1 for its duration, then segment 2,
+    ... then the whole list REPEATS (vel_at takes elapsed % period) — so an
+    irregular but DETERMINISTIC snaking path (two runs identical, the SIM-3
+    determinism contract). Used by the followbox_multi warm-up to weave the
+    convoy between crates.
+
+    Fail-loud: a malformed spec raises ValueError naming WHAT was wrong and the
+    expected shape — never a silently-dropped segment that would change the
+    path between runs. duration must be > 0 (a 0-s segment is dead config that
+    would make `elapsed % period` skip it inconsistently)."""
+    if not isinstance(spec, str) or not spec.strip():
+        raise ValueError(
+            "route spec must be a non-empty string 'dur,v,w; dur,v,w; ...' "
+            f"(got {spec!r})")
+    segments = []
+    for idx, raw in enumerate(s for s in spec.split(";") if s.strip()):
+        fields = [f.strip() for f in raw.split(",")]
+        if len(fields) != 3:
+            raise ValueError(
+                f"route segment {idx} {raw!r} must have exactly 3 fields "
+                f"'duration_s,linear_mps,angular_radps' — got {len(fields)}")
+        try:
+            dur, v, w = (float(f) for f in fields)
+        except ValueError as exc:
+            raise ValueError(
+                f"route segment {idx} {raw!r} has a non-numeric field — "
+                f"expected 'duration_s,linear_mps,angular_radps' ({exc})"
+            ) from exc
+        if not dur > 0:
+            raise ValueError(
+                f"route segment {idx} {raw!r}: duration_s must be > 0, got "
+                f"{dur} (a zero/negative segment is dead config)")
+        segments.append((dur, v, w))
+    if not segments:
+        raise ValueError(f"route spec {spec!r} parsed to zero segments")
+    return segments
+
+
 def vel_at(elapsed_s: float, linear: float, angular: float, delay_s: float = 0.0):
     # Hold still until delay_s (still a PURE function of elapsed -> two runs
     # identical). S11 uses this so the straight-lane cars stay at their spawns
@@ -65,7 +108,21 @@ def main() -> int:
     ap.add_argument("--angular", type=float, default=0.2, help="yaw rate rad/s (radius=lin/ang)")
     ap.add_argument("--delay-s", type=float, default=0.0,
                     help="hold at spawn (zero velocity) for the first N s, then drive")
+    ap.add_argument("--route", type=str, default=None,
+                    help="irregular path 'dur,v,w; dur,v,w; ...' (body-frame "
+                         "duration_s,linear_mps,angular_radps; repeats). "
+                         "Overrides --linear/--angular when set.")
     args = ap.parse_args()
+
+    global ROUTE
+    if args.route is not None:
+        try:
+            ROUTE = parse_route(args.route)
+        except ValueError as exc:
+            print(f"FAIL: --route {args.route!r} — {exc}", file=sys.stderr)
+            return 2
+        print(f"convoy_driver: route = {len(ROUTE)} segments "
+              f"(period {sum(d for d, _, _ in ROUTE):.0f}s): {ROUTE}")
 
     try:
         import rclpy

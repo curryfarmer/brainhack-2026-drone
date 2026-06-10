@@ -3,6 +3,7 @@
 #
 #   bash sim/run_landing.sh install            # x500 cam model + pad_102 texture + copy worlds into PX4
 #   bash sim/run_landing.sh land1   [secs]     # gate L1: 1 drone, full [takeoff,navigate,land_on_pad]
+#   bash sim/run_landing.sh land1-gui [secs]   # ^ + a LIVE 3D view on the VM :0 desktop (watch it fly)
 #   bash sim/run_landing.sh land3   [secs]     # gate L2: 3 drones, staggered + serialized landing
 #   bash sim/run_landing.sh abort3  [secs]     # drill: 'q' lands all (orderly)
 #   bash sim/run_landing.sh kill3   [secs]     # drill: kill instance 2 mid-mission (isolation)
@@ -61,8 +62,10 @@ install() {
     return 3
   fi
   mkdir -p "$PX4_WORLDS"
-  cp "$REPO/sim/worlds/landing_px4.sdf"  "$PX4_WORLDS/" && echo "[install] landing_px4.sdf  -> $PX4_WORLDS"
-  cp "$REPO/sim/worlds/landing_view.sdf" "$PX4_WORLDS/" && echo "[install] landing_view.sdf -> $PX4_WORLDS"
+  cp "$REPO/sim/worlds/landing_px4.sdf"          "$PX4_WORLDS/" && echo "[install] landing_px4.sdf          -> $PX4_WORLDS"
+  cp "$REPO/sim/worlds/landing_view.sdf"         "$PX4_WORLDS/" && echo "[install] landing_view.sdf         -> $PX4_WORLDS"
+  cp "$REPO/sim/worlds/followbox1_px4.sdf"       "$PX4_WORLDS/" && echo "[install] followbox1_px4.sdf       -> $PX4_WORLDS"
+  cp "$REPO/sim/worlds/followbox_multi_px4.sdf"  "$PX4_WORLDS/" && echo "[install] followbox_multi_px4.sdf  -> $PX4_WORLDS"
 }
 
 # Launch one gz->TCP bridge (PID + ready gate), per-port files (3 concurrent).
@@ -134,11 +137,30 @@ stop() {
     [ -e "$f" ] || continue
     kill -9 "$(cat "$f")" 2>/dev/null; rm -f "$f"
   done
+  [ -e "$RUN/gz_gui.pid" ] && { kill -9 "$(cat "$RUN/gz_gui.pid")" 2>/dev/null; rm -f "$RUN/gz_gui.pid"; }
   pkill -9 -f 'bin/px4 -i' 2>/dev/null
-  pkill -9 -f 'landing_px4\|landing_view' 2>/dev/null   # PX4's gz server (these worlds)
+  pkill -9 -f 'landing_px4\|landing_view\|followbox1_px4\|followbox_multi_px4' 2>/dev/null   # PX4's gz server (these worlds)
   pkill -9 -f 'g[z] sim' 2>/dev/null                     # last resort (bracket = no self-match)
   sleep 1
   echo "[stop] torn down"
+}
+
+# Optional LIVE 3D GUI (GZ_GUI=1) — the gz-GUI-over-ssh workflow (see
+# finals/docs/gz_gui_over_ssh.md). PX4 runs the gz server HEADLESS; this attaches a
+# render-only `gz sim -g` CLIENT painting on the VM's OWN :0 desktop (visible in the
+# VMware console, NOT forwarded to the laptop). It adds NO camera sensor, so it adds
+# NO load to the single-thread gz lockstep (the SIM-5 RTF ceiling) = safe during
+# flight. stop() reaps it (explicit pid + the bracket `g[z] sim` pkill).
+gz_gui_start() {
+  [ "${GZ_GUI:-0}" = "1" ] || return 0
+  local disp="${GZ_GUI_DISPLAY:-:0}"
+  echo "[gui] attaching gz GUI client on DISPLAY=$disp (software GL, XWayland) -> $RUN/gz_gui.log"
+  DISPLAY="$disp" QT_QPA_PLATFORM=xcb LIBGL_ALWAYS_SOFTWARE=1 \
+    GZ_SIM_RESOURCE_PATH="$REPO/sim/models:$PX4_MODELS:${GZ_SIM_RESOURCE_PATH:-}" \
+    setsid gz sim -g > "$RUN/gz_gui.log" 2>&1 &
+  echo $! > "$RUN/gz_gui.pid"
+  echo "[gui] launched (wrapper PID $(cat "$RUN/gz_gui.pid")) — LOOK AT THE VMware CONSOLE WINDOW."
+  echo "[gui]   window blank? -> tail $RUN/gz_gui.log ; is the :0 desktop logged in?"
 }
 
 # --------------------------------------------------------------------------- #
@@ -149,6 +171,7 @@ land1() {
   export DISPLAY="${DISPLAY:-:0}"
   export GZ_SIM_RESOURCE_PATH="$REPO/sim/models:$PX4_MODELS:${GZ_SIM_RESOURCE_PATH:-}"
   launch_instance landing_px4 0 || { stop; return 3; }
+  gz_gui_start                                  # no-op unless GZ_GUI=1 (live 3D view on :0)
   echo "[land1] settling EKF ${SETTLE_1}s"; sleep "$SETTLE_1"
   bridge "$(cam_topic landing_px4 0)" 5600 || { stop; return 4; }
   echo "[land1] finals sitl1_landing budget=${secs}s"
@@ -225,13 +248,59 @@ viewtest() {
   return $rc
 }
 
+# --------------------------------------------------------------------------- #
+# WS-4 warm-up sims: 1 drone [takeoff -> navigate around box(es) -> track_convoy]
+# in a followbox world, with ONE convoy car driven via sim/run_convoy.sh drive
+# (it sources ROS + bridges /model/convoy_robot_<id>/cmd_vel against the
+# PX4-OWNED gz server, then runs convoy_driver). The convoy CONVOY_* env (ids,
+# speed/route, settle delay) is set by the followbox1 / followboxmulti wrappers.
+followbox() {
+  local world="$1" config="$2" secs="${3:-400}"
+  install
+  export DISPLAY="${DISPLAY:-:0}"
+  export GZ_SIM_RESOURCE_PATH="$REPO/sim/models:$PX4_MODELS:${GZ_SIM_RESOURCE_PATH:-}"
+  launch_instance "$world" 0 || { stop; return 3; }
+  gz_gui_start                                  # no-op unless GZ_GUI=1
+  echo "[followbox] settling EKF ${SETTLE_1}s"; sleep "$SETTLE_1"
+  bridge "$(cam_topic "$world" 0)" 5600 || { stop; return 4; }
+  # Drive ONE convoy car for the whole flight window (+margin). CONVOY_DELAY
+  # holds it at spawn through the drone's navigate so it is still in the nadir
+  # footprint when track_convoy starts (the S11 --delay-s lesson).
+  echo "[followbox] convoy drive ids=${CONVOY_IDS:-7} delay=${CONVOY_DELAY:-0}s route=${CONVOY_ROUTE:-<linear>}"
+  bash "$REPO/sim/run_convoy.sh" drive "$((secs + 60))" || echo "[followbox] WARN convoy drive returned nonzero — CHECK: tail $RUN/driver.log $RUN/bridge.log" >&2
+  echo "[followbox] finals $config budget=${secs}s"
+  local rc=0
+  ( cd "$REPO" && "$VENV_PY" -m finals.main --profile sitl \
+      --config "$config" --budget "$secs" ) || rc=$?
+  bash "$REPO/sim/run_convoy.sh" stop 2>/dev/null || true   # reap driver + ros_gz bridge
+  stop
+  echo "[followbox] finals rc=$rc — logs under $REPO/runs_finals/<latest>/"
+  return $rc
+}
+
+# SIM-A: 1 box, follow 1 car driving slowly straight (CONVOY_LINEAR).
+followbox1() {
+  CONVOY_IDS="7" CONVOY_LINEAR="0.08" CONVOY_ANGULAR="0.0" CONVOY_DELAY="150" \
+    followbox followbox1_px4 finals/configs/sitl1_followbox1.json "${1:-400}"
+}
+# SIM-B: 3 boxes (slalom), follow 1 car driving an IRREGULAR route (CONVOY_ROUTE
+# 'dur,v,w; ...' body-frame — a gentle snake; VM-TUNE at gate F).
+followboxmulti() {
+  CONVOY_IDS="7" CONVOY_DELAY="150" \
+  CONVOY_ROUTE="40,0.07,0.0; 20,0.05,0.30; 40,0.07,0.0; 20,0.05,-0.30" \
+    followbox followbox_multi_px4 finals/configs/sitl1_followbox_multi.json "${1:-450}"
+}
+
 case "${1:-}" in
   install)  install ;;
   land1)    shift; land1 "$@" ;;
+  land1-gui) shift; export GZ_GUI=1; land1 "${1:-300}" ;;   # +live 3D view on the VM :0 desktop
   land3)    shift; land3 "${1:-700}" normal ;;
   abort3)   shift; land3 "${1:-700}" abort ;;
   kill3)    shift; land3 "${1:-700}" kill ;;
   viewtest) shift; viewtest "$@" ;;
+  followbox1)    shift; followbox1 "$@" ;;        # SIM-A: 1 box + 1 convoy
+  followboxmulti) shift; followboxmulti "$@" ;;   # SIM-B: 3 boxes + irregular convoy
   stop)     stop ;;
-  *) echo "usage: $0 {install|land1 [secs]|land3 [secs]|abort3 [secs]|kill3 [secs]|viewtest [secs]|stop}" >&2; exit 64 ;;
+  *) echo "usage: $0 {install|land1 [secs]|land1-gui [secs]|land3 [secs]|abort3 [secs]|kill3 [secs]|viewtest [secs]|followbox1 [secs]|followboxmulti [secs]|stop}" >&2; exit 64 ;;
 esac

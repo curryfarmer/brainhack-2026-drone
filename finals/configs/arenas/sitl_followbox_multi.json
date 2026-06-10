@@ -1,0 +1,24 @@
+{
+  "_comment": "WS-4 SIM-B warm-up arena — the finals (north_m, east_m) mirror of sim/worlds/followbox_multi_px4.sdf. Same frame as sitl_followbox1 (arena north = gz +Y, east = gz +X). THREE crates form a slalom: crate_a straddles east 0 (blocks the straight C2->goal line), crate_b sits in the east lane and crate_c in the west lane higher up, so the visibility-graph planner must WEAVE (the 'more boxes / more complex environment' warm-up #2). The convoy car snakes between them via an irregular CONVOY_ROUTE (sitl1_followbox_multi.json). One keep_out polygon per crate, each mirroring its SDF footprint EXACTLY (WS-7B asserts SDF<->arena). bounds_m [min_north,min_east,max_north,max_east] widened to hold the weave. inflation_m 0.5 (config). RE-MEASURE + VM-TUNE crate spacing at gate F so a clean weaving path exists at the real arena scale.",
+  "bounds_m": [-1.0, -3.0, 6.0, 3.0],
+  "c2_origin_m": [0.0, 0.0],
+  "c2_heading_deg": 0.0,
+  "keep_out": [
+    {
+      "_comment": "crate_a: gz centre (E=0.0, N=1.8), 1.0x1.0 -> north 1.3..2.3, east -0.5..0.5. Straddles east 0 -> blocks the straight C2->goal line.",
+      "id": "crate_a",
+      "polygon_m": [[1.3, -0.5], [2.3, -0.5], [2.3, 0.5], [1.3, 0.5]]
+    },
+    {
+      "_comment": "crate_b: gz centre (E=1.3, N=3.3), 1.0x1.0 -> north 2.8..3.8, east 0.8..1.8. Blocks the EAST detour lane.",
+      "id": "crate_b",
+      "polygon_m": [[2.8, 0.8], [3.8, 0.8], [3.8, 1.8], [2.8, 1.8]]
+    },
+    {
+      "_comment": "crate_c: gz centre (E=-1.3, N=4.6), 1.0x1.0 -> north 4.1..5.1, east -1.8..-0.8. Blocks the WEST lane higher up -> forces the weave back east toward the goal.",
+      "id": "crate_c",
+      "polygon_m": [[4.1, -1.8], [5.1, -1.8], [5.1, -0.8], [4.1, -0.8]]
+    }
+  ],
+  "pads": []
+}
