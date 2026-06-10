@@ -62,6 +62,43 @@ def _finite_pair(raw: Any, where: str) -> Tuple[float, float]:
     return (float(raw[0]), float(raw[1]))
 
 
+# ============================================================
+# ORGANIZER FRAME BINDING (NAV-FIX, lever L1) — docs/field_markers.md
+# ============================================================
+# The organizers publish the 5 static beacons in their OWN (x, y) metres, where
+# x is the SHORT cage axis (~5.3 m) and y is the LONG cage axis (~11.3 m). We
+# ADOPT that frame as canonical to kill remap bugs (the marker coords arrive in
+# this frame for free) and bind it ONCE to our arena (north_m, east_m):
+#
+#     north <- y   (the LONG ~11.3 m axis)
+#     east  <- x   (the SHORT ~5.3 m axis)
+#
+# so an organizer point (x, y) is arena point_m = (north=y, east=x) — and the
+# inverse, arena (north, east) -> organizer (x=east, y=north). This is an AXIS
+# RELABEL (a swap), NOT a rotation: it is its own inverse, so the round-trip is
+# exact. ⚠️ CONFIRM ONSITE (open Q #1, field_markers.md): which cage corner is
+# the organizer (0,0) and which way +x/+y point sets whether this binding needs
+# an additional offset/flip; the relabel itself (long<->north, short<->east) is
+# the stable part. The step0 contract test already pins this binding
+# (test_step0_contracts: "north = ... y, east = ... x"; id 11 -> point_m
+# [4.40, 1.35] == [y, x]).
+def organizer_xy_to_ne(xy: Any) -> Point:
+    """Map an organizer (x, y) coord (x=short axis, y=long axis; metres) to the
+    arena (north_m, east_m): north <- y, east <- x (see the binding block
+    above). Pure relabel; ConfigError on a malformed pair. CONFIRM the origin /
+    axis sense onsite."""
+    x, y = _finite_pair(xy, "organizer_xy_to_ne: xy (x_short_m, y_long_m)")
+    return (y, x)
+
+
+def ne_to_organizer_xy(point_m: Any) -> Point:
+    """Inverse of organizer_xy_to_ne: arena (north_m, east_m) -> organizer
+    (x, y) = (east, north). Its own inverse with organizer_xy_to_ne, so the
+    round-trip is EXACT (a swapped-axis mutant breaks the round-trip test)."""
+    north, east = _finite_pair(point_m, "ne_to_organizer_xy: point_m (north_m, east_m)")
+    return (east, north)
+
+
 def discord_to_ned(coord: Any,
                    c2_origin_m: Any,
                    c2_heading_deg: float) -> Point:

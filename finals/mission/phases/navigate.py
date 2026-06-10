@@ -1,7 +1,9 @@
 """navigate — open-loop transit phase: fly C2 -> pad-vicinity over planner Legs.
 
-from_config resolves the goal (a pad_id or an explicit [north_m, east_m]) from
-the ArenaMap + DroneConfig.zone["navigate"], calls the visibility-graph planner
+from_config resolves the goal (a pad_id, an explicit [north_m, east_m], or a
+marker_id naming a known field beacon in ArenaMap.markers — the NAV-FIX
+beacon-region approach) from the ArenaMap + DroneConfig.zone["navigate"],
+calls the visibility-graph planner
 (finals.mission.planning.visibility_graph.plan) for a FROZEN tuple[Leg, ...],
 and step() flies each leg OPEN-LOOP: Rotate to the leg's ABSOLUTE compass
 heading (re-zeroing accumulated yaw creep against the TRUSTED compass every
@@ -72,8 +74,12 @@ if TYPE_CHECKING:  # type hints only — no import-time coupling to config
     from finals.mission.obstacle_map import ObstacleMap
 
 #: Constructor keywords settable from DroneConfig.zone["navigate"]. Exactly ONE
-#: of pad_id / goal_ne_m names the goal; the rest are transit tunables.
-_TUNABLES = ("pad_id", "goal_ne_m", "inflation_m", "max_leg_cm",
+#: of pad_id / goal_ne_m / marker_id names the goal; the rest are transit
+#: tunables. NAV-FIX adds marker_id: target a KNOWN field-beacon coordinate
+#: (arena.markers) as the waypoint — each beacon sits ~20-30 cm from its pad, so
+#: "navigate to the beacon region with slack" puts the drone over the pad for
+#: the visual servo / pad-detector to refine (docs/field_markers.md).
+_TUNABLES = ("pad_id", "goal_ne_m", "marker_id", "inflation_m", "max_leg_cm",
              "heading_tol_deg", "max_step_deg", "total_budget_s")
 
 
@@ -180,21 +186,27 @@ class Navigate(MissionPhase):
                 f"the profile config (it loads finals/configs/arenas/"
                 f"<arena_name>.json). Got arena_name={arena_name!r}.")
 
-        # --- goal: EXACTLY ONE of pad_id / goal_ne_m. ---
-        has_pad = "pad_id" in kwargs
-        has_coord = "goal_ne_m" in kwargs
-        if has_pad and has_coord:
+        # --- goal: EXACTLY ONE of pad_id / goal_ne_m / marker_id. ---
+        # marker_id (NAV-FIX) targets a KNOWN field-beacon coordinate from
+        # arena.markers — the beacon-region approach: each beacon is ~20-30 cm
+        # from its pad, so the open-loop transit only needs to reach the beacon
+        # coord and the visual servo / pad-detector refines the touchdown.
+        goal_sources = [k for k in ("pad_id", "goal_ne_m", "marker_id")
+                        if k in kwargs]
+        if len(goal_sources) > 1:
             raise ConfigError(
-                f"drone {drone_cfg.id!r}: zone[\"navigate\"] sets BOTH pad_id "
-                f"and goal_ne_m — give EXACTLY ONE goal source (a pad_id names "
-                f"an arena pad; goal_ne_m is an explicit [north_m, east_m]).")
-        if not has_pad and not has_coord:
+                f"drone {drone_cfg.id!r}: zone[\"navigate\"] sets MULTIPLE goal "
+                f"sources {goal_sources} — give EXACTLY ONE (pad_id names an "
+                f"arena pad; goal_ne_m is an explicit [north_m, east_m]; "
+                f"marker_id names a known field beacon from arena.markers).")
+        if not goal_sources:
             raise ConfigError(
-                f"drone {drone_cfg.id!r}: zone[\"navigate\"] sets NEITHER "
-                f"pad_id nor goal_ne_m — name EXACTLY ONE goal (a pad_id from "
-                f"the arena, or an explicit goal_ne_m [north_m, east_m]).")
+                f"drone {drone_cfg.id!r}: zone[\"navigate\"] sets NO goal — name "
+                f"EXACTLY ONE of pad_id (an arena pad), goal_ne_m (an explicit "
+                f"[north_m, east_m]), or marker_id (a known field beacon from "
+                f"arena.markers).")
 
-        if has_pad:
+        if "pad_id" in kwargs:
             pad_id = kwargs["pad_id"]
             pads = {p.id: p for p in arena.pads}
             if pad_id not in pads:
@@ -205,6 +217,23 @@ class Navigate(MissionPhase):
                     f"arena_name.")
             goal_m = pads[pad_id].center_m
             goal_desc = f"pad {pad_id!r} center {tuple(goal_m)}"
+        elif "marker_id" in kwargs:
+            marker_id = kwargs["marker_id"]
+            if not isinstance(marker_id, int) or isinstance(marker_id, bool):
+                raise ConfigError(
+                    f"drone {drone_cfg.id!r}: zone[\"navigate\"].marker_id must "
+                    f"be an int ArUco beacon id (e.g. 11/45/51/67/101), got "
+                    f"{marker_id!r}.")
+            markers = {m.id: m for m in arena.markers}
+            if marker_id not in markers:
+                raise ConfigError(
+                    f"drone {drone_cfg.id!r}: zone[\"navigate\"].marker_id "
+                    f"{marker_id} is not a beacon in this arena — available "
+                    f"marker ids: {sorted(markers)}. Check the marker_id (typo?) "
+                    f"or the arena_name (does this arena declare markers?).")
+            goal_m = markers[marker_id].point_m
+            goal_desc = (f"beacon {marker_id} region (known coord {tuple(goal_m)}; "
+                         f"servo/pad-detector refines touchdown)")
         else:
             raw = kwargs["goal_ne_m"]
             if (not isinstance(raw, (list, tuple)) or len(raw) != 2

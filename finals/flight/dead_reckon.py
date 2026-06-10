@@ -132,6 +132,27 @@ class DeadReckoner:
     def pose(self) -> DRPose:
         return DRPose(self._north_m, self._east_m, self._alt_m, self._yaw_deg)
 
+    def apply_position_fix(self, north_m: float, east_m: float) -> None:
+        """OPTIONAL drift reset (NAV-FIX lever C): overwrite the horizontal
+        (north_m, east_m) estimate with an ABSOLUTE position fix derived from a
+        decoded KNOWN-coord beacon (map_sensing.position_fix_from_marker). Keeps
+        alt + yaw (the altitude is the trusted ToF feed and the yaw the trusted
+        compass — only the drifting horizontal estimate is corrected).
+
+        OPT-IN by design: NOTHING calls this in the default open-loop flow, so
+        the floor behaviour (pure dead-reckon) is UNCHANGED and every existing
+        DR/nav test stays green. A caller wires it only when a known beacon is
+        decoded and the range/bearing estimate is trustworthy; it NEVER becomes
+        a hard dependency. Quality stays DEAD_RECKONING (a fix corrects the
+        accumulated drift but the airframe still has no live position feed, so
+        the estimate is NOT promoted to MEASURED — this is the same
+        annotation-only contract as the rest of this class).
+
+        Fail loud on a non-finite fix (the same boundary guard as every other
+        entry point — a NaN here would poison every later Sighting silently)."""
+        self._north_m = _require_finite(north_m, "position-fix north_m")
+        self._east_m = _require_finite(east_m, "position-fix east_m")
+
     def note_action_complete(self, action: Action) -> None:
         """Integrate one COMPLETED action (see module docstring semantics).
 

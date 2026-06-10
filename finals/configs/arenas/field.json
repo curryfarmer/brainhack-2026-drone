@@ -1,0 +1,17 @@
+{
+  "_comment": "NAV-FIX REAL field arena — the organizer-published Challenge-2A landing cage. ORGANIZER FRAME ADOPTED (docs/field_markers.md L1 + mission/planning/frame.py binding block): arena north <- organizer y (the LONG ~11.3 m axis), arena east <- organizer x (the SHORT ~5.3 m axis). So an organizer (x, y) beacon is point_m = [north=y, east=x]. CONFIRM ONSITE which cage corner is organizer (0,0) and which way +x/+y point (open Q #1) — the long<->north / short<->east relabel is the stable part; an origin/flip correction (if any) is a config edit at gate D, not code. bounds_m derived to enclose the cage rectangle AND all 5 beacons (map_sensing.bounds_from_markers_and_cage); strict_marker_ids opts into the KNOWN_FIELD_MARKER_IDS rule so a mistyped beacon id fails loud HERE. keep_out / pads are PLACEHOLDER (hand-map the arches/pillars/barriers from the overhead photo + re-survey the pad coords at gate D); c2_origin_m is a guess pending the onsite C2 placement. Tune CONFIG, not code.",
+  "bounds_m": [0.0, 0.0, 11.3, 5.3],
+  "c2_origin_m": [0.5, 2.65],
+  "c2_heading_deg": 0.0,
+  "strict_marker_ids": true,
+  "markers": [
+    { "_comment": "beacon 11: organizer x1.35 y4.40 -> point_m [north=4.40, east=1.35]", "id": 11, "point_m": [4.40, 1.35] },
+    { "_comment": "beacon 45: organizer x1.30 y7.85 -> point_m [7.85, 1.30]", "id": 45, "point_m": [7.85, 1.30] },
+    { "_comment": "beacon 51: organizer x4.40 y4.40 -> point_m [4.40, 4.40]", "id": 51, "point_m": [4.40, 4.40] },
+    { "_comment": "beacon 67: organizer x1.95 y8.70 -> point_m [8.70, 1.95]", "id": 67, "point_m": [8.70, 1.95] },
+    { "_comment": "beacon 101: organizer x4.40 y7.85 -> point_m [7.85, 4.40]", "id": 101, "point_m": [7.85, 4.40] }
+  ],
+  "keep_out": [],
+  "pads": [],
+  "lanes": []
+}
