@@ -85,6 +85,10 @@ class TrackConvoy(MissionPhase):
         "track_dwell_s", "approach_enabled", "approach_cm", "center_px_frac",
         "max_chase_cm", "lead_gain", "reacquire_dwell_s", "lost_timeout_s",
         "investigate_budget_s", "min_sightings_to_pass",
+        # Read-and-release (coverage): chase only until the id is confidently
+        # read, then mark it SERVICED and go find the next unread convoy.
+        "disengage_on_read", "read_confirm_hits", "search_when_idle",
+        "search_leg_cm", "search_turn_deg", "search_dwell_s",
     )
 
     def __init__(self, *, height_cm: int = 80,
@@ -99,6 +103,12 @@ class TrackConvoy(MissionPhase):
                  lost_timeout_s: float = 4.0,
                  investigate_budget_s: float = 90.0,
                  min_sightings_to_pass: int = 0,
+                 disengage_on_read: bool = False,
+                 read_confirm_hits: int = 3,
+                 search_when_idle: bool = False,
+                 search_leg_cm: int = 200,
+                 search_turn_deg: float = 90.0,
+                 search_dwell_s: float = 0.5,
                  sector_deg: "Optional[List[float]]" = None,
                  registry: "Optional[ConvoyRegistry]" = None):
         def _bad(key: str, value, why: str) -> ConfigError:
@@ -155,6 +165,19 @@ class TrackConvoy(MissionPhase):
             raise _bad("min_sightings_to_pass", min_sightings_to_pass,
                        "must be an int >= 0 (0 = off; > 0 = fail loud with Abort "
                        "if fewer sightings of the convoy were captured)")
+        if not isinstance(disengage_on_read, bool):
+            raise _bad("disengage_on_read", disengage_on_read, "must be a bool")
+        if not isinstance(search_when_idle, bool):
+            raise _bad("search_when_idle", search_when_idle, "must be a bool")
+        _pos_int("read_confirm_hits", read_confirm_hits)
+        _pos_int("search_leg_cm", search_leg_cm)
+        _pos_num("search_dwell_s", search_dwell_s)
+        if (not isinstance(search_turn_deg, (int, float))
+                or isinstance(search_turn_deg, bool)
+                or not math.isfinite(search_turn_deg) or search_turn_deg == 0):
+            raise _bad("search_turn_deg", search_turn_deg,
+                       "must be a finite non-zero number (deg, +ve = CCW) — the "
+                       "per-leg turn of the idle search pattern")
         if registry is not None and not all(
                 hasattr(registry, m) for m in
                 ("claim", "renew", "release", "claimable_ids")):
@@ -182,6 +205,20 @@ class TrackConvoy(MissionPhase):
         self.lost_timeout_s = float(lost_timeout_s)
         self.investigate_budget_s = float(investigate_budget_s)
         self.min_sightings_to_pass = min_sightings_to_pass
+        #: Read-and-release (coverage). disengage_on_read: once the locked id is
+        #: read read_confirm_hits times in TRACK (a confident, consistent read
+        #: on top of the acquire_hits lock), release it SERVICED and re-acquire
+        #: the next unread id instead of chasing to investigate_budget_s.
+        #: search_when_idle: when ACQUIRE has nothing claimable in view, fly a
+        #: body-frame search leg to reposition (instead of hovering then giving
+        #: up), so a disengaged drone goes and finds another convoy. Both OFF by
+        #: default = today's single-target chase behavior (all S11 tests green).
+        self.disengage_on_read = disengage_on_read
+        self.read_confirm_hits = read_confirm_hits
+        self.search_when_idle = search_when_idle
+        self.search_leg_cm = search_leg_cm
+        self.search_turn_deg = float(search_turn_deg)
+        self.search_dwell_s = float(search_dwell_s)
         #: Shared C2 ConvoyRegistry (None = static track_marker_ids behavior).
         #: from_config leaves it None; main._build_phases injects via
         #: bind_registry so dynamic assignment turns on without a config-shape
@@ -206,6 +243,10 @@ class TrackConvoy(MissionPhase):
         self._just_moved = False
         self._chase_used_cm = 0
         self._seen_count = 0
+        self._serviced_count = 0       # ids released SERVICED (read-and-release)
+        self._target_reads = 0         # fresh reads of the CURRENT target in TRACK
+        self._search_idx = 0           # cursor into the idle-search pattern
+        self._search_plan = self._build_search_plan()
         self._lost_events = 0
         #: WS-7A: re-acquires triggered by an INTENTIONAL handover (the lock
         #: moved to the neighbour we exited toward), counted apart from
@@ -334,8 +375,9 @@ class TrackConvoy(MissionPhase):
         if elapsed > self.investigate_budget_s:
             return self._finish(
                 ctx, f"track_convoy[{ctx.drone_id}]: investigate budget "
-                f"{self.investigate_budget_s:g}s elapsed before a lock — "
-                f"handing back", serviced=False)
+                f"{self.investigate_budget_s:g}s reached "
+                f"({self._serviced_count} serviced) — handing back",
+                serviced=False)
         if self._t_acquire_start is None:          # defensive: always set above
             self._t_acquire_start = ctx.now
         acq_elapsed = ctx.now - self._t_acquire_start
@@ -351,12 +393,21 @@ class TrackConvoy(MissionPhase):
             self._state = "track"
             self._t_last_seen = ctx.now
             self._exited_flagged = False   # fresh target starts in-zone
+            self._target_reads = 0         # fresh per-target confirm counter
             return None                    # steer this same tick
+        if self.search_when_idle:
+            # Coverage mode: nothing claimable in view -> don't give up and don't
+            # hover in place; fly the next body-frame search leg so a NEW convoy
+            # enters the nadir footprint. Bounded by investigate_budget_s (the
+            # phase cap, checked above) + the orchestrator's all-serviced
+            # early-stop; the acquire_budget_s give-up is intentionally skipped.
+            return self._next_search_action()
         if acq_elapsed > self.acquire_budget_s:
             return self._finish(
                 ctx, f"track_convoy[{ctx.drone_id}]: no id reached "
                 f"{self.acquire_hits} hit(s) within {self.acquire_budget_s:g}s "
-                f"— nothing to track, handing back", serviced=False)
+                f"— nothing to track ({self._serviced_count} serviced), handing "
+                f"back", serviced=False)
         return Hover(duration_s=self.acquire_dwell_s)
 
     def _step_track(self, ctx: AgentContext, elapsed: float) -> Action:
@@ -381,6 +432,15 @@ class TrackConvoy(MissionPhase):
                     self._lost_events += 1
                 self._drop_target(ctx)
                 return Hover(duration_s=self.reacquire_dwell_s)
+            # Read-and-release: we OWN the lock and have now read it
+            # read_confirm_hits times in TRACK (a confident, consistent read on
+            # top of the acquire_hits lock). The objective for THIS convoy is
+            # met -> mark SERVICED and peel off to the next, rather than chasing
+            # to investigate_budget_s. OFF unless disengage_on_read.
+            self._target_reads += len(fresh)
+            if (self.disengage_on_read
+                    and self._target_reads >= self.read_confirm_hits):
+                return self._confirm_and_release(ctx)
             self._soft_zone(ctx, fresh)   # flag the exit/re-entry edge (WS-7A)
             return self._steer(ctx, fresh)
         # lost this tick (no fresh sighting)
@@ -402,7 +462,37 @@ class TrackConvoy(MissionPhase):
         self._target_id = None
         self._obs.clear()
         self._exited_flagged = False
+        self._target_reads = 0
         self._enter_acquire(ctx)
+
+    def _confirm_and_release(self, ctx: AgentContext) -> Action:
+        """Read-and-release: the locked id has been confidently read, so mark it
+        SERVICED (counts to 5-of-5, never re-claimable) and re-enter ACQUIRE for
+        the next unread convoy. We chased only as long as it took to confirm."""
+        self._release(ctx, serviced=True)
+        self._serviced_count += 1
+        self._drop_target(ctx)         # clears target + fresh acquire budget
+        return Hover(duration_s=self.reacquire_dwell_s)
+
+    def _build_search_plan(self) -> List[Action]:
+        """A cyclic body-frame search pattern for the idle/disengaged drone: a
+        repeating [Move FORWARD, Hover, Rotate] leg that translates the drone so
+        a NEW convoy enters the nadir footprint instead of hovering in place.
+        Open-loop (bounded by investigate_budget_s + gate-E discipline), so it is
+        used ONLY when search_when_idle. Same primitives as OpenLoopLawnmower."""
+        return [
+            Move(direction=Direction.FORWARD, distance_cm=self.search_leg_cm),
+            Hover(duration_s=self.search_dwell_s),
+            Rotate(angle_deg=self.search_turn_deg),
+        ]
+
+    def _next_search_action(self) -> Action:
+        """The next leg of the idle search pattern (cycles forever; the time cap
+        is investigate_budget_s and the swarm cap is the orchestrator's
+        all-serviced early-stop)."""
+        action = self._search_plan[self._search_idx % len(self._search_plan)]
+        self._search_idx += 1
+        return action
 
     def _steer(self, ctx: AgentContext, fresh: List) -> Action:
         usable = [s for s in fresh if s.bearing_deg is not None]
