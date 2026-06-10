@@ -81,11 +81,16 @@ def test_trained_pad_weights_decode_a_real_frame():
         pytest.skip("no pad frames found — set PAD_FRAMES_DIR or populate "
                     "data/validation/images")
 
-    got = []                       # detections collected off the worker thread
+    got = []                       # (detection, (frame_h, frame_w)) off the worker
     fired = threading.Event()
 
-    def _cb(detections, _annotated, _ctx):
-        got.extend(detections)
+    def _cb(detections, _annotated, ctx):
+        # Stamp each detection with the dims of the frame it came from — frames
+        # may differ in size/orientation (e.g. mixed-orientation phone photos),
+        # so a single frames[0] reference can't bound them all.
+        hw = (ctx or {}).get("hw")
+        for d in detections:
+            got.append((d, hw))
         fired.set()
 
     det_cfg = DetectorConfig(backend="ultralytics", weights=weights,
@@ -95,24 +100,26 @@ def test_trained_pad_weights_decode_a_real_frame():
         for i, fp in enumerate(frames):
             img = cv2.imread(fp)
             assert img is not None, f"cv2 could not read frame {fp!r}"
-            pool.submit_image(img, {"drone_id": "test", "frame": i})
+            pool.submit_image(img, {"drone_id": "test", "frame": i,
+                                    "hw": img.shape[:2]})
         # Bounded wait for the worker pool to drain (CPU YOLO ~tens of ms/frame).
         fired.wait(timeout=30.0)
     finally:
         pool.stop(timeout_s=15.0)
 
-    pad_hits = [d for d in got if d.get("class_name") == _PAD_CLASS]
+    pad_hits = [(d, hw) for d, hw in got if d.get("class_name") == _PAD_CLASS]
     assert pad_hits, (
         f"trained weights {os.path.basename(weights)} produced NO "
         f"{_PAD_CLASS!r} detection across {len(frames)} real frames "
-        f"(got classes={sorted({d.get('class_name') for d in got})}) — the "
+        f"(got classes={sorted({d.get('class_name') for d, _ in got})}) — the "
         f"model/seam is not decoding pads")
 
-    # Contract the pad servo relies on: a real bbox, a sane confidence.
-    h, w = cv2.imread(frames[0]).shape[:2]
-    for d in pad_hits:
+    # Contract the pad servo relies on: a real bbox (inside ITS OWN frame), a
+    # sane confidence, the single pad class.
+    for d, hw in pad_hits:
+        fh, fw = hw
         x0, y0, x1, y1 = d["bbox"]
         assert 0.0 <= x0 < x1 and 0.0 <= y0 < y1, f"degenerate bbox {d['bbox']}"
-        assert x1 <= w + 1 and y1 <= h + 1, f"bbox {d['bbox']} outside {w}x{h}"
+        assert x1 <= fw + 1 and y1 <= fh + 1, f"bbox {d['bbox']} outside {fw}x{fh}"
         assert 0.0 < d["confidence"] <= 1.0
         assert d["class_id"] == 0          # nc=1 -> the single pad class
