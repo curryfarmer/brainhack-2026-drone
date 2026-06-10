@@ -192,7 +192,11 @@ class PyhulaxVideoSource(VideoSource):
         raise SensorTimeout(
             f"{self._source_id}: no first video frame within {timeout_s:.1f} s "
             f"— stream stuck in the startup None-window; check the camera / "
-            f"drone link / decode")
+            f"drone link / decode. FIXES: raise the video timeout; turn the "
+            f"WINDOWS FIREWALL OFF for inbound UDP (blocked UDP looks exactly "
+            f"like this); POWER-CYCLE the drone to clear a stale bind_client; "
+            f"ONE stream per drone, no auto-reconnect (close the HulaGo app / "
+            f"any other client)")
 
     def stop(self) -> None:
         """Idempotent; never raises (logs). Typed catches only (see module

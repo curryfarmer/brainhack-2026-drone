@@ -344,6 +344,8 @@ class _Drone:
         self.channel_order = channel_order
         # Live-scan aggregates (filled by scan_fleet over the whole window).
         self.aruco_ids: dict = {}       # dict_name -> Counter{id: frames_voted}
+        # dict_name -> {id: first-seen order index} (W3 --dedup-report transitions)
+        self.aruco_first_seen: dict = {}
         self.yolo_classes: dict = {}    # class_name -> peak confidence
         self.frames_seen = 0
         self.fps: Optional[float] = None
@@ -431,7 +433,11 @@ async def run_fleet(log: _Log, summary: dict, args, outdir: Path,
 
     try:
         telemetry_sweep(log, summary, fleet, args.telemetry_secs)
-        if args.capture:
+        if args.video_only:
+            # VIDEO-ONLY mode (W5, the P6 blocker): bring the stream up, measure
+            # time-to-first-frame + fps over a short window, NO ArUco/YOLO.
+            video_only_fleet(log, summary, fleet, args)
+        elif args.capture:
             # CAPTURE mode: skip ArUco/YOLO, just save raw frames for retraining.
             capture_fleet(log, summary, fleet, outdir, args)
         else:
@@ -442,6 +448,12 @@ async def run_fleet(log: _Log, summary: dict, args, outdir: Path,
             log.rule("STAGE 6/8  aruco (live-scan results, per drone)")
             for dr in fleet:
                 _report_aruco(log, summary, dr)
+            if args.dedup_report:
+                # W3: richer per-id dedup analysis + persisted artifact on top of
+                # the existing console output (does not replace _report_aruco).
+                log.rule("STAGE 6b  aruco DEDUP REPORT (per-id stability + ghosts)")
+                for dr in fleet:
+                    _report_dedup(log, summary, dr, outdir)
             log.rule("STAGE 7/8  yolo (live-scan results, per drone)")
             if args.no_yolo:
                 log.line("skipped (--no-yolo)")
@@ -687,6 +699,10 @@ def scan_fleet(log, summary, fleet: List[_Drone], outdir, args, weights) -> None
                 id_list = sorted(int(x) for x in ids.flatten())
                 counter = dr.aruco_ids.setdefault(name, Counter())
                 new = sorted(set(id_list) - set(counter))
+                if new:     # record cheap first-seen ordering for the dedup report
+                    seen_map = dr.aruco_first_seen.setdefault(name, {})
+                    for mid in new:
+                        seen_map.setdefault(mid, len(seen_map))
                 counter.update(id_list)     # per-id frame vote
                 if new:     # log only when the id-set GROWS (avoid 23 Hz spam)
                     note = ""
@@ -886,6 +902,124 @@ def capture_fleet(log, summary, fleet: List[_Drone], outdir, args) -> None:
                  "+ redeploy via the training pipeline (precomp/pipeline.py)")
 
 
+#: Operator fixes for the P6 "no first video frame" failure — embedded in the
+#: --video-only output AND offered as the clearer pyhulax_video.py message delta.
+_P6_VIDEO_HINTS = (
+    "raise --video-timeout (real cam can need >10s for the first frame); "
+    "turn the WINDOWS FIREWALL OFF for inbound UDP (the video frames arrive over "
+    "UDP and a blocked inbound rule looks exactly like a stuck startup window); "
+    "POWER-CYCLE the drone to clear a stale bind_client (a prior crashed client "
+    "still holds the stream); ONE stream per drone, NO auto-reconnect (close the "
+    "HulaGo phone app / any other client); confirm the ordering matches "
+    "docs/finals/example_code (connect -> create_video_stream -> "
+    "set_video_stream(True) -> start -> poll latest_frame)"
+)
+
+
+def video_only_fleet(log, summary, fleet: List[_Drone], args) -> None:
+    """VIDEO-ONLY bring-up diagnostic (W5, the P6 blocker): for each connected
+    drone, start the video stream via the EXACT production seam, MEASURE
+    time-to-first-frame, then over a short window report fps / healthy / retries
+    / channel_order — NO ArUco/YOLO. Teardown stops every stream (never-raise).
+
+    The real run died at preflight P6 (`SensorTimeout: no first video frame within
+    10.0 s`); this path isolates that single failure and prints the known operator
+    fixes (firewall / power-cycle / one-stream / raise --video-timeout) so the
+    operator can act OFFLINE without round-tripping the log back."""
+    from finals.vision.pyhulax_video import PyhulaxVideoSource
+
+    log.rule("STAGE 5/8  video — VIDEO-ONLY bring-up (P6 diagnostic)")
+    summary["video_only"] = {}
+    by_id = {dr.id: dr for dr in fleet}
+    sources: dict = {}
+    # ---- start each stream, timing the FIRST FRAME (start() blocks until it) ----
+    # Each drone's rec lives in summary["video_only"][did] from here on, so the
+    # measurement loop ENRICHES the same dict (the first-frame time persists).
+    for dr in fleet:
+        api = getattr(dr.adapter, "_api", None)
+        rec: dict = {"ok": False, "channel_order": dr.channel_order,
+                     "video_timeout_s": args.video_timeout}
+        summary["video_only"][dr.id] = rec
+        if api is None:
+            log.error(f"[{dr.id}] adapter has no _api after connect")
+            rec["reason"] = "no _api"
+            continue
+        try:
+            src = PyhulaxVideoSource(dr.id, api,
+                                     video_channel_order=dr.channel_order)
+            t0 = time.monotonic()
+            # src.start() polls latest_frame and returns on the FIRST frame (or
+            # raises SensorTimeout) — so the elapsed IS the time-to-first-frame.
+            src.start(timeout_s=args.video_timeout)
+            ttff = time.monotonic() - t0
+            rec["ok"] = True
+            rec["time_to_first_frame_s"] = round(ttff, 3)
+            sources[dr.id] = src
+            log.line(f"  [{dr.id}] FIRST FRAME in {ttff:.2f}s "
+                     f"(channel_order={dr.channel_order!r}) — P6 would PASS")
+        except Exception:
+            log.exc(f"video.start[{dr.id}] (P6 first-frame)")
+            log.error(f"[{dr.id}] P6 BLOCKED: no first video frame within "
+                      f"{args.video_timeout:.1f}s. FIXES: {_P6_VIDEO_HINTS}")
+            rec["hints"] = _P6_VIDEO_HINTS
+    if not sources:
+        log.error("video-only: no stream produced a first frame — see the P6 "
+                  "fixes above; nothing to measure")
+        return
+
+    # ---- short measurement window: poll latest_frame, count frames + healthy ----
+    window_s = max(0.0, args.video_only_secs)
+    log.line(f"  >>> measuring fps over {window_s:.0f}s "
+             f"(no ArUco/YOLO — pure video bring-up) <<<")
+    start = time.monotonic()
+    deadline = start + window_s
+    counts = {did: 0 for did in sources}
+    while sources and time.monotonic() < deadline:
+        for did, src in sources.items():
+            try:
+                fs = src.get_frame()
+            except Exception:
+                log.exc(f"get_frame[{did}]")
+                continue
+            if fs is not None:
+                counts[did] += 1
+                dr = by_id[did]
+                dr.frames_seen += 1
+                dr.last_image = fs.image
+        time.sleep(0.01)
+
+    # ---- per-drone summary + teardown (never-raise) ----
+    for did, src in sources.items():
+        dr = by_id[did]
+        rec = summary["video_only"][did]    # the SAME rec the first loop filled
+        try:
+            rec["healthy"] = src.healthy
+        except Exception:
+            log.exc(f"healthy[{did}]")
+            rec["healthy"] = None
+        rec["restarts"] = getattr(src, "_restarts", None)
+        elapsed = max(1e-6, time.monotonic() - start)
+        rec["window_frames"] = counts[did]
+        rec["fps"] = round(counts[did] / elapsed, 1)
+        if dr.last_image is not None:
+            try:
+                h, w = dr.last_image.shape[:2]
+                rec["shape"] = [int(w), int(h)]
+            except Exception:
+                log.exc(f"shape[{did}]")
+        try:
+            src.stop()
+        except Exception:
+            log.exc(f"video.stop[{did}]")
+        log.line(f"  [{did}] window {counts[did]} frames in {elapsed:.0f}s "
+                 f"(~{rec['fps']} fps), healthy={rec.get('healthy')}, "
+                 f"retries={rec['restarts']}, "
+                 f"channel_order={dr.channel_order!r}, "
+                 f"shape={rec.get('shape')}")
+    log.line("  video-only done — if the first frame came up, P6 is unblocked; "
+             "rerun the full smoke (drop --video-only) to scan ArUco/YOLO")
+
+
 def _report_aruco(log, summary, dr: _Drone) -> None:
     summary.setdefault("aruco", {})
     by_dict = {name: c for name, c in dr.aruco_ids.items() if c}
@@ -912,6 +1046,98 @@ def _report_aruco(log, summary, dr: _Drone) -> None:
         top_id, top_n = by_dict[name].most_common(1)[0]
         log.line(f"  [{dr.id}] => field markers decode as {name}, dominant id "
                  f"{top_id} ({top_n} frames) (settles the dict question)")
+
+
+def _dedup_stats(aruco_ids_by_dict: dict, field_ids=_FIELD_ARUCO_IDS,
+                 first_seen: Optional[dict] = None) -> dict:
+    """PURE ArUco dedup analysis (no SDK) — takes the per-dict per-id frame-vote
+    `Counter`s a scan produced and returns a richer report than the console line.
+
+    `aruco_ids_by_dict`: {dict_name: Counter{marker_id: frame_votes}} (exactly the
+    shape of _Drone.aruco_ids). `field_ids`: the allowlist (default the five fixed
+    field markers). `first_seen`: optional {dict_name: {marker_id: order_index}} so
+    the report can record WHICH id appeared first (cheap first-seen ordering).
+
+    Returns, per dict:
+      total_votes, frames_seen (max single-id votes ~= frames where ANY id of this
+      dict decoded — the denominator), and per id: votes + a STABILITY metric
+      (votes / frames_seen, how consistently that id decoded across the window).
+      Plus dominant id (most votes), the field-valid vs ghost id split, and (if
+      first_seen given) the id seen first. dicts with no votes are skipped.
+    """
+    report: dict = {"field_ids": sorted(int(i) for i in field_ids), "by_dict": {}}
+    for name, counter in aruco_ids_by_dict.items():
+        if not counter:
+            continue
+        total = int(sum(counter.values()))
+        # frames-seen denominator: the busiest single id's vote count is the best
+        # cheap proxy for "frames in which this dict decoded at least one marker"
+        # (every frame casts >=1 vote, and the dominant id is present in ~every
+        # such frame); guard against 0 so stability is always finite.
+        frames_seen = max(int(v) for v in counter.values())
+        ids: dict = {}
+        for mid, votes in counter.most_common():
+            mid = int(mid)
+            stability = round(int(votes) / frames_seen, 3) if frames_seen else 0.0
+            entry = {"votes": int(votes), "stability": stability,
+                     "field_valid": mid in field_ids}
+            if first_seen and name in first_seen and mid in first_seen[name]:
+                entry["first_seen_order"] = int(first_seen[name][mid])
+            ids[str(mid)] = entry
+        dominant_id, dominant_votes = counter.most_common(1)[0]
+        field_valid = sorted(int(i) for i in counter if int(i) in field_ids)
+        ghosts = sorted(int(i) for i in counter if int(i) not in field_ids)
+        rec = {
+            "total_votes": total,
+            "frames_seen": frames_seen,
+            "n_ids": len(counter),
+            "dominant_id": int(dominant_id),
+            "dominant_votes": int(dominant_votes),
+            "dominant_stability": round(int(dominant_votes) / frames_seen, 3)
+            if frames_seen else 0.0,
+            "field_valid_ids": field_valid,
+            "ghost_ids": ghosts,
+            "ids": ids,
+        }
+        if first_seen and name in first_seen and first_seen[name]:
+            # the id with the smallest order index appeared first
+            rec["first_id"] = int(min(first_seen[name],
+                                      key=lambda m: first_seen[name][m]))
+        report["by_dict"][name] = rec
+    return report
+
+
+def _report_dedup(log, summary, dr: _Drone, outdir) -> None:
+    """W3 --dedup-report: build the pure _dedup_stats report from the scan's
+    per-id Counters, log a stability summary line per dict, and PERSIST it as
+    <outdir>/<id>/dedup_report.json. Console scan output is untouched — this is
+    the richer artifact on top."""
+    report = _dedup_stats(dr.aruco_ids,
+                          first_seen=getattr(dr, "aruco_first_seen", None))
+    summary.setdefault("dedup", {})[dr.id] = report
+    if not report["by_dict"]:
+        log.line(f"  [{dr.id}] dedup: no ArUco decoded — nothing to analyse")
+    else:
+        for name, rec in report["by_dict"].items():
+            ghost_note = (f", GHOSTS {rec['ghost_ids']}" if rec["ghost_ids"]
+                          else ", no ghosts")
+            first_note = (f", first id {rec['first_id']}"
+                          if "first_id" in rec else "")
+            log.line(f"  [{dr.id}] dedup {name}: dominant id "
+                     f"{rec['dominant_id']} stability "
+                     f"{rec['dominant_stability']:.2f} "
+                     f"({rec['dominant_votes']}/{rec['frames_seen']} frames), "
+                     f"field-valid {rec['field_valid_ids']}{ghost_note}"
+                     f"{first_note}")
+    # Persist the per-drone artifact (never-raise: a write hiccup must not abort).
+    try:
+        idir = outdir / dr.id
+        idir.mkdir(parents=True, exist_ok=True)
+        (idir / "dedup_report.json").write_text(
+            json.dumps(report, indent=2), encoding="utf-8")
+        log.line(f"  [{dr.id}] dedup report -> {idir / 'dedup_report.json'}")
+    except Exception:
+        log.exc(f"dedup_report write[{dr.id}]")
 
 
 def _report_yolo(log, summary, dr: _Drone) -> None:
@@ -1006,6 +1232,13 @@ def _parse_args(argv) -> argparse.Namespace:
                    help="scan ALL candidate dicts (the bring-up discovery sweep) "
                         "instead of locking to --aruco-dict; expect cross-dict "
                         "ghosts in the output")
+    p.add_argument("--dedup-report", action="store_true",
+                   help="W3: after the scan, emit a RICHER per-id dedup analysis "
+                        "(votes, frames-seen, stability = votes/frames-seen, "
+                        "dominant vs ghost ids, first-seen order) AND persist it "
+                        "as <outdir>/<id>/dedup_report.json (keeps the normal "
+                        "console output; pairs with --all-dicts to show the "
+                        "cross-dict double-decode)")
     # ---- YOLO (pad quality + the hand-in-corner FP are fixed at the model via
     # retrain now, NOT by post-processing — only the conf threshold is exposed) ----
     p.add_argument("--yolo-conf", type=float, default=0.25,
@@ -1014,6 +1247,17 @@ def _parse_args(argv) -> argparse.Namespace:
                    help="per-drone connect timeout seconds (default 15)")
     p.add_argument("--video-timeout", type=float, default=15.0,
                    help="first-frame timeout seconds (default 15)")
+    # ---- VIDEO-ONLY mode (W5: the P6 'no first video frame' bring-up diagnostic) -
+    p.add_argument("--video-only", action="store_true",
+                   help="VIDEO-ONLY diagnostic: discover/connect -> start the "
+                        "video stream -> measure TIME-TO-FIRST-FRAME -> report "
+                        "fps/healthy/retries/channel_order over a short window -> "
+                        "teardown (NO ArUco/YOLO). Isolates the preflight P6 "
+                        "failure; embeds the firewall/power-cycle/raise-timeout "
+                        "fixes in the output")
+    p.add_argument("--video-only-secs", type=float, default=10.0,
+                   help="VIDEO-ONLY fps-measurement window in seconds after the "
+                        "first frame (default 10)")
     p.add_argument("--weights", default=None,
                    help="YOLO .pt path (default: auto-detect a local one)")
     p.add_argument("--no-yolo", action="store_true", help="skip the YOLO stage")
