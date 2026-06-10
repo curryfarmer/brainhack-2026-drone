@@ -32,6 +32,7 @@ models/*.pt
 
 # Logs
 *.log
+logs/
 
 # SITL launcher runtime state (PID files; logs covered by *.log above)
 sim/run/
