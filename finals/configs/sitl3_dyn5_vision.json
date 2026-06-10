@@ -1,0 +1,42 @@
+{
+  "_comment": "WS-5 DYNAMIC 5-car CONTENTION demo over the convoy_px4 world (the SIM-5 world: ONE gz server, 5 RoboMaster cars ids 7/11/23/42/88, 1 onboard cam per drone @5 Hz -> RTF ~0.86). = the transport wiring of sitl3_vision.json (same 3 endpoints/ports/bands) but the 3 drones run DYNAMIC track_convoy (track_marker_ids null) over a 5-id registry instead of sentry_scan. This is the CONTENTION case the 3-lane demo can't show: 5 known cars, only 3 drones, so the registry must (a) hand each drone a DISTINCT car (single-winner CAS), (b) report remaining_ids = the 2 unclaimed cars, (c) tally serviced as drones finish, and (d) on a drone LOSS (run_vision.sh kill3 -9's charlie's px4) free its car as LOST so a free drone can re-claim it. convoy_ids [7,11,23,42,88] seeds all five; convoy_lock_ttl_s 12 s is the no-renew survival window (Wi-Fi-drop / drone-loss model). NOTE (gate-F): convoy_px4 was authored for sentry SCANNING, so the 3 drones do NOT each spawn over a distinct car — which car each drone first SEES (and thus claims) depends on the SIM-5 spawn poses + how the cars drive. The DEDUP / tally / LOST->re-claim properties hold regardless (they are registry properties, pure-proven in WS-1/2); what needs VM tuning is only WHICH 3 of the 5 get serviced and whether all 3 drones acquire promptly. Tune spawn poses / car routes / lock_ttl on the box. Run via sim/run_vision.sh dyn5 (normal) or kill3-style loss drill.",
+  "profile": "sitl",
+  "flight_backend": "mavsdk_sitl",
+  "frame_backend": "gazebo",
+  "sitl_address": "udpin://0.0.0.0:14540",
+  "command_timeout_s": 90,
+  "mission_budget_s": 600,
+  "camera_hfov_deg": 99.69,
+  "marker_backend": "aruco",
+  "save_marker_frames": true,
+  "gazebo_video_host": "127.0.0.1",
+  "gazebo_video_port": 5600,
+  "detector": { "backend": "none" },
+
+  "convoy_ids": [7, 11, 23, 42, 88],
+  "convoy_lock_ttl_s": 12.0,
+
+  "drones": [
+    { "id": "alpha",   "phases": ["track_convoy"], "altitude_band_m": 2.6,
+      "sitl_address": "udpin://0.0.0.0:14540", "mavsdk_grpc_port": 50051,
+      "gazebo_video_port": 5600,
+      "zone": { "track_convoy": { "track_marker_ids": null,
+        "approach_enabled": true, "approach_cm": 40, "max_step_deg": 25,
+        "track_dwell_s": 0.5, "lost_timeout_s": 8.0,
+        "max_chase_cm": 800, "investigate_budget_s": 120.0 } } },
+    { "id": "bravo",   "phases": ["track_convoy"], "altitude_band_m": 2.4,
+      "sitl_address": "udpin://0.0.0.0:14541", "mavsdk_grpc_port": 50052,
+      "gazebo_video_port": 5601,
+      "zone": { "track_convoy": { "track_marker_ids": null,
+        "approach_enabled": true, "approach_cm": 40, "max_step_deg": 25,
+        "track_dwell_s": 0.5, "lost_timeout_s": 8.0,
+        "max_chase_cm": 800, "investigate_budget_s": 120.0 } } },
+    { "id": "charlie", "phases": ["track_convoy"], "altitude_band_m": 2.2,
+      "sitl_address": "udpin://0.0.0.0:14542", "mavsdk_grpc_port": 50053,
+      "gazebo_video_port": 5602,
+      "zone": { "track_convoy": { "track_marker_ids": null,
+        "approach_enabled": true, "approach_cm": 40, "max_step_deg": 25,
+        "track_dwell_s": 0.5, "lost_timeout_s": 8.0,
+        "max_chase_cm": 800, "investigate_budget_s": 120.0 } } }
+  ]
+}

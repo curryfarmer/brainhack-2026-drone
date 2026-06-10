@@ -1,0 +1,42 @@
+{
+  "_comment": "WS-5 DYNAMIC 3-lane demo: = sitl3_track_vision.json (convoy_3lane world, 3 diverging straight lanes, bands 2.6/2.4/2.2, all the PROVEN track_convoy tunables) EXCEPT no drone is told which car to chase. Each drone's zone.track_convoy.track_marker_ids is NULL -> track_convoy runs in DYNAMIC mode: it claims whatever ArUco id it SEES that the shared C2 ConvoyRegistry still says is claimable, renews the lock each tracking tick, and the registry's single-winner CAS guarantees two drones never lock one car. The top-level convoy_ids [7,23,88] is the KNOWN set (seeds the registry + the 3-of-3 completion tally); convoy_lock_ttl_s is how long a CLAIMED car survives without a renew before the registry frees it as LOST (a Wi-Fi-drop / drone-loss model) -> another drone may re-claim it. In convoy_3lane each drone spawns directly over ITS lane car (LANES3_POSES) and the cars DIVERGE, so each drone predominantly sees one car and the dynamic claim resolves lane-aligned WITHOUT any hardcoded mapping = the user's sim #3 'drones self-assign, no hardcoded convoy'. Run via sim/run_vision.sh dyn3. Expected evidence: heartbeat shows 3 DISTINCT owners + serviced 3/3; sightings.csv rows > 0 per drone. lock_ttl 12 s = a few track ticks (~0.5 s) + lost_timeout_s (8 s) of slack so a live, tracking drone never self-expires. VM-TUNE car speed / chase aggression / lock_ttl at gate F (same knobs as track3).",
+  "profile": "sitl",
+  "flight_backend": "mavsdk_sitl",
+  "frame_backend": "gazebo",
+  "sitl_address": "udpin://0.0.0.0:14540",
+  "command_timeout_s": 90,
+  "mission_budget_s": 600,
+  "camera_hfov_deg": 99.69,
+  "marker_backend": "aruco",
+  "save_marker_frames": true,
+  "gazebo_video_host": "127.0.0.1",
+  "gazebo_video_port": 5600,
+  "detector": { "backend": "none" },
+
+  "convoy_ids": [7, 23, 88],
+  "convoy_lock_ttl_s": 12.0,
+
+  "drones": [
+    { "id": "alpha",   "phases": ["track_convoy"], "altitude_band_m": 2.6,
+      "sitl_address": "udpin://0.0.0.0:14540", "mavsdk_grpc_port": 50051,
+      "gazebo_video_port": 5600,
+      "zone": { "track_convoy": { "track_marker_ids": null,
+        "approach_enabled": true, "approach_cm": 40, "max_step_deg": 25,
+        "track_dwell_s": 0.5, "lost_timeout_s": 8.0,
+        "max_chase_cm": 800, "investigate_budget_s": 120.0 } } },
+    { "id": "bravo",   "phases": ["track_convoy"], "altitude_band_m": 2.4,
+      "sitl_address": "udpin://0.0.0.0:14541", "mavsdk_grpc_port": 50052,
+      "gazebo_video_port": 5601,
+      "zone": { "track_convoy": { "track_marker_ids": null,
+        "approach_enabled": true, "approach_cm": 40, "max_step_deg": 25,
+        "track_dwell_s": 0.5, "lost_timeout_s": 8.0,
+        "max_chase_cm": 800, "investigate_budget_s": 120.0 } } },
+    { "id": "charlie", "phases": ["track_convoy"], "altitude_band_m": 2.2,
+      "sitl_address": "udpin://0.0.0.0:14542", "mavsdk_grpc_port": 50053,
+      "gazebo_video_port": 5602,
+      "zone": { "track_convoy": { "track_marker_ids": null,
+        "approach_enabled": true, "approach_cm": 40, "max_step_deg": 25,
+        "track_dwell_s": 0.5, "lost_timeout_s": 8.0,
+        "max_chase_cm": 800, "investigate_budget_s": 120.0 } } }
+  ]
+}

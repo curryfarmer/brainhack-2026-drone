@@ -421,6 +421,41 @@ track3() {                 # Workstream B: active chase (track_convoy)
   stageB3 "${1:-360}" normal
 }
 
+# ============================================================
+# WS-5: DYNAMIC self-assignment (the user's sim #3). Identical flight rig to
+# track3, but NO drone is told which car to chase — each runs track_convoy in
+# dynamic mode (track_marker_ids null) and claims whatever ArUco id it sees that
+# the shared C2 ConvoyRegistry still allows. The registry's single-winner CAS
+# dedups; convoy_ids seeds the known set + the serviced tally. Logic is pure-
+# proven (WS-1/2); these runs are gz INTEGRATION evidence.
+#   dyn3  = clean case: convoy_3lane, 3 drones over 3 diverging cars (7/23/88).
+#           Expect 3 DISTINCT owners + serviced 3/3 in the heartbeat.
+#   dyn5  = contention: convoy_px4, 3 drones over 5 cars (7/11/23/42/88). Expect
+#           3 distinct claims + remaining_ids = the 2 unclaimed. dyn5-kill -9's
+#           charlie's px4 mid-run -> its car frees to LOST -> a free drone may
+#           re-claim (LOST->re-claim). Which 3 of 5 get serviced is gate-F tuning.
+# ============================================================
+dyn3() {
+  VWORLD=convoy_3lane
+  VCONFIG=finals/configs/sitl3_dyn3_vision.json
+  LAUNCH_POSES=( "${LANES3_POSES[@]}" )
+  export CONVOY_IDS="7 23 88" CONVOY_ANGULAR=0 \
+         CONVOY_LINEAR="${CONVOY_LINEAR:-0.08}" CONVOY_DELAY="${CONVOY_DELAY:-150}"
+  stageB3 "${1:-360}" normal
+}
+
+dyn5() {                   # mode: normal | kill (LOST->re-claim drill)
+  local secs="${1:-420}" mode="${2:-normal}"
+  VWORLD=convoy_px4
+  VCONFIG=finals/configs/sitl3_dyn5_vision.json
+  LAUNCH_POSES=( "${SIM5_POSES[@]}" )
+  # All 5 cars drive (the 2 unclaimed still move through the arena). Slow + held
+  # at spawn through the EKF settle (same nadir-footprint discipline as track3).
+  export CONVOY_IDS="${CONVOY_IDS:-7 11 23 42 88}" \
+         CONVOY_LINEAR="${CONVOY_LINEAR:-0.08}" CONVOY_DELAY="${CONVOY_DELAY:-150}"
+  stageB3 "$secs" "$mode"
+}
+
 case "${1:-}" in
   install-model) install_model ;;
   bridge)        shift; bridge "$@" ;;
@@ -437,5 +472,9 @@ case "${1:-}" in
   track3)        shift; track3 "${1:-360}" ;;
   lanes3-gui)    shift; export GZ_GUI=1; lanes3 "${1:-300}" ;;   # +live 3D view on :0
   track3-gui)    shift; export GZ_GUI=1; track3 "${1:-360}" ;;   # +live 3D view on :0
-  *) echo "usage: $0 {install-model|bridge --topic T [--port P]|stop-bridge|stageA [secs]|stageB [secs]|probe3 [secs]|stageB3 [secs]|abort3 [secs]|kill3 [secs]|stageB3-stop|lanes3 [secs]|track3 [secs]|lanes3-gui [secs]|track3-gui [secs]}" >&2; exit 64 ;;
+  dyn3)          shift; dyn3 "${1:-360}" ;;                      # WS-5 dynamic 3-lane
+  dyn3-gui)      shift; export GZ_GUI=1; dyn3 "${1:-360}" ;;
+  dyn5)          shift; dyn5 "${1:-420}" normal ;;               # WS-5 5-car contention
+  dyn5-kill)     shift; dyn5 "${1:-420}" kill ;;                 # WS-5 LOST->re-claim drill
+  *) echo "usage: $0 {install-model|bridge --topic T [--port P]|stop-bridge|stageA [secs]|stageB [secs]|probe3 [secs]|stageB3 [secs]|abort3 [secs]|kill3 [secs]|stageB3-stop|lanes3 [secs]|track3 [secs]|lanes3-gui [secs]|track3-gui [secs]|dyn3 [secs]|dyn3-gui [secs]|dyn5 [secs]|dyn5-kill [secs]}" >&2; exit 64 ;;
 esac
