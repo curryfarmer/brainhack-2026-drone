@@ -23,16 +23,18 @@ from finals.flight.dead_reckon import DeadReckoner, DRPose
 from finals.mission.phase import AgentContext
 from finals.mission.phases import PHASE_REGISTRY
 from finals.mission.phases.navigate import Navigate
-from finals.mission.planning.types import ArenaMap, KeepOut, LandingPad, Leg
+from finals.mission.planning.types import (ArenaMap, Gate, KeepOut, LandingPad,
+                                          Leg)
 from finals.mission.planning.visibility_graph import plan
 from finals.types import (Abort, Direction, Done, Move, Rotate, Telemetry)
 
 
 # ---------------- arena fixtures (mirror test_visibility_graph.arena) --------
 def _arena(*keep_out, pads=(), bounds=(-100.0, -100.0, 100.0, 100.0),
-           c2=(0.0, 0.0)):
+           c2=(0.0, 0.0), gates=()):
     return ArenaMap(bounds_m=bounds, keep_out=tuple(keep_out), pads=tuple(pads),
-                    lanes=(), c2_origin_m=c2, c2_heading_deg=0.0)
+                    lanes=(), c2_origin_m=c2, c2_heading_deg=0.0,
+                    gates=tuple(gates))
 
 
 def _pad(pad_id, center, *, radius=0.5, valid=True):
@@ -514,6 +516,57 @@ def test_integration_subdivided_detour_lands_at_goal():
     assert dr.pose.east_m == pytest.approx(goal[1], abs=0.05)
     # And the route cleared the REAL crate (collision-free claim).
     assert "navigate complete" in done.reason
+
+
+# ============================================================
+# NAV-ARCH E2E: navigate FLIES THROUGH an arch gate (the headline integration).
+# ============================================================
+def test_integration_navigate_flies_through_an_arch_gate():
+    """navigate, driven over the REAL DeadReckoner, threads an arch GAP and
+    lands ~ the goal. The arch is a solid block (north 1..3, east -2..2) the
+    drone canNOT overfly; a Gate carves the doorway (east -0.5..0.5). WITHOUT
+    the gate the same arena forces a detour AROUND the block; WITH it navigate
+    flies the doorway. Mirrors test_visibility_graph_gates over the phase."""
+    block = KeepOut(id="arch_solid",
+                    polygon_m=((1.0, -2.0), (1.0, 2.0), (3.0, 2.0), (3.0, -2.0)))
+    gate = Gate(id="arch1", span_m=((2.0, -0.5), (2.0, 0.5)), clearance_m=1.0)
+    goal = (4.0, 0.0)
+    arena = _arena(block, gates=[gate])
+    phase = Navigate.from_config(
+        _drone({"navigate": {"goal_ne_m": list(goal), "inflation_m": 0.2,
+                             "max_leg_cm": 100000.0, "heading_tol_deg": 0.5,
+                             "max_step_deg": 180.0}}),
+        _cfg(arena))
+    actions, done, dr = _drive_with_dr(phase)
+    # Lands ~ the goal, having flown the gap (open-loop drift under tolerance).
+    assert dr.pose.north_m == pytest.approx(goal[0], abs=0.05)
+    assert dr.pose.east_m == pytest.approx(goal[1], abs=0.05)
+    assert "navigate complete" in done.reason
+
+    # The flown track passed THROUGH the doorway: it crossed the span north (2.0)
+    # while inside the opening east interval [-0.5, 0.5].
+    dr2 = DeadReckoner(DRPose(0.0, 0.0, 0.0, 0.0))
+    track = [(0.0, 0.0)]
+    for a in actions:
+        dr2.note_action_complete(a)
+        track.append((dr2.pose.north_m, dr2.pose.east_m))
+    crossed = False
+    for (n0, e0), (n1, e1) in zip(track, track[1:]):
+        if (n0 - 2.0) * (n1 - 2.0) <= 0 and n0 != n1:
+            t = (2.0 - n0) / (n1 - n0)
+            e_at = e0 + t * (e1 - e0)
+            if -0.5 - 1e-9 <= e_at <= 0.5 + 1e-9:
+                crossed = True
+    assert crossed, "navigate did not fly through the gate opening"
+
+    # WITHOUT the gate the SAME arena forces a real detour (more legs) — proves
+    # the gate is what opened the doorway, not a permissive planner.
+    no_gate = Navigate.from_config(
+        _drone({"navigate": {"goal_ne_m": list(goal), "inflation_m": 0.2,
+                             "max_leg_cm": 100000.0, "heading_tol_deg": 0.5,
+                             "max_step_deg": 180.0}}),
+        _cfg(_arena(block)))
+    assert len(no_gate._legs) > len(phase._legs)
 
 
 # ============================================================

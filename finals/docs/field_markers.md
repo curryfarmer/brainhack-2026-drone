@@ -109,6 +109,22 @@ search box. Visible elements:
   opening or route around the legs. ⚠️ A naive 2-D keep-out around an arch would WALL OFF
   a passage that is actually flyable — the planner must model the arch **legs** as
   keep-outs and the **gap** as free (a gate, not a solid block). New nav consideration.
+  **MODELLED (NAV-ARCH, 2026-06-10):** each arch is encoded as its post(s) =
+  `keep_out` polygon(s) **plus** an `ArenaMap.Gate` marking the gap (`span_m` = the
+  two opening-line endpoints, `clearance_m` = the raw opening width). `visibility_graph`
+  routes a Leg THROUGH a gate's span — an edge crossing a *fitting* gate
+  (`clearance_m >= 2*inflation_m`, span touching the arch posts) is excused from the
+  inflated posts it threads; a too-narrow / unspecified-clearance gate is ignored (fail
+  closed → detour or `PlanningError`, never a clip). See `mission/planning/types.py`
+  (`Gate`) + `visibility_graph.py`.
+  **GATE ALTITUDE RULE (load-bearing):** gates are **purely horizontal** — the drone
+  flies the arch course at ONE fixed transit altitude (a `takeoff` height held through
+  the whole transit; navigate issues no vertical Move). There is **no per-gate height
+  and no altitude band**: the ~1.1 m ceiling kills climb-over *and* bands, so all drones
+  share the **same** arch-clearance altitude (set under the lowest crossbar at gate D)
+  and deconflict by **TIME + SPACE (sectors)**, never vertically. This is consistent
+  with the no-bands LANDING model, not a contradiction of it (bands = vertical drone
+  separation = illegal; the gate height = the common obstacle-clearance altitude).
 - **Pillars / columns** — tall thin black posts with hazard stripes → simple keep-outs.
 - **Low barriers / blocks** — gray/black low walls on the floor → keep-outs.
 - **Cones** — yellow/green; small keep-outs.

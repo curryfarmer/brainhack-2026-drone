@@ -198,9 +198,26 @@ class Gate:
     leg THROUGH even though it sits between obstacle legs (NAV-ARCH). The arch
     posts are ordinary keep_out polygons; this Gate marks the passable slot
     between them. span_m = the two (north_m, east_m) endpoints of the opening
-    line the drone crosses; clearance_m = the usable width hint (m, 0 =
-    unspecified). NAV-ARCH hardens the geometry (that the span sits in a real
-    keep-out gap, a minimum clearance, the fly-through altitude)."""
+    line the drone crosses; clearance_m = the usable RAW opening width (m, the
+    distance between the two arch posts; 0 = unspecified). NAV-ARCH consumes
+    this in visibility_graph: an edge that PROPERLY CROSSES this span line is
+    excused from the inflated arch-post keep-outs the gate sits between, IFF the
+    drone fits — clearance_m >= 2*inflation_m (each post's inflation margin eats
+    into the opening from its own side). clearance_m == 0 is NOT verifiable, so
+    the planner refuses to fly such a gate (a zero/unspecified clearance never
+    excuses a keep-out — fail closed).
+
+    ALTITUDE: a gate is a HORIZONTAL opening (north/east). The drone flies the
+    gate at its single, fixed transit altitude (the ~1.1 m no-band ceiling) — it
+    canNOT climb over an arch, so there is no per-gate height field; the operator
+    sets the one transit height under the arch crossbar at gate D. See
+    field_markers.md / navigate.py.
+
+    NAV-ARCH hardens the geometry: from_dict rejects a DEGENERATE (zero-length)
+    span (an opening with both endpoints at one point is not an opening), and
+    ArenaMap.from_dict cross-checks that the span sits in a REAL keep-out gap
+    (a gate with no arch posts around it is a config mistake) and within bounds.
+    """
 
     id: str
     span_m: Tuple[Point, Point]
@@ -218,6 +235,17 @@ class Gate:
                 f"— the two endpoints of the passable opening, got {span!r}")
         endpoints = tuple(_point(p, f"{where}.span_m[{i}]")
                           for i, p in enumerate(span))
+        # NAV-ARCH geometry rule: the two span endpoints must be DISTINCT. A
+        # zero-length span is not an opening — it would give the planner a
+        # degenerate gate line that no edge can "properly cross", so the gate
+        # would silently never apply (an arch the drone can never pass). Fail
+        # loud at load time naming the collapsed point.
+        if endpoints[0] == endpoints[1]:
+            raise ConfigError(
+                f"{where}.span_m is DEGENERATE — both endpoints are the same "
+                f"point {list(endpoints[0])}; a gate span must be the two "
+                f"DISTINCT endpoints of the opening line the drone crosses. "
+                f"Check the two arch-post inner corners that bound the gap.")
         clearance = data.get("clearance_m", 0.0)
         if (not isinstance(clearance, (int, float))
                 or isinstance(clearance, bool)
@@ -352,10 +380,13 @@ class ArenaMap:
                     f"{list(m.point_m)} is OUTSIDE bounds_m {list(bounds_t)} — "
                     f"a beacon outside the arena cannot anchor a position-fix "
                     f"or a landing. Fix the point or widen bounds_m.")
-        # Gates (NAV-ARCH traversable openings): unique ids (NAV-ARCH adds the
-        # in-a-keep-out-gap geometry checks).
+        # Gates (NAV-ARCH traversable openings): unique ids + each span within
+        # bounds + each span sits in a REAL keep-out gap (an arch the planner
+        # can fly through must have arch POSTS around it — a gate floating in
+        # open airspace excuses nothing and is almost always a mis-typed coord).
         _require_unique_ids((g.id for g in gates), kind="gate",
                             where=f"{where}.gates")
+        _validate_gate_geometry(gates, keep_out, bounds_t, where=where)
 
         return cls(
             bounds_m=bounds_t,
@@ -373,6 +404,50 @@ def _as_list(raw: Any, where: str) -> Sequence[Any]:
     if not isinstance(raw, (list, tuple)):
         raise ConfigError(f"{where} must be a list, got {raw!r}")
     return raw
+
+
+def _validate_gate_geometry(
+        gates: Tuple["Gate", ...],
+        keep_out: Tuple["KeepOut", ...],
+        bounds: Tuple[float, float, float, float], *, where: str) -> None:
+    """NAV-ARCH cross-cutting gate geometry: every gate span must (1) lie within
+    bounds (an opening outside the arena is unreachable) and (2) sit in a REAL
+    keep-out gap — its span line must touch at least one keep-out polygon (the
+    arch posts the gate threads between). A gate with no keep-out around it
+    excuses nothing in the planner (the visibility edge through it was never
+    blocked), so it is a silent no-op at best and a typo'd coordinate at worst —
+    refuse it loudly.
+
+    The polygon-intersection geometry lives in polygon_tools (the planner's
+    geometry home); imported LAZILY here so the contracts module stays
+    stdlib-only at import time (the conventions scan + numpy-less venv)."""
+    if not gates:
+        return
+    # Lazy import: keep types.py import-time pure (polygon_tools is leaf stdlib;
+    # no cycle, but the contracts module declares no geometry dependency).
+    from finals.mission.planning.polygon_tools import segment_intersects_polygon
+
+    for i, g in enumerate(gates):
+        a, b = g.span_m
+        if not (_point_in_bounds(a, bounds) and _point_in_bounds(b, bounds)):
+            raise ConfigError(
+                f"{where}.gates[{i}] (id {g.id!r}) span_m "
+                f"[{list(a)}, {list(b)}] is OUTSIDE bounds_m {list(bounds)} — "
+                f"a gate opening outside the arena is unreachable. Fix the span "
+                f"or widen bounds_m.")
+        # The span must touch a keep-out (the arch posts). segment_intersects_
+        # polygon counts a touching/crossing span — the opening line of a real
+        # arch runs right up to (and between) its two posts.
+        if not any(segment_intersects_polygon(a, b, ko.polygon_m)
+                   for ko in keep_out):
+            raise ConfigError(
+                f"{where}.gates[{i}] (id {g.id!r}) span_m "
+                f"[{list(a)}, {list(b)}] does not touch ANY keep-out — a gate is "
+                f"the GAP between arch posts, so its span line must run up to "
+                f"the keep-out polygons it threads between. With no keep-out "
+                f"around it the gate excuses nothing (the planner was never "
+                f"blocked here). CHECK: the span endpoints (a typo?) or add the "
+                f"arch-post keep-outs.")
 
 
 def _require_unique_ids(ids: Any, *, kind: str, where: str) -> None:

@@ -69,8 +69,17 @@ def test_arena_marker_id_must_be_int():
 
 
 # ======================= arena: gates (NAV-ARCH openings) ====================
+# NAV-ARCH cross-check: a gate span must touch a keep-out (the arch posts). The
+# arch posts straddle the span line; this _ARCH keep-out covers the span's east
+# extent so the gate parses. (The parse-shape tests only need ONE touching
+# keep-out; the through-gate PLANNING is exercised in test_visibility_graph.)
+_ARCH = [{"id": "post", "polygon_m": [[1.8, 0.5], [2.2, 0.5],
+                                      [2.2, 2.5], [1.8, 2.5]]}]
+
+
 def test_arena_parses_gate_with_clearance():
-    a = _arena(gates=[{"id": "arch1", "span_m": [[2.0, 1.0], [2.0, 2.0]],
+    a = _arena(keep_out=_ARCH,
+               gates=[{"id": "arch1", "span_m": [[2.0, 1.0], [2.0, 2.0]],
                        "clearance_m": 0.9}])
     assert isinstance(a.gates[0], Gate)
     assert a.gates[0].id == "arch1"
@@ -78,18 +87,20 @@ def test_arena_parses_gate_with_clearance():
 
 
 def test_arena_gate_clearance_optional_defaults_zero():
-    a = _arena(gates=[{"id": "g", "span_m": [[1.0, 1.0], [1.0, 2.0]]}])
+    a = _arena(keep_out=_ARCH,
+               gates=[{"id": "g", "span_m": [[2.0, 1.0], [2.0, 2.0]]}])
     assert a.gates[0].clearance_m == 0.0
 
 
 def test_arena_gate_needs_two_endpoints():
     with pytest.raises(ConfigError, match="span_m"):
-        _arena(gates=[{"id": "g", "span_m": [[1.0, 1.0]]}])
+        _arena(keep_out=_ARCH, gates=[{"id": "g", "span_m": [[1.0, 1.0]]}])
 
 
 def test_arena_duplicate_gate_id_is_loud():
     with pytest.raises(ConfigError, match="duplicate gate id"):
-        _arena(gates=[{"id": "g", "span_m": [[1.0, 1.0], [1.0, 2.0]]},
+        _arena(keep_out=_ARCH,
+               gates=[{"id": "g", "span_m": [[2.0, 1.0], [2.0, 2.0]]},
                       {"id": "g", "span_m": [[2.0, 1.0], [2.0, 2.0]]}])
 
 
