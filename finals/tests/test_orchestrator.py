@@ -629,3 +629,156 @@ def test_main_real_preflight_only_runs_the_gate(tmp_path, monkeypatch):
     code = fmain.main(["--profile", "real",
                        "--i-know-this-arms-real-drones", "--preflight-only"])
     assert code == 0
+
+
+# ============================================================
+# 10. Convoy coverage read-back — the "did we catch all 5?" tally
+# ============================================================
+def _coverage_orch(tmp_path, events, *, convoy_ids, registry=None,
+                   coverage_weak_below=3, drones=("alpha",)):
+    """An Orchestrator wired for the coverage read-back (known convoy ids +/-
+    a registry), for unit-testing _coverage_tally without flight."""
+    agents = [DroneAgent(d, MockAdapter(d), [TakeoffDemo()], events)
+              for d in drones]
+    return Orchestrator(agents, events, str(tmp_path), budget_s=10.0,
+                        convoy_ids=convoy_ids, convoy_registry=registry,
+                        coverage_weak_below=coverage_weak_below)
+
+
+def test_no_coverage_block_without_convoy_ids(tmp_path):
+    # A non-convoy mission (no known set) reports no coverage at all — byte-for-
+    # byte unchanged heartbeat/summary.
+    with EventLog(str(tmp_path)) as events:
+        orch = _coverage_orch(tmp_path, events, convoy_ids=None)
+        assert orch._coverage_tally() is None
+
+
+def test_coverage_tally_classifies_seen_weak_missing_other(tmp_path):
+    with EventLog(str(tmp_path)) as events:
+        orch = _coverage_orch(tmp_path, events, convoy_ids=[7, 11, 23],
+                              coverage_weak_below=3)
+        # 7 strong, 11 weak (<3), 23 never seen, 100 a stray non-convoy decode.
+        orch._id_counts = {7: 5, 11: 1, 100: 9}
+        cov = orch._coverage_tally()
+        assert cov["known"] == [7, 11, 23] and cov["of"] == 3
+        assert cov["seen"] == [7, 11] and cov["seen_n"] == 2
+        assert cov["weak"] == [11]
+        assert cov["missing"] == [23]
+        assert cov["other_ids"] == {100: 9}
+        assert "serviced" not in cov            # no registry -> no serviced view
+
+
+def test_coverage_tally_reports_serviced_only_for_known(tmp_path):
+    with EventLog(str(tmp_path)) as events:
+        reg = ConvoyRegistry(known_ids=[7, 11])
+        reg.claim("alpha", 7, T0)
+        reg.release("alpha", 7, T0, serviced=True)
+        # A serviced id NOT in convoy_ids must not inflate the 5-of-5 numerator.
+        reg.claim("alpha", 99, T0)
+        reg.release("alpha", 99, T0, serviced=True)
+        orch = _coverage_orch(tmp_path, events, convoy_ids=[7, 11], registry=reg)
+        orch._id_counts = {7: 4}
+        cov = orch._coverage_tally()
+        assert cov["serviced"] == [7] and cov["serviced_n"] == 1
+        assert cov["seen"] == [7]               # SEEN (decoded) != SERVICED
+
+
+def test_constructor_rejects_bad_coverage_args(tmp_path):
+    with EventLog(str(tmp_path)) as events:
+        agents = [DroneAgent("alpha", MockAdapter("alpha"), [TakeoffDemo()],
+                             events)]
+        with pytest.raises(ValueError, match="convoy_ids"):
+            Orchestrator(agents, events, str(tmp_path), budget_s=10.0,
+                         convoy_ids=[7, "x"])
+        with pytest.raises(ValueError, match="convoy_ids"):
+            Orchestrator(agents, events, str(tmp_path), budget_s=10.0,
+                         convoy_ids=[7, True])      # a bool is not a marker id
+        with pytest.raises(ValueError, match="coverage_weak_below"):
+            Orchestrator(agents, events, str(tmp_path), budget_s=10.0,
+                         convoy_ids=[7], coverage_weak_below=-1)
+
+
+def test_heartbeat_and_summary_carry_coverage(tmp_path, capsys):
+    """Live run: a publishing phase decodes known convoy ids; the FINAL heartbeat
+    carries the coverage block and the printed summary shows CONVOY COVERAGE."""
+    run_dir = str(tmp_path)
+    bus = SightingBus()
+    with EventLog(run_dir) as events:
+        phase = PublishingPhase(bus, "alpha", n=5)      # publishes ids 1..5
+        alpha = DroneAgent("alpha", MockAdapter("alpha"), [phase], events,
+                           bus=bus)
+        orch = Orchestrator([alpha], events, run_dir, budget_s=2.0,
+                            heartbeat_period_s=0.02, bus=bus,
+                            convoy_ids=[1, 2, 3])
+        assert asyncio.run(orch.run()) == 0
+    hb = read_heartbeat(run_dir)
+    assert "coverage" in hb
+    cov = hb["coverage"]
+    assert cov["of"] == 3 and set(cov["seen"]) == {1, 2, 3}
+    # heartbeat is JSON: dict keys serialize to strings (4,5 decoded, not known).
+    assert cov["other_ids"] == {"4": 1, "5": 1}
+    assert "CONVOY COVERAGE" in capsys.readouterr().out
+
+
+class _ServiceAllPhase(MissionPhase):
+    """Claims + services every known convoy through the shared registry on the
+    first step, then waits — so the orchestrator's all-serviced early-stop fires
+    and lands the whole swarm before the budget runs out."""
+
+    name = "service_all"
+
+    def __init__(self, reg, convoy_ids):
+        self._reg = reg
+        self._ids = list(convoy_ids)
+        self._did = False
+
+    def step(self, ctx: AgentContext) -> Action:
+        if not self._did:
+            self._did = True
+            for cid in self._ids:
+                self._reg.claim(ctx.drone_id, cid, ctx.now)
+                self._reg.release(ctx.drone_id, cid, ctx.now, serviced=True)
+            return Takeoff(height_cm=80)
+        return Wait(duration_s=0.02)
+
+
+def test_early_stop_when_all_convoys_serviced(tmp_path):
+    """Read-and-release early-stop: once every KNOWN convoy is SERVICED, the
+    mission lands ALL drones early (clean) — well before the 30 s budget — and
+    logs coverage_complete with the serviced set."""
+    run_dir = str(tmp_path)
+    reg = ConvoyRegistry(known_ids=[7, 11, 23])
+    with EventLog(run_dir) as events:
+        alpha = DroneAgent("alpha", MockAdapter("alpha"),
+                           [_ServiceAllPhase(reg, [7, 11, 23])], events)
+        # bravo would otherwise wait forever; the early-stop must land it too.
+        bravo = DroneAgent("bravo", MockAdapter("bravo"),
+                           [WaitForeverPhase()], events)
+        orch = Orchestrator([alpha, bravo], events, run_dir, budget_s=30.0,
+                            heartbeat_period_s=0.02, convoy_registry=reg,
+                            convoy_ids=[7, 11, 23])
+        t0 = time.perf_counter()
+        code = asyncio.run(orch.run())
+        elapsed = time.perf_counter() - t0
+
+    assert elapsed < 10.0                        # stopped early, not at budget=30
+    assert code == 0                             # both drones landed cleanly
+    assert all(a.state is AgentState.DONE for a in (alpha, bravo))
+    evs = mission_events(run_dir)
+    done = [e for e in evs if e["event"] == "coverage_complete"]
+    assert len(done) == 1                        # fired exactly once
+    assert sorted(done[0]["data"]["serviced"]) == [7, 11, 23]
+
+
+def test_no_early_stop_without_registry_or_known_set(tmp_path):
+    """No registry => no early-stop machinery: a registry-less coverage mission
+    runs to its (short) budget and never logs coverage_complete."""
+    run_dir = str(tmp_path)
+    with EventLog(run_dir) as events:
+        alpha = DroneAgent("alpha", MockAdapter("alpha"), [WaitForeverPhase()],
+                           events)
+        orch = Orchestrator([alpha], events, run_dir, budget_s=0.1,
+                            heartbeat_period_s=0.02, convoy_ids=[7, 11])
+        assert asyncio.run(orch.run()) == 0
+    kinds = [e["event"] for e in mission_events(run_dir)]
+    assert "coverage_complete" not in kinds

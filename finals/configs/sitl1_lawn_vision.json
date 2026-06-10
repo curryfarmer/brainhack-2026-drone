@@ -1,0 +1,25 @@
+{
+  "_comment": "LAWNMOWER warm-up (the user's 'implement lawnmower first'): ONE drone flies the OpenLoopLawnmower coverage phase (search.py, name=lawnmower) over convoy_3lane (1 cam -> RTF ~1.0, cheapest/most reliable rig). It does NOT chase: the phase is a blind precomputed body-frame boustrophedon (Takeoff -> per lane [Move FORWARD leg_cm, Hover scan_pause_s] with lane_cm-shifted U-turns -> Land); the parallel PerceptionLoop decodes EVERY ArUco that enters the nadir footprint and save_marker_frames stamps an annotated JPEG per marker frame. So reading the id needs NO chase and NO trained CV model — ArUco decode is classical and the marker IS the id. This warm-up proves the lawnmower flies + reads at all; sitl3_lawn_vision.json is the 3-drone read-all-5 coverage run. SPAWN: the single drone spawns over car_7 (LANES3_POSES[0]=4.2,0 in run_vision.sh lawn1) so the first read is guaranteed (car under the cam at scan start), then the sweep translates away to show coverage. CONVOY: 1 car (id 7) driven STRAIGHT + slow (run_vision.sh lawn1: CONVOY_IDS=7, CONVOY_ANGULAR=0, CONVOY_LINEAR 0.05, CONVOY_DELAY 150 holds it at spawn through the EKF settle). FAIL-LOUD: a lawnmower run that reads ZERO markers exits 0 on a clean Done (the phase is intentionally blind to sightings) — so the loud zero-read guard is HARNESS-SIDE (run_vision.sh lawn1 counts sightings.csv rows after the run and fails WHAT/WHICH/WHY/CHECK if none), mirroring track_convoy's min_sightings_to_pass for a phase that cannot self-check. GATE-E (config, never code): the sweep is OPEN-LOOP — yaw error compounds at every U-turn, so the lanes/leg_cm/lane_cm/turn_deg are VM/onsite-tunable and the pattern is ENABLED only after gate E measures relative move + rotation accuracy (command 1 m + 4x90 deg, tape-measure the closure). height_cm comes from altitude_band_m (2.6 m). camera_hfov_deg 99.69 + endpoints/ports identical to sitl3_track_vision.json alpha. READ-BACK: convoy_ids [7] turns on the orchestrator CONVOY COVERAGE tally so the summary/heartbeat report seen 1/1 + the read count for id 7 (the operator's 'did the sweep actually read it?'); no registry/early-stop (pure lawnmower).",
+  "profile": "sitl",
+  "flight_backend": "mavsdk_sitl",
+  "frame_backend": "gazebo",
+  "sitl_address": "udpin://0.0.0.0:14540",
+  "command_timeout_s": 90,
+  "mission_budget_s": 600,
+  "camera_hfov_deg": 99.69,
+  "marker_backend": "aruco",
+  "save_marker_frames": true,
+  "convoy_ids": [7],
+  "gazebo_video_host": "127.0.0.1",
+  "gazebo_video_port": 5600,
+  "detector": { "backend": "none" },
+  "drones": [
+    { "id": "alpha", "phases": ["lawnmower"], "altitude_band_m": 2.6,
+      "sitl_address": "udpin://0.0.0.0:14540", "mavsdk_grpc_port": 50051,
+      "gazebo_video_port": 5600,
+      "zone": { "lawnmower": {
+        "_comment": "GATE-E tunable. height_cm omitted -> altitude_band_m (260 cm). 4 forward passes of 3 m, lanes 2 m apart, 90 deg U-turns, 1.5 s hover/pass for steady decode frames.",
+        "lanes": 4, "leg_cm": 300, "lane_cm": 200,
+        "turn_deg": 90.0, "scan_pause_s": 1.5 } } }
+  ]
+}

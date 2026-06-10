@@ -493,6 +493,133 @@ handover3() {
   stageB3 "${1:-360}" normal
 }
 
+# ============================================================
+# LAWNMOWER COVERAGE (the user's "implement lawnmower first"). Each drone flies
+# the OpenLoopLawnmower phase (search.py, name=lawnmower) — a blind precomputed
+# body-frame boustrophedon — and the parallel PerceptionLoop decodes EVERY ArUco
+# that crosses the nadir footprint (save_marker_frames stamps a JPEG). NO chase,
+# NO registry, NO trained CV model: ArUco decode is classical, the marker IS the
+# id. lawn3 is the headline (3 drones read all 5 ids over convoy_px4); lawn1 is
+# the cheap 1-cam warm-up (proves the sweep flies + reads at all).
+# ============================================================
+
+# Fail LOUD if the just-finished run logged NO sightings. The lawnmower phase is
+# a blind plan emitter — unlike track_convoy (min_sightings_to_pass) it cannot
+# self-check that it ever saw a marker — so a coverage run that reads nothing
+# exits 0 on clean Dones, which would read as success. This is the harness-side
+# mirror of that guard: count data rows in the latest run's sightings.csv.
+assert_sightings() {
+  local label="$1"
+  local latest; latest="$(ls -1dt "$REPO"/runs_finals/*/ 2>/dev/null | head -1)"
+  if [ -z "$latest" ]; then
+    echo "FAIL [$label]: no runs_finals/<run> dir — WHY: finals never created a run dir — CHECK: did the mission start? re-read the finals output above" >&2
+    return 6
+  fi
+  local csv="${latest%/}/sightings.csv"
+  if [ ! -f "$csv" ]; then
+    echo "FAIL [$label]: $csv missing — WHY: perception logged no sightings file — CHECK: bridge frames (sim/run/gz_bridge_*.log) + marker_backend in $VCONFIG" >&2
+    return 6
+  fi
+  # grep -c . counts non-empty lines (and DOES count a final unterminated line),
+  # so a header-only file = 1; >1 means >=1 data row.
+  local nonempty; nonempty="$(grep -c . "$csv" 2>/dev/null || echo 0)"
+  if (( nonempty <= 1 )); then
+    echo "FAIL [$label]: sightings.csv has 0 data rows — WHY: the lawnmower swept but read NO ArUco — CHECK: does the sweep height/lanes cover the cars? cars driving (CONVOY_DELAY)? cam frames arriving (gz_bridge_*.log)? -> tune the sweep (config) BEFORE reaching for a detector" >&2
+    return 7
+  fi
+  echo "[$label] sightings.csv OK: $((nonempty - 1)) data row(s) in $csv"
+}
+
+# Launch ONE PX4 instance (instance 0, owns the gz server under llvmpipe lockstep)
+# into $VWORLD at LAUNCH_POSES[0], gated on its camera topic. The 1-cam analog of
+# launch3 for the cheap single-drone warm-up — leaves launch3/stageB3 untouched.
+# PID recorded as px4_vision_0.pid so stageB3_stop reaps it.
+launch1() {
+  install_model
+  cp "$REPO/sim/worlds/${VWORLD}.sdf" "$HOME/PX4-Autopilot/Tools/simulation/gz/worlds/" 2>/dev/null
+  export DISPLAY="${DISPLAY:-:0}"
+  export GZ_SIM_RESOURCE_PATH="$REPO/sim/models:$HOME/PX4-Autopilot/Tools/simulation/gz/models:${GZ_SIM_RESOURCE_PATH:-}"
+  local log="$RUN/px4_vision_0.log" pidf="$RUN/px4_vision_0.pid"
+  echo "[launch1] instance 0 world=$VWORLD pose=${LAUNCH_POSES[0]} -> $log"
+  ( cd "$HOME/PX4-Autopilot" && \
+    LIBGL_ALWAYS_SOFTWARE=1 HEADLESS=1 PX4_SYS_AUTOSTART=4001 \
+      PX4_SIM_MODEL=gz_x500_mono_cam_640 PX4_GZ_WORLD=$VWORLD \
+      PX4_GZ_MODEL_POSE="${LAUNCH_POSES[0]}" \
+      setsid ./build/px4_sitl_default/bin/px4 -i 0 -d > "$log" 2>&1 & \
+    echo $! > "$pidf" )
+  local t0=$SECONDS pid; pid="$(cat "$pidf")"
+  until gz topic -l 2>/dev/null | grep -q "x500_mono_cam_640_0/link/camera_link/sensor/camera/image"; do
+    kill -0 "$pid" 2>/dev/null || { echo "FAIL [launch1]: instance 0 (PID $pid) died before its camera topic — CHECK: tail $log" >&2; stageB3_stop; return 3; }
+    if (( SECONDS - t0 > 120 )); then
+      echo "FAIL [launch1]: instance 0 camera topic never appeared in 120s — CHECK: tail $log" >&2
+      stageB3_stop; return 4
+    fi
+    sleep 2
+  done
+  echo "[launch1] instance 0 camera up after $((SECONDS - t0))s"
+}
+
+# lawn1: 1 drone flies the lawnmower over convoy_3lane while ONE car (id 7) is
+# driven straight + slow. Cheapest rig (1 cam -> RTF ~1.0). Spawns over car_7
+# (LANES3_POSES[0]) so the first read is guaranteed, then the sweep translates
+# away. CONVOY_DELAY holds the car at spawn through the EKF settle.
+lawn1() {
+  VWORLD=convoy_3lane
+  VCONFIG=finals/configs/sitl1_lawn_vision.json
+  LAUNCH_POSES=( "${LANES3_POSES[0]}" )
+  export CONVOY_IDS="7" CONVOY_ANGULAR=0 \
+         CONVOY_LINEAR="${CONVOY_LINEAR:-0.05}" CONVOY_DELAY="${CONVOY_DELAY:-150}"
+  local secs="${1:-300}" rc=0
+  launch1 || return $?
+  gz_gui_start                                   # no-op unless GZ_GUI=1 (live 3D view)
+  echo "[lawn1] driving the convoy"
+  bash "$REPO/sim/run_convoy.sh" drive "$((secs + 150))" || echo "[lawn1] WARN convoy drive failed — marker will be static" >&2
+  echo "[lawn1] settling EKF 90s (single instance)"
+  sleep 90
+  bridge --topic "$(cam_topic_n 0)" --port 5600 || { stageB3_stop; return 5; }
+  echo "[lawn1] finals --config $VCONFIG budget=${secs}s"
+  ( cd "$REPO" && .venv/bin/python -m finals.main --profile sitl \
+      --config "$VCONFIG" --budget "$secs" ) || rc=$?
+  stageB3_stop
+  echo "[lawn1] finals rc=$rc — sightings.csv under $REPO/runs_finals/<latest>/"
+  (( rc == 0 )) && { assert_sightings lawn1 || rc=$?; }
+  return $rc
+}
+
+# lawn3: 3 drones each sweep a disjoint strip over convoy_px4 (5 cars present) so
+# all 5 ids get read across the run — the read-all-5 coverage proof. Reuses the
+# full 3-instance stageB3 flow (the lawn config has 3 drones matching the rig);
+# the post-run assert fails loud if coverage read nothing.
+lawn3() {
+  VWORLD=convoy_px4
+  VCONFIG=finals/configs/sitl3_lawn_vision.json
+  LAUNCH_POSES=( "${SIM5_POSES[@]}" )
+  export CONVOY_IDS="${CONVOY_IDS:-7 11 23 42 88}" \
+         CONVOY_LINEAR="${CONVOY_LINEAR:-0.08}" CONVOY_DELAY="${CONVOY_DELAY:-150}"
+  local secs="${1:-420}" rc=0
+  stageB3 "$secs" normal || rc=$?
+  (( rc == 0 )) && { assert_sightings lawn3 || rc=$?; }
+  return $rc
+}
+
+# read5: READ-AND-RELEASE coverage (sitl3_read5_vision.json). Same convoy_px4
+# rig as lawn3/dyn5 (5 cars), but the 3 drones run track_convoy in COVERAGE mode
+# (disengage_on_read + search_when_idle + registry dedup): each chases an unread
+# car only until it has 2 consistent reads, marks it SERVICED, and peels off to
+# the next; when all 5 are SERVICED the orchestrator EARLY-STOPS and lands all.
+# Watch the summary's CONVOY COVERAGE serviced N/5 + the coverage_complete event.
+read5() {
+  VWORLD=convoy_px4
+  VCONFIG=finals/configs/sitl3_read5_vision.json
+  LAUNCH_POSES=( "${SIM5_POSES[@]}" )
+  export CONVOY_IDS="${CONVOY_IDS:-7 11 23 42 88}" \
+         CONVOY_LINEAR="${CONVOY_LINEAR:-0.08}" CONVOY_DELAY="${CONVOY_DELAY:-150}"
+  local secs="${1:-420}" rc=0
+  stageB3 "$secs" normal || rc=$?
+  (( rc == 0 )) && { assert_sightings read5 || rc=$?; }
+  return $rc
+}
+
 case "${1:-}" in
   install-model) install_model ;;
   bridge)        shift; bridge "$@" ;;
@@ -515,5 +642,11 @@ case "${1:-}" in
   dyn5-kill)     shift; dyn5 "${1:-420}" kill ;;                 # WS-5 LOST->re-claim drill
   handover3)     shift; handover3 "${1:-360}" ;;                 # WS-7A soft-zone handover
   handover3-gui) shift; export GZ_GUI=1; handover3 "${1:-360}" ;;
-  *) echo "usage: $0 {install-model|bridge --topic T [--port P]|stop-bridge|stageA [secs]|stageB [secs]|probe3 [secs]|stageB3 [secs]|abort3 [secs]|kill3 [secs]|stageB3-stop|lanes3 [secs]|track3 [secs]|lanes3-gui [secs]|track3-gui [secs]|dyn3 [secs]|dyn3-gui [secs]|dyn5 [secs]|dyn5-kill [secs]|handover3 [secs]|handover3-gui [secs]}" >&2; exit 64 ;;
+  lawn1)         shift; lawn1 "${1:-300}" ;;                     # lawnmower 1-drone warm-up
+  lawn1-gui)     shift; export GZ_GUI=1; lawn1 "${1:-300}" ;;
+  lawn3)         shift; lawn3 "${1:-420}" ;;                     # lawnmower 3-drone read-all-5
+  lawn3-gui)     shift; export GZ_GUI=1; lawn3 "${1:-420}" ;;
+  read5)         shift; read5 "${1:-420}" ;;                     # read-and-release chase coverage
+  read5-gui)     shift; export GZ_GUI=1; read5 "${1:-420}" ;;
+  *) echo "usage: $0 {install-model|bridge --topic T [--port P]|stop-bridge|stageA [secs]|stageB [secs]|probe3 [secs]|stageB3 [secs]|abort3 [secs]|kill3 [secs]|stageB3-stop|lanes3 [secs]|track3 [secs]|lanes3-gui [secs]|track3-gui [secs]|dyn3 [secs]|dyn3-gui [secs]|dyn5 [secs]|dyn5-kill [secs]|handover3 [secs]|handover3-gui [secs]|lawn1 [secs]|lawn1-gui [secs]|lawn3 [secs]|lawn3-gui [secs]|read5 [secs]|read5-gui [secs]}" >&2; exit 64 ;;
 esac

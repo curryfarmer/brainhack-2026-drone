@@ -630,7 +630,8 @@ async def _amain(cfg: FinalsConfig, agents: List[DroneAgent],
                                 swarm_guards=_build_swarm_guards(cfg),
                                 abort_event=abort_event,
                                 convoy_registry=registry,
-                                drone_sectors=drone_sectors)
+                                drone_sectors=drone_sectors,
+                                convoy_ids=cfg.convoy_ids)
     listener = AbortListener(abort_event,
                              on_abort=orchestrator.request_stop_threadsafe)
     p_stop = asyncio.Event()

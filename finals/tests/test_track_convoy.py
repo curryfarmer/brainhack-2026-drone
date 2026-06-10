@@ -543,6 +543,113 @@ def test_soft_zone_no_op_without_bearing():
 
 
 # ============================================================
+# Read-and-release — confirm-then-leave + idle search (coverage mode)
+# ============================================================
+def test_disengage_on_read_releases_serviced_then_reacquires():
+    # disengage_on_read + read_confirm_hits=2: after the lock tick's read (1) and
+    # one more TRACK read (2), the id is confidently read -> SERVICED + peel off
+    # to ACQUIRE the next convoy, instead of chasing to investigate_budget_s.
+    reg = ConvoyRegistry(known_ids=[7])
+    p = TrackConvoy(acquire_hits=1, disengage_on_read=True, read_confirm_hits=2,
+                    investigate_budget_s=999.0, registry=reg)
+    p.step(ctx(yaw=0.0, sightings=[sight(7, bearing=0.0, ts=100.0)], now=100.0))
+    assert p._target_id == 7 and p._serviced_count == 0   # 1st read, still tracking
+    a = p.step(ctx(yaw=0.0, sightings=[sight(7, bearing=0.0, ts=101.0)],
+                   now=101.0, last_action_ok=True))
+    assert isinstance(a, Hover)                            # reacquire dwell
+    assert p._serviced_count == 1
+    assert p._target_id is None and p._state == "acquire"  # peeled off
+    assert reg.serviced_ids() == [7] and reg.all_serviced() is True
+
+
+def test_disengage_off_by_default_keeps_chasing():
+    # Default (disengage_on_read False): repeated reads NEVER release early — the
+    # drone stays locked, today's single-target chase behavior.
+    reg = ConvoyRegistry(known_ids=[7])
+    p = TrackConvoy(acquire_hits=1, investigate_budget_s=999.0, registry=reg)
+    for t in (100.0, 101.0, 102.0, 103.0):
+        p.step(ctx(yaw=0.0, sightings=[sight(7, bearing=0.0, ts=t)], now=t,
+                   last_action_ok=True))
+    assert p._target_id == 7 and p._state == "track"
+    assert p._serviced_count == 0 and reg.serviced_ids() == []
+
+
+def test_disengage_services_convoys_in_sequence():
+    # The read-and-release loop: read_confirm_hits=1 services each id in a single
+    # TRACK read, so one drone sweeps 7 then 11 to 2-of-2 with no chaining.
+    reg = ConvoyRegistry(known_ids=[7, 11])
+    p = TrackConvoy(acquire_hits=1, disengage_on_read=True, read_confirm_hits=1,
+                    investigate_budget_s=999.0, registry=reg)
+    p.step(ctx(yaw=0.0, sightings=[sight(7, bearing=0.0, ts=100.0)], now=100.0))
+    assert p._serviced_count == 1 and reg.serviced_ids() == [7]
+    assert p._target_id is None and p._state == "acquire"
+    p.step(ctx(yaw=0.0, sightings=[sight(11, bearing=0.0, ts=101.0)], now=101.0,
+               last_action_ok=True))
+    assert p._serviced_count == 2 and reg.serviced_ids() == [7, 11]
+    assert reg.all_serviced() is True
+
+
+def test_disengage_on_read_without_registry_still_peels_off():
+    # No registry: _release is a no-op but the phase still confirms + moves on
+    # (the serviced counter + re-acquire drive coverage even registry-less).
+    p = TrackConvoy(acquire_hits=1, disengage_on_read=True, read_confirm_hits=1,
+                    investigate_budget_s=999.0)
+    a = p.step(ctx(yaw=0.0, sightings=[sight(7, bearing=0.0, ts=100.0)],
+                   now=100.0))
+    assert isinstance(a, Hover)
+    assert p._serviced_count == 1 and p._target_id is None
+    assert p._state == "acquire"
+
+
+def test_search_when_idle_flies_a_search_leg_instead_of_giving_up():
+    # Coverage idle behavior: nothing claimable -> fly the body-frame search
+    # cycle (Move FORWARD, Hover, Rotate, repeat) so a NEW convoy enters the
+    # footprint, NEVER the acquire-budget Done give-up.
+    p = TrackConvoy(acquire_hits=1, acquire_budget_s=1.0,
+                    investigate_budget_s=999.0, search_when_idle=True,
+                    search_leg_cm=150, search_turn_deg=90.0, search_dwell_s=0.4)
+    a1 = p.step(ctx(now=100.0))
+    assert isinstance(a1, Move) and a1.direction is Direction.FORWARD
+    assert a1.distance_cm == 150
+    a2 = p.step(ctx(now=101.0, last_action_ok=True))
+    assert isinstance(a2, Hover) and a2.duration_s == 0.4
+    a3 = p.step(ctx(now=102.0, last_action_ok=True))     # well past acquire_budget
+    assert isinstance(a3, Rotate) and a3.angle_deg == 90.0
+    a4 = p.step(ctx(now=103.0, last_action_ok=True))     # cycles back to Move
+    assert isinstance(a4, Move) and a4.distance_cm == 150
+
+
+def test_search_when_idle_still_locks_a_visible_convoy():
+    # The search branch only fires when nothing is claimable: a convoy in view is
+    # still acquired immediately.
+    p = TrackConvoy(acquire_hits=1, search_when_idle=True, center_tol_deg=10.0)
+    p.step(ctx(yaw=0.0, sightings=[sight(7, bearing=0.0, ts=100.0)], now=100.0))
+    assert p._target_id == 7 and p._state == "track"
+
+
+def test_search_off_by_default_gives_up_at_acquire_budget():
+    # Without search_when_idle, an empty acquire still ends in the Done give-up
+    # (regression guard for the default path).
+    p = TrackConvoy(acquire_hits=1, acquire_budget_s=1.0,
+                    investigate_budget_s=99.0)
+    p.step(ctx(now=100.0))
+    a = p.step(ctx(now=102.0, last_action_ok=True))
+    assert isinstance(a, Done) and "nothing to track" in a.reason
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"disengage_on_read": "yes"}, {"search_when_idle": 1},
+    {"read_confirm_hits": 0}, {"read_confirm_hits": 2.0},
+    {"search_leg_cm": 0}, {"search_leg_cm": 1.5},
+    {"search_dwell_s": 0}, {"search_dwell_s": math.nan},
+    {"search_turn_deg": 0}, {"search_turn_deg": math.inf},
+])
+def test_constructor_rejects_bad_read_release_tunables(kwargs):
+    with pytest.raises(ConfigError, match="track_convoy"):
+        TrackConvoy(**kwargs)
+
+
+# ============================================================
 # Integration — flies + completes over MockAdapter
 # ============================================================
 def test_takes_off_and_completes_over_mock_adapter(tmp_path):

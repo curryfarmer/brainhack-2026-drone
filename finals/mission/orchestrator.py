@@ -108,6 +108,8 @@ class Orchestrator:
                  abort_event: Optional[threading.Event] = None,
                  convoy_registry: Optional["ConvoyRegistry"] = None,
                  drone_sectors: Optional[Dict[str, Sequence[float]]] = None,
+                 convoy_ids: Optional[Sequence[int]] = None,
+                 coverage_weak_below: int = 3,
                  clock: Callable[[], float] = time.monotonic):
         if not isinstance(agents, list) or not agents \
                 or not all(isinstance(a, DroneAgent) for a in agents):
@@ -164,6 +166,23 @@ class Orchestrator:
         # None = no soft-zoning (the matcher is a no-op). Validated loud: a
         # sector for an unknown drone or a malformed wedge is a wiring bug.
         self._drone_sectors = self._validate_sectors(drone_sectors, ids)
+        # Live convoy-coverage read-back (the operator's "did we actually catch
+        # all 5?"): the KNOWN target id set (the 5-of-5 denominator), kept
+        # independent of the registry so a registry-less coverage sweep still
+        # reports — plus a running per-marker-id sighting tally drained from the
+        # bus. Empty known set => no coverage block at all (non-convoy missions
+        # are byte-for-byte unchanged). SEEN (any decode) and SERVICED (a drone
+        # locked + confirmed + released, from the registry) are reported
+        # SEPARATELY: that is exactly the "glimpsed vs confirmed" distinction.
+        self._known_convoy_ids = self._validate_convoy_ids(convoy_ids)
+        if (not isinstance(coverage_weak_below, int)
+                or isinstance(coverage_weak_below, bool)
+                or coverage_weak_below < 0):
+            raise ValueError(
+                f"Orchestrator: coverage_weak_below must be an int >= 0, got "
+                f"{coverage_weak_below!r} — it is the read-count under which a "
+                f"seen convoy id is flagged WEAK in the summary")
+        self._coverage_weak_below = coverage_weak_below
         self._clock = clock
 
         # Per-run counters (reset by run(); instance state, never module
@@ -171,6 +190,12 @@ class Orchestrator:
         self._tick = 0
         self._cursor = 0
         self._n_sightings = 0
+        #: Per-marker-id read tally accumulated in _drain_bus (the coverage
+        #: read-back). Keyed by marker_id; convoy ids AND any stray decodes.
+        self._id_counts: Dict[int, int] = {}
+        #: True once the all-convoys-serviced early-stop has been signalled, so
+        #: it logs + sets stop exactly once.
+        self._coverage_stop_logged = False
         self._last_tick_latency_s = 0.0
         #: Beat-to-beat gap (None until the second beat) — what a starved/
         #: blocked event loop stretches; feeds LoopOverrunGuard. The drain
@@ -265,6 +290,8 @@ class Orchestrator:
         self._tick = 0
         self._cursor = 0
         self._n_sightings = 0
+        self._id_counts = {}
+        self._coverage_stop_logged = False
         self._last_tick_latency_s = 0.0
         self._last_beat_gap_s = None
         self._abort_handled = False
@@ -387,6 +414,24 @@ class Orchestrator:
                         # offered), match flagged-exited convoys to idle
                         # neighbours. Wrapped by the same tick-body net below.
                         self._match_handovers(now)
+                        # Read-and-release early-stop: once every KNOWN convoy
+                        # is SERVICED (locked + confirmed + released by some
+                        # drone), the mission objective is met — land all
+                        # cleanly NOW instead of burning the rest of the budget.
+                        # all_serviced() uses the registry's seeded known set
+                        # (the 5-of-5 denominator); fires exactly once and only
+                        # when there IS a denominator (empty known => False).
+                        if (not self._coverage_stop_logged
+                                and not stop.is_set()
+                                and self._registry.all_serviced()):
+                            self._coverage_stop_logged = True
+                            self._stop_seen = True
+                            stop.set()
+                            self._try_log(
+                                _MISSION_ID, "coverage_complete",
+                                serviced=self._registry.serviced_ids(),
+                                note="all known convoys serviced — landing all "
+                                     "drones early (clean)")
                     self._drain_bus()
                     self._last_tick_latency_s = time.perf_counter() - t0
                     self._write_heartbeat(now, stop.is_set())
@@ -583,6 +628,12 @@ class Orchestrator:
                 class_name=s.class_name, marker_id=s.marker_id,
                 confidence=s.confidence, ts=s.ts,
                 frame_number=s.frame_number, bearing_deg=s.bearing_deg)
+            # Coverage read-back: count reads per marker id (the operator's
+            # "did we catch all 5?"). Non-marker detections (marker_id None)
+            # are not convoy reads, so they never enter the tally.
+            if s.marker_id is not None:
+                self._id_counts[s.marker_id] = (
+                    self._id_counts.get(s.marker_id, 0) + 1)
         self._n_sightings += len(items)
 
     def _write_heartbeat(self, now: float, stop_signalled: bool,
@@ -606,6 +657,9 @@ class Orchestrator:
             # (the 5-of-5 tally) + done. `now` folds in staleness even if a beat
             # raced ahead of expire().
             payload["convoys"] = self._registry.snapshot(now)
+        cov = self._coverage_tally()
+        if cov is not None:
+            payload["coverage"] = cov
         write_heartbeat(self._run_dir, payload)
 
     # ---------------- summary ----------------
@@ -627,4 +681,77 @@ class Orchestrator:
                 f"{st['phases_completed']}/{st['n_phases']:<6} "
                 f"{st['failure'] or '-'}")
         lines.append("=" * 72)
+        cov = self._coverage_tally()
+        if cov is not None:
+            # The operator's read-back: SEEN (decoded at all) vs SERVICED
+            # (locked + confirmed + released — only with a registry). reads/
+            # weak/missing make a thin or absent convoy id impossible to miss.
+            served = (f"serviced {cov['serviced_n']}/{cov['of']} "
+                      f"{cov['serviced']}  " if "serviced" in cov else "")
+            lines.append(
+                f"CONVOY COVERAGE  {served}seen {cov['seen_n']}/{cov['of']} "
+                f"{cov['seen']}")
+            lines.append("  reads: " + "  ".join(
+                f"{cid}:{cov['reads'][cid]}" for cid in cov["known"]))
+            if cov["weak"]:
+                lines.append(
+                    f"  WEAK (<{self._coverage_weak_below} reads): {cov['weak']}")
+            if cov["missing"]:
+                lines.append(f"  MISSING (0 reads): {cov['missing']}")
+            if cov["other_ids"]:
+                lines.append(
+                    f"  other ids decoded (not a known convoy): {cov['other_ids']}")
+            lines.append("=" * 72)
         print("\n".join(lines), flush=True)
+
+    def _coverage_tally(self) -> Optional[dict]:
+        """The convoy read-back: of the KNOWN target ids, which have been SEEN
+        (decoded at all) and how many reads each — plus, with a registry bound,
+        which are SERVICED (locked + confirmed + released). Returns None for a
+        non-convoy mission (no known set) so heartbeat/summary stay clean. SEEN
+        != SERVICED on purpose: a 1-frame fluke decode is 'seen', not 'caught'."""
+        if not self._known_convoy_ids:
+            return None
+        known = sorted(self._known_convoy_ids)
+        reads = {cid: self._id_counts.get(cid, 0) for cid in known}
+        seen = sorted(cid for cid in known if reads[cid] > 0)
+        tally = {
+            "known": known,
+            "reads": reads,
+            "seen": seen,
+            "seen_n": len(seen),
+            "of": len(known),
+            "weak": sorted(cid for cid in known
+                           if 0 < reads[cid] < self._coverage_weak_below),
+            "missing": sorted(cid for cid in known if reads[cid] == 0),
+            # stray (non-known) decoded ids — surfaced so a dict/world mismatch
+            # or misread is visible, never silently dropped.
+            "other_ids": {mid: n for mid, n in sorted(self._id_counts.items())
+                          if mid not in self._known_convoy_ids},
+        }
+        if self._registry is not None:
+            serviced = sorted(c for c in self._registry.serviced_ids()
+                              if c in self._known_convoy_ids)
+            tally["serviced"] = serviced
+            tally["serviced_n"] = len(serviced)
+        return tally
+
+    @staticmethod
+    def _validate_convoy_ids(convoy_ids) -> frozenset:
+        """The known convoy id set (the 5-of-5 denominator) as a frozenset of
+        ints. None -> empty (no coverage block). Loud on a bad shape — a
+        malformed known set would silently disable the read-back."""
+        if convoy_ids is None:
+            return frozenset()
+        try:
+            ids = list(convoy_ids)
+        except TypeError:
+            raise ValueError(
+                f"Orchestrator: convoy_ids must be an iterable of ints or None, "
+                f"got {convoy_ids!r}")
+        for c in ids:
+            if not isinstance(c, int) or isinstance(c, bool):
+                raise ValueError(
+                    f"Orchestrator: convoy_ids must be ints, got {c!r} in "
+                    f"{ids!r} — these are the known convoy marker ids")
+        return frozenset(ids)

@@ -1,0 +1,37 @@
+{
+  "_comment": "LAWNMOWER coverage = READ ALL 5 (the headline of the user's 'implement lawnmower first'). 3 drones each fly the OpenLoopLawnmower coverage phase (search.py, name=lawnmower) over convoy_px4 (the SIM-5 world: ONE gz server, 5 RoboMaster cars ids 7/11/23/42/88, 1 onboard cam per drone @5 Hz -> RTF ~0.86 proven). NO chase, NO registry, NO trained CV model: each drone flies a blind precomputed body-frame boustrophedon; the parallel PerceptionLoop decodes EVERY ArUco that crosses its nadir footprint and save_marker_frames stamps an annotated JPEG. Between the 3 sweeps + the 5 moving cars, all 5 ids should be read across the run — the empirical test of the CV-model verdict (if coverage reads 5/5, no detector and no chase are needed; if it misses ids, tune the sweep/height FIRST, treat YOLO as last resort at gate F). DEDUP is by tiling not by lock: the 3 drones spawn at distinct SIM5 poses (alpha 1.2,0.2 / bravo -1.2,0.2 / charlie 0,-2 in run_vision.sh lawn3) and sweep the SAME shape so they cover 3 offset strips of the arena. This is the contention case dyn5 covers with the registry; here coverage is the dedup, so a duplicate read of the same id is harmless (the scored objective is reading each id once, by anyone). CONVOY: all 5 cars drive (run_vision.sh lawn3: CONVOY_IDS='7 11 23 42 88', CONVOY_LINEAR 0.08, CONVOY_DELAY 150 holds them at spawn through the EKF settle so they start roaming as the sweep goes live). FAIL-LOUD: a coverage run that reads ZERO markers exits 0 on clean Dones (the phase is blind to sightings by design) -> the loud zero-read guard is HARNESS-SIDE (run_vision.sh lawn3 counts sightings.csv rows post-run, fails WHAT/WHICH/WHY/CHECK if none). GATE-E (config, never code): OPEN-LOOP sweep, yaw error compounds per U-turn -> lanes/leg_cm/lane_cm/turn_deg + the 3 spawn poses (disjoint-strip tiling) are VM/onsite-tunable; ENABLE only after gate E measures relative move + rotation accuracy. BANDS 2.6/2.4/2.2 distinct (sitl vertical-separation guard); height_cm omitted -> band. Transport/endpoints/ports identical to sitl3_dyn5_vision.json. Run via sim/run_vision.sh lawn3. READ-BACK: convoy_ids [7,11,23,42,88] turns on the orchestrator CONVOY COVERAGE tally — the printed summary + heartbeat now report seen N/5 + per-id read counts + WEAK (<3 reads) + MISSING (0 reads) + stray non-convoy ids, so the operator SEES which of the 5 were actually decoded instead of guessing from drone motion. No registry is built (no drone runs track_convoy) so there is NO chase + NO all-serviced early-stop here: coverage IS the dedup, the tally is pure read-back (SEEN only; SERVICED needs the chase config sitl3_read5_vision.json).",
+  "profile": "sitl",
+  "flight_backend": "mavsdk_sitl",
+  "frame_backend": "gazebo",
+  "sitl_address": "udpin://0.0.0.0:14540",
+  "command_timeout_s": 90,
+  "mission_budget_s": 600,
+  "camera_hfov_deg": 99.69,
+  "marker_backend": "aruco",
+  "save_marker_frames": true,
+  "convoy_ids": [7, 11, 23, 42, 88],
+  "gazebo_video_host": "127.0.0.1",
+  "gazebo_video_port": 5600,
+  "detector": { "backend": "none" },
+  "drones": [
+    { "id": "alpha", "phases": ["lawnmower"], "altitude_band_m": 2.6,
+      "sitl_address": "udpin://0.0.0.0:14540", "mavsdk_grpc_port": 50051,
+      "gazebo_video_port": 5600,
+      "zone": { "lawnmower": {
+        "_comment": "GATE-E tunable. height_cm omitted -> band (260 cm). 3 forward passes of 3.5 m, lanes 2.5 m apart, 90 deg U-turns, 1.5 s hover/pass.",
+        "lanes": 3, "leg_cm": 350, "lane_cm": 250,
+        "turn_deg": 90.0, "scan_pause_s": 1.5 } } },
+    { "id": "bravo", "phases": ["lawnmower"], "altitude_band_m": 2.4,
+      "sitl_address": "udpin://0.0.0.0:14541", "mavsdk_grpc_port": 50052,
+      "gazebo_video_port": 5601,
+      "zone": { "lawnmower": {
+        "lanes": 3, "leg_cm": 350, "lane_cm": 250,
+        "turn_deg": 90.0, "scan_pause_s": 1.5 } } },
+    { "id": "charlie", "phases": ["lawnmower"], "altitude_band_m": 2.2,
+      "sitl_address": "udpin://0.0.0.0:14542", "mavsdk_grpc_port": 50053,
+      "gazebo_video_port": 5602,
+      "zone": { "lawnmower": {
+        "lanes": 3, "leg_cm": 350, "lane_cm": 250,
+        "turn_deg": 90.0, "scan_pause_s": 1.5 } } }
+  ]
+}
