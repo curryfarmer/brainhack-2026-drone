@@ -67,4 +67,10 @@ def test_action_vocabulary():
 
 def test_frame_stamped_shape():
     fields = {f.name for f in dataclasses.fields(FrameStamped)}
-    assert fields == {"image", "ts", "frame_number", "source_id"}
+    assert fields == {"image", "ts", "frame_number", "source_id", "depth"}
+
+
+def test_frame_stamped_depth_defaults_none():
+    """The depth seam (SENSE-IR) degrades absent: monocular frames omit it."""
+    fr = FrameStamped(image=None, ts=1.0, frame_number=1, source_id="alpha")
+    assert fr.depth is None

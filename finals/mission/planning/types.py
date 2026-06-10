@@ -165,6 +165,71 @@ class LandingPad:
 
 
 @dataclass(frozen=True)
+class Marker:
+    """A fixed-coordinate ArUco beacon at a KNOWN arena point. Two roles:
+    (1) NAV-FIX absolute position-fix anchor (reset open-loop DR drift); and
+    (2) per the 2026-06-10 intel, the LANDING approach target itself — each of
+    the 5 field beacons (ids 11/45/51/67/101) sits ~20-30 cm from its landing
+    pad, so navigating to a beacon's known coordinate puts a drone over the pad
+    within a single servo/descend step. That adjacency is the scope-reducer
+    around blind colour pad-search. id = the ArUco marker id; point_m =
+    (north_m, east_m) in the arena frame. NAV-FIX hardens further rules (e.g.
+    id restricted to the known field set, the beacon->pad offset vector)."""
+
+    id: int
+    point_m: Point
+
+    @classmethod
+    def from_dict(cls, raw: Any, index: int) -> "Marker":
+        where = f"arena.markers[{index}]"
+        data = _arena_keys(raw, required=("id", "point_m"), optional=(),
+                           where=where)
+        mid = data["id"]
+        if not isinstance(mid, int) or isinstance(mid, bool):
+            raise ConfigError(
+                f"{where}.id must be an int ArUco marker id (the beacon code, "
+                f"e.g. 11/45/51/67/101), got {mid!r}")
+        return cls(id=mid, point_m=_point(data["point_m"], f"{where}.point_m"))
+
+
+@dataclass(frozen=True)
+class Gate:
+    """A traversable opening — an arch GAP / doorway the planner may route a
+    leg THROUGH even though it sits between obstacle legs (NAV-ARCH). The arch
+    posts are ordinary keep_out polygons; this Gate marks the passable slot
+    between them. span_m = the two (north_m, east_m) endpoints of the opening
+    line the drone crosses; clearance_m = the usable width hint (m, 0 =
+    unspecified). NAV-ARCH hardens the geometry (that the span sits in a real
+    keep-out gap, a minimum clearance, the fly-through altitude)."""
+
+    id: str
+    span_m: Tuple[Point, Point]
+    clearance_m: float
+
+    @classmethod
+    def from_dict(cls, raw: Any, index: int) -> "Gate":
+        where = f"arena.gates[{index}]"
+        data = _arena_keys(raw, required=("id", "span_m"),
+                           optional=("clearance_m",), where=where)
+        span = data["span_m"]
+        if not isinstance(span, (list, tuple)) or len(span) != 2:
+            raise ConfigError(
+                f"{where}.span_m must be [[north_m, east_m], [north_m, east_m]] "
+                f"— the two endpoints of the passable opening, got {span!r}")
+        endpoints = tuple(_point(p, f"{where}.span_m[{i}]")
+                          for i, p in enumerate(span))
+        clearance = data.get("clearance_m", 0.0)
+        if (not isinstance(clearance, (int, float))
+                or isinstance(clearance, bool)
+                or not math.isfinite(clearance) or clearance < 0):
+            raise ConfigError(
+                f"{where}.clearance_m must be a finite number >= 0 (m, the "
+                f"usable opening width; 0 = unspecified), got {clearance!r}")
+        return cls(id=str(data["id"]), span_m=endpoints,
+                   clearance_m=float(clearance))
+
+
+@dataclass(frozen=True)
 class ArenaMap:
     """The Challenge-2A world: metric bounds, obstacle keep-outs, candidate
     landing pads, taped floor lanes, and the C2 launch frame (origin + the
@@ -183,6 +248,8 @@ class ArenaMap:
     lanes: Tuple[Tuple[Point, ...], ...]
     c2_origin_m: Point
     c2_heading_deg: float
+    markers: Tuple[Marker, ...] = ()   # NAV-FIX: fixed-coord beacon anchors (Step 0)
+    gates: Tuple[Gate, ...] = ()       # NAV-ARCH: traversable arch openings (Step 0)
 
     @classmethod
     def from_dict(cls, raw: Any, *, name: str) -> "ArenaMap":
@@ -190,7 +257,7 @@ class ArenaMap:
         data = _arena_keys(
             raw,
             required=("bounds_m", "c2_origin_m", "c2_heading_deg"),
-            optional=("keep_out", "pads", "lanes"),
+            optional=("keep_out", "pads", "lanes", "markers", "gates"),
             where=where,
         )
         bounds = data["bounds_m"]
@@ -231,6 +298,12 @@ class ArenaMap:
                   for j, pt in enumerate(_as_list(line, f"{where}.lanes[{i}]")))
             for i, line in enumerate(lanes_raw)
         )
+        markers = tuple(Marker.from_dict(m, i)
+                        for i, m in enumerate(_as_list(
+                            data.get("markers", []), f"{where}.markers")))
+        gates = tuple(Gate.from_dict(g, i)
+                      for i, g in enumerate(_as_list(
+                          data.get("gates", []), f"{where}.gates")))
         heading = data["c2_heading_deg"]
         if (not isinstance(heading, (int, float)) or isinstance(heading, bool)
                 or not math.isfinite(heading)):
@@ -267,6 +340,22 @@ class ArenaMap:
                 f"{list(bounds_t)} = [north_min, east_min, north_max, "
                 f"east_max] — the C2 launch point must sit inside the arena. "
                 f"Fix c2_origin_m or widen bounds_m.")
+        # Markers (NAV-FIX anchors / beacon landing targets): unique ids + every
+        # beacon coordinate INSIDE bounds (a beacon outside the arena can anchor
+        # neither a position-fix nor a landing).
+        _require_unique_ids((str(m.id) for m in markers), kind="marker",
+                            where=f"{where}.markers")
+        for i, m in enumerate(markers):
+            if not _point_in_bounds(m.point_m, bounds_t):
+                raise ConfigError(
+                    f"{where}.markers[{i}] (id {m.id}) point_m "
+                    f"{list(m.point_m)} is OUTSIDE bounds_m {list(bounds_t)} — "
+                    f"a beacon outside the arena cannot anchor a position-fix "
+                    f"or a landing. Fix the point or widen bounds_m.")
+        # Gates (NAV-ARCH traversable openings): unique ids (NAV-ARCH adds the
+        # in-a-keep-out-gap geometry checks).
+        _require_unique_ids((g.id for g in gates), kind="gate",
+                            where=f"{where}.gates")
 
         return cls(
             bounds_m=bounds_t,
@@ -275,6 +364,8 @@ class ArenaMap:
             lanes=lanes,
             c2_origin_m=c2_origin,
             c2_heading_deg=float(heading),
+            markers=markers,
+            gates=gates,
         )
 
 

@@ -41,6 +41,11 @@ VALID_DETECTOR_BACKENDS = ("none", "ultralytics", "canned")
 # the alternate path for the still-open "QR 20x20 cm" confirmation. Both
 # feed the SAME Sighting stream (finals/vision/aruco.py).
 VALID_MARKER_BACKENDS = ("aruco", "qr")
+# Optional DEPTH seam (SENSE-IR). "none" = the monocular HULA swarm path —
+# degrade-absent, mission logic must never require depth. SENSE-IR extends this
+# tuple when a real DepthSource backend is confirmed (the example_code RealSense
+# is the MAPPING drone, not this swarm). Reserved here as a Step 0 contract.
+VALID_DEPTH_BACKENDS = ("none",)
 
 # Each profile pins its flight backend — both appear in the JSON so a human
 # reading the file sees the whole story, and the loader cross-checks them so a
@@ -149,6 +154,19 @@ class FinalsConfig:
     sitl_address: str = "udpin://0.0.0.0:14540"
     marker_backend: str = "aruco"               # "aruco" | "qr" — the primary detector seam (S7)
     save_marker_frames: bool = False            # S11: aruco path saves an annotated JPEG per sighting (run_dir/marker_frames/<drone>)
+    # ArUco DICTIONARY name. The real field is DICT_7X7_1000 (beacons
+    # 11/45/51/67/101); the detector historically hardcoded DICT_6X6_250.
+    # RESERVED Step 0 contract: the field + its shape validation live here so
+    # PAD-DICT only wires the cv2.aruco resolver in vision/aruco.py and pins the
+    # 6x6 sim/fixture configs (marker_dict:"DICT_6X6_250"). Until PAD-DICT lands
+    # its VALID_MARKER_DICTS membership check this is validated as a non-empty
+    # string only and has no consumer (the detector keeps its built-in dict).
+    marker_dict: str = "DICT_7X7_1000"
+    # Optional cv2.aruco DetectorParameters overrides for the LOW-CONTRAST 7x7
+    # beacons (PAD-DICT whitelists the field names). None = library defaults.
+    aruco_detector_params: Optional[Dict[str, Any]] = None
+    # Optional DEPTH backend (SENSE-IR). "none" = monocular (degrade-absent).
+    depth_backend: str = "none"
     replay_dir: Optional[str] = None            # REQUIRED whenever frame_backend=replay
     replay_fps: float = 10.0                    # ReplaySource pacing (frames/s from disk)
     gazebo_video_host: str = "127.0.0.1"        # GazeboRgbSource <- sim/gz_camera_bridge endpoint
@@ -365,6 +383,7 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
             "discovery_timeout_s",
             "min_battery_pct", "video_channel_order", "camera_hfov_deg",
             "sitl_address", "marker_backend", "save_marker_frames",
+            "marker_dict", "aruco_detector_params", "depth_backend",
             "replay_dir", "replay_fps",
             "gazebo_video_host", "gazebo_video_port",
             "use_uwb", "uwb_serial_port", "convoy_lock_ttl_s", "convoy_ids",
@@ -411,6 +430,7 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
             "discovery_timeout_s",
             "min_battery_pct", "video_channel_order", "camera_hfov_deg",
             "sitl_address", "marker_backend", "save_marker_frames",
+            "marker_dict", "aruco_detector_params", "depth_backend",
             "replay_dir", "replay_fps",
             "gazebo_video_host", "gazebo_video_port",
             "use_uwb", "uwb_serial_port", "convoy_lock_ttl_s", "convoy_ids",
@@ -464,6 +484,27 @@ def _validate(cfg: FinalsConfig, config_dir: str) -> None:
             f"marker_backend {cfg.marker_backend!r} invalid — one of "
             f"{VALID_MARKER_BACKENDS}"
         )
+
+    # ArUco dictionary name (Step 0 contract; PAD-DICT adds the cv2.aruco
+    # resolver + strict VALID_MARKER_DICTS membership). Here: a non-empty
+    # string, so a null/empty (which would later resolve to no dictionary) dies
+    # on the ground, not in the detector thread.
+    if not isinstance(cfg.marker_dict, str) or not cfg.marker_dict:
+        raise ConfigError(
+            f"marker_dict must be a non-empty string (the ArUco dictionary "
+            f"name — 'DICT_7X7_1000' for the real field, 'DICT_6X6_250' for the "
+            f"6x6 sim fixtures), got {cfg.marker_dict!r}")
+    if (cfg.aruco_detector_params is not None
+            and not isinstance(cfg.aruco_detector_params, dict)):
+        raise ConfigError(
+            f"aruco_detector_params must be null or a JSON object of cv2.aruco "
+            f"DetectorParameters overrides (PAD-DICT whitelists the field "
+            f"names), got {type(cfg.aruco_detector_params).__name__}")
+    if cfg.depth_backend not in VALID_DEPTH_BACKENDS:
+        raise ConfigError(
+            f"depth_backend {cfg.depth_backend!r} invalid — one of "
+            f"{VALID_DEPTH_BACKENDS}. The HULA swarm path is monocular; depth "
+            f"is an OPTIONAL degrade-absent seam (SENSE-IR adds backends).")
 
     # WS-2 convoy coordination (validated here so --dry-run catches it, not a
     # mid-mission registry construction). Both are only consumed when a drone

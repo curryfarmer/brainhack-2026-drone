@@ -75,22 +75,33 @@ class Telemetry:
 
 @dataclass(frozen=True)
 class FrameStamped:
-    """One video frame, normalized by the VideoSource that produced it."""
+    """One video frame, normalized by the VideoSource that produced it.
+
+    `depth` is the OPTIONAL aligned depth map (the SENSE-IR seam): None on the
+    monocular HULA path — degrade-absent, mission logic must NEVER require it.
+    A future DepthSource fills it with an HxW float32 metres array registered to
+    `image`. It lives here (rather than a second frame type) so the seam exists
+    without forking the perception pipeline. Session: SENSE-IR contract (Step 0)."""
 
     image: "np.ndarray"          # HxWx3 uint8, BGR ALWAYS (sources convert)
     ts: float                    # time.monotonic() at receipt
     frame_number: Optional[int]
     source_id: str               # drone id this frame came from
+    depth: Optional["np.ndarray"] = None   # HxW float32 metres aligned to image; None = monocular
 
 
 @dataclass(frozen=True)
 class Sighting:
     """One detection event from one detector on one frame. Append-only record —
-    the convoy MOVES, so there is no dedup (unlike the qualifier barrel_log)."""
+    the convoy MOVES, so there is no dedup (unlike the qualifier barrel_log).
+
+    A source=="pad" sighting is the colour pad-locator's blob (PAD-DETECT):
+    marker_id is None and bbox_xyxy is the white-A3 / roundel bounding box that
+    land_on_pad servos onto, distinct from the "aruco" beacon that VALIDATES it."""
 
     drone_id: str
     ts: float
-    source: str                                          # "yolo" | "aruco" | "qr"
+    source: str                                          # "yolo" | "aruco" | "qr" | "pad"
     class_name: str                                      # e.g. "robomaster", "aruco_17"
     marker_id: Optional[int]                             # ArUco only
     bbox_xyxy: Tuple[float, float, float, float]
