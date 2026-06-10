@@ -670,10 +670,26 @@ async def _amain(cfg: FinalsConfig, agents: List[DroneAgent],
     # refuses a second call). Other profiles have no hardware gate and start
     # their own sources here.
     preflight_owns_sources = cfg.profile in ("bench", "real")
+    dropped: set = set()
     if preflight_owns_sources:
         from finals.preflight import run_preflight
         await run_preflight(cfg.profile, agents, cfg, sources=sources,
-                            events=events, run_dir=run_dir)   # PreflightError -> 3
+                            events=events, run_dir=run_dir,
+                            dropped=dropped)                  # PreflightError -> 3
+        if dropped:
+            # DEGRADED FLEET (cfg.allow_partial_fleet): preflight pulled the
+            # casualties — already safed + disconnected. Fly only the survivors:
+            # filter EVERY per-drone list so the orchestrator, the perception
+            # tasks, and the finally-teardown all see the SAME reduced fleet.
+            survivors = {a.drone_id for a in agents if a.drone_id not in dropped}
+            agents = [a for a in agents if a.drone_id in survivors]
+            perceptions = [(s, p) for (s, p) in perceptions
+                           if s.source_id in survivors]
+            sources = [s for s, _p in perceptions]
+            depth_sources = [ds for ds in depth_sources
+                             if getattr(ds, "source_id", None) in survivors]
+            events.log("mission", "flying_degraded_fleet",
+                       flying=sorted(survivors), dropped=sorted(dropped))
     else:
         # "mission" = the orchestrator's mission-level pseudo drone id.
         events.log("mission", "preflight", status="skipped",

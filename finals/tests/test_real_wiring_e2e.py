@@ -86,6 +86,13 @@ def _wire_fake_real_fleet(monkeypatch):
     monkeypatch.setattr(
         pf, "_default_discover",
         lambda plane_ids, timeout_s: {p: f"10.0.0.{p}" for p in plane_ids})
+    # landing_real.json ships allow_partial_fleet=true, so preflight takes the
+    # PARTIAL P3 path (its own discovery seam). Patch it too — all 3 answer here,
+    # so nobody is dropped and the run is identical to the strict full fleet.
+    monkeypatch.setattr(
+        pf, "_default_discover_partial",
+        lambda plane_ids, timeout_s, min_count: {
+            p: f"10.0.0.{p}" for p in plane_ids})
     monkeypatch.setattr(pf, "_stdin_go_reader", lambda: "GO")
     # **kw absorbs marker_dict / aruco_detector_params / save_dir.
     monkeypatch.setattr(aruco, "make_marker_detector",

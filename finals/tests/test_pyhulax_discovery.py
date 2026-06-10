@@ -154,3 +154,42 @@ def test_discover_returns_only_requested_planes():
 def test_discover_validates_inputs(plane_ids, timeout_s, match):
     with pytest.raises(ValueError, match=match):
         discover_required(plane_ids, timeout_s, sock=FakeSocket([]))
+
+
+# ============================================================
+# DEGRADED-FLEET discovery (min_count) — the allow_partial_fleet path
+# ============================================================
+def test_partial_discover_returns_subset_when_floor_met():
+    """min_count satisfied: return WHATEVER subset answered (the un-found planes
+    are the caller's drops), not a raise. Plane 3 never broadcasts."""
+    sock = FakeSocket([
+        (make_packet(1, "10.0.0.1"), ("10.0.0.1", 8668)),
+        (make_packet(2, "10.0.0.2"), ("10.0.0.2", 8668)),
+    ])
+    got = discover_required([1, 2, 3], timeout_s=0.2, sock=sock, min_count=1)
+    assert got == {1: "10.0.0.1", 2: "10.0.0.2"}   # request order, 3 dropped
+
+
+def test_partial_discover_raises_when_below_floor():
+    """Fewer than min_count answer -> still a hard abort (can't fly the floor)."""
+    sock = FakeSocket([(make_packet(1, "10.0.0.1"), ("10.0.0.1", 8668))])
+    with pytest.raises(PreflightError) as ei:
+        discover_required([1, 2, 3], timeout_s=0.2, sock=sock, min_count=2)
+    msg = str(ei.value)
+    assert "degraded-fleet discovery" in msg
+    assert "need >= 2" in msg
+
+
+def test_partial_discover_all_present_is_full_dict():
+    sock = FakeSocket([
+        (make_packet(1, "10.0.0.1"), ("10.0.0.1", 8668)),
+        (make_packet(2, "10.0.0.2"), ("10.0.0.2", 8668)),
+    ])
+    assert discover_required([1, 2], timeout_s=2.0, sock=sock, min_count=1) == {
+        1: "10.0.0.1", 2: "10.0.0.2"}
+
+
+@pytest.mark.parametrize("min_count", [0, 3, -1, True, 1.5])
+def test_partial_discover_validates_min_count(min_count):
+    with pytest.raises(ValueError, match="min_count"):
+        discover_required([1, 2], 1.0, sock=FakeSocket([]), min_count=min_count)

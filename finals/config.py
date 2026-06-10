@@ -203,6 +203,15 @@ class FinalsConfig:
     command_timeout_s: float = 15.0
     discovery_timeout_s: float = 10.0           # preflight P3 Dola listen window (bench/real)
     min_battery_pct: float = 20.0
+    # DEGRADED-FLEET FALLBACK (bench/real). OFF by default = the strict
+    # all-or-nothing preflight: a single drone that fails to discover/connect/
+    # report telemetry/open video aborts the WHOLE swarm. When True, preflight
+    # P3-P6 DROP each failing drone (logged loud) and the mission flies the
+    # SURVIVORS, provided at least `min_drones` remain (else still a hard abort).
+    # min_drones=1 = fly even on a single surviving drone. See finals/preflight.py
+    # (the _partial gate variants) + main._amain (survivor filtering).
+    allow_partial_fleet: bool = False
+    min_drones: int = 1
     video_channel_order: str = "rgb"            # what .to_rgb() ACTUALLY returns — bench-verified
     camera_hfov_deg: Optional[float] = None     # needed for Sighting.bearing_deg; bench-measured
     sitl_address: str = "udpin://0.0.0.0:14540"
@@ -435,7 +444,8 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
         optional=(
             "run_dir", "tick_hz", "mission_budget_s", "command_timeout_s",
             "discovery_timeout_s",
-            "min_battery_pct", "video_channel_order", "camera_hfov_deg",
+            "min_battery_pct", "allow_partial_fleet", "min_drones",
+            "video_channel_order", "camera_hfov_deg",
             "sitl_address", "marker_backend", "save_marker_frames",
             "marker_dict", "aruco_detector_params", "depth_backend",
             "replay_dir", "replay_fps",
@@ -483,7 +493,8 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
         **{k: top[k] for k in (
             "run_dir", "tick_hz", "mission_budget_s", "command_timeout_s",
             "discovery_timeout_s",
-            "min_battery_pct", "video_channel_order", "camera_hfov_deg",
+            "min_battery_pct", "allow_partial_fleet", "min_drones",
+            "video_channel_order", "camera_hfov_deg",
             "sitl_address", "marker_backend", "save_marker_frames",
             "marker_dict", "aruco_detector_params", "depth_backend",
             "replay_dir", "replay_fps",
@@ -812,6 +823,24 @@ def _validate(cfg: FinalsConfig, config_dir: str) -> None:
                 f"{gz_ports}")
     if not 0 <= cfg.min_battery_pct <= 100:
         raise ConfigError(f"min_battery_pct {cfg.min_battery_pct} out of range [0, 100]")
+    # Degraded-fleet fallback knobs.
+    if not isinstance(cfg.allow_partial_fleet, bool):
+        raise ConfigError(
+            f"allow_partial_fleet must be a bool, got {cfg.allow_partial_fleet!r}")
+    if (not isinstance(cfg.min_drones, int) or isinstance(cfg.min_drones, bool)
+            or cfg.min_drones < 1):
+        raise ConfigError(
+            f"min_drones must be an int >= 1 (the survivor floor for the "
+            f"degraded-fleet fallback), got {cfg.min_drones!r}")
+    if cfg.drones and cfg.min_drones > len(cfg.drones):
+        raise ConfigError(
+            f"min_drones ({cfg.min_drones}) > configured drones "
+            f"({len(cfg.drones)}) — the survivor floor can never be met")
+    if cfg.allow_partial_fleet and cfg.profile not in ("bench", "real"):
+        raise ConfigError(
+            f"allow_partial_fleet is a bench/real preflight feature (it degrades "
+            f"the P3-P6 hardware gate); profile {cfg.profile!r} has no preflight "
+            f"to degrade")
     if cfg.video_channel_order not in ("rgb", "bgr"):
         raise ConfigError(f'video_channel_order must be "rgb" or "bgr", got {cfg.video_channel_order!r}')
     if cfg.use_uwb and not cfg.uwb_serial_port:

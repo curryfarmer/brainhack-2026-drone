@@ -121,12 +121,25 @@ async def run_preflight(
         marker_detector: Optional[Callable] = None,
         confirm_fn: Optional[Callable[[], str]] = None,
         go_timeout_s: float = 60.0,
-        preflight_only: bool = False) -> List[CheckResult]:
-    """Run the P0-P10 gate. See the module docstring for the contract."""
+        preflight_only: bool = False,
+        dropped: Optional[set] = None) -> List[CheckResult]:
+    """Run the P0-P10 gate. See the module docstring for the contract.
+
+    DEGRADED-FLEET (cfg.allow_partial_fleet): P3-P6 DROP drones that fail to
+    discover/connect/report telemetry/open video instead of aborting the swarm;
+    the dropped drone_ids are added to `dropped` (the caller passes a set and
+    flies the survivors), and a gate fails critically only if fewer than
+    cfg.min_drones drones remain. With the flag OFF (the default) every gate is
+    the original strict all-or-nothing check, byte-for-byte — `dropped` stays
+    empty."""
     if profile not in ("bench", "real"):
         raise PreflightError(
             f"preflight is the bench/real gate; profile {profile!r} has none "
             f"(mock/sitl log a preflight-skipped event in main instead)")
+    if dropped is None:
+        dropped = set()
+    partial = getattr(cfg, "allow_partial_fleet", False)
+    min_drones = getattr(cfg, "min_drones", 1)
 
     results: List[CheckResult] = []
     started_sources: List = []
@@ -158,18 +171,52 @@ async def run_preflight(
     await _gate("P0", "config sanity", True, lambda: _p0_config(cfg))
     await _gate("P1", "log dir writable", True, lambda: _p1_logdir(run_dir))
     await _gate("P2", "perception readiness", True, lambda: _p2_perception(cfg, state))
-    await _gate("P3", "discovery", True,
-                lambda: _p3_discovery(cfg, agents, discover_fn))
-    await _gate("P4", "connect", True, lambda: _p4_connect(cfg, agents))
-    await _gate("P5", "telemetry sane", True, lambda: _p5_telemetry(cfg, agents))
-    await _gate("P6", "video fresh", True,
-                lambda: _p6_video(sources, started_sources))
-    await _gate("P7", "detect + tick load", False,
-                lambda: _p7_detect(cfg, sources, state))
-    await _gate("P8", "uwb serial", True, lambda: _p8_uwb(cfg))
-    await _gate("P9", "safety systems", True, lambda: _p9_safety(cfg, agents))
+    if not partial:
+        # STRICT (default): all-or-nothing — UNCHANGED, byte-for-byte.
+        await _gate("P3", "discovery", True,
+                    lambda: _p3_discovery(cfg, agents, discover_fn))
+        await _gate("P4", "connect", True, lambda: _p4_connect(cfg, agents))
+        await _gate("P5", "telemetry sane", True, lambda: _p5_telemetry(cfg, agents))
+        await _gate("P6", "video fresh", True,
+                    lambda: _p6_video(sources, started_sources))
+        await _gate("P7", "detect + tick load", False,
+                    lambda: _p7_detect(cfg, sources, state))
+        await _gate("P8", "uwb serial", True, lambda: _p8_uwb(cfg))
+        await _gate("P9", "safety systems", True, lambda: _p9_safety(cfg, agents))
+    else:
+        # DEGRADED: drop failing drones; a gate fails only if survivors fall
+        # below cfg.min_drones. `dropped` carries the casualties out to main.
+        await _gate("P3", "discovery", True,
+                    lambda: _p3_discovery_partial(cfg, agents, sources, discover_fn,
+                                                  dropped, min_drones, events))
+        await _gate("P4", "connect", True,
+                    lambda: _p4_connect_partial(cfg, agents, sources, dropped,
+                                                min_drones, events))
+        await _gate("P5", "telemetry sane", True,
+                    lambda: _p5_telemetry_partial(cfg, agents, sources, dropped,
+                                                  min_drones, events))
+        await _gate("P6", "video fresh", True,
+                    lambda: _p6_video_partial(sources, started_sources, agents,
+                                              dropped, min_drones, events))
+        await _gate("P7", "detect + tick load", False,
+                    lambda: _p7_detect(cfg, _alive_sources(sources, dropped), state))
+        await _gate("P8", "uwb serial", True, lambda: _p8_uwb(cfg))
+        await _gate("P9", "safety systems", True,
+                    lambda: _p9_safety_partial(cfg, agents, dropped))
     await _gate("P10", "operator GO", True,
                 lambda: _p10_operator_go(preflight_only, confirm_fn, go_timeout_s))
+
+    if partial and dropped:
+        flying = [a.drone_id for a in agents if a.drone_id not in dropped]
+        if events is not None:
+            try:
+                events.log("mission", "fleet_degraded", flying=flying,
+                           dropped=sorted(dropped), min_drones=min_drones)
+            except EventLogError as e:
+                print(f"[preflight] WARNING: could not log fleet_degraded: {e}",
+                      file=sys.stderr, flush=True)
+        print(f"  [degraded] flying {len(flying)} of {len(agents)}: {flying} "
+              f"(dropped {sorted(dropped)})", file=sys.stderr, flush=True)
 
     _persist(run_dir, results)
     if events is not None:
@@ -194,10 +241,18 @@ async def _p0_config(cfg) -> Tuple[bool, str, dict]:
     elif len(set(plane_ids)) != len(plane_ids):
         problems.append(f"duplicate plane_ids {plane_ids} — discovery cannot "
                         f"tell two drones apart")
+    # Multi-drone separation — the SAME either/or contract config.py validates
+    # at load (config.py: "distinct altitude bands OR a sector_deg on EVERY
+    # drone"). P0 historically only checked bands; that drifted from config.py
+    # and would have hard-failed the Challenge-2A landing mission (sectors, NO
+    # bands — altitude bands are illegal under the ~1.1 m ceiling). Accept BOTH.
     bands = [d.altitude_band_m for d in cfg.drones]
-    if len(cfg.drones) > 1 and (None in bands or len(set(bands)) != len(bands)):
-        problems.append(f"altitude bands not distinct {bands} (the collision "
-                        f"guarantee)")
+    sectors_all = all(d.sector_deg is not None for d in cfg.drones)
+    bands_distinct = None not in bands and len(set(bands)) == len(bands)
+    if len(cfg.drones) > 1 and not bands_distinct and not sectors_all:
+        problems.append(f"no multi-drone separation: need distinct altitude "
+                        f"bands {bands} OR a sector_deg on EVERY drone (the "
+                        f"collision guarantee)")
     if cfg.frame_backend != "pyhulax":
         problems.append(f"frame_backend {cfg.frame_backend!r} != 'pyhulax' "
                         f"(live video unwired)")
@@ -351,6 +406,181 @@ async def _p8_uwb(cfg) -> Tuple[bool, str, dict]:
 async def _p9_safety(cfg, agents) -> Tuple[bool, str, dict]:
     led_set: List[str] = []
     for drone, agent in zip(cfg.drones, agents):
+        if drone.led_rgb is not None:
+            await _adapter_of(agent).set_led(*drone.led_rgb)
+            led_set.append(f"{drone.id}={drone.led_rgb}")
+    return (True,
+            f"identity LED set: {led_set or 'none configured'}; battery "
+            f"failsafe enabled at connect (P4)",
+            {"led_set": led_set})
+
+
+# ============================================================
+# Degraded-fleet gate variants (cfg.allow_partial_fleet) — drop a failing drone
+# instead of aborting the swarm; a gate fails critically only if survivors fall
+# below cfg.min_drones. These run ONLY behind the flag; the strict gates above
+# are untouched. Every gate consults/feeds the shared `dropped` set so the lists
+# stay full-length + positionally aligned (P3/P9 zip cfg.drones with agents).
+# ============================================================
+def _alive_ids(agents, dropped) -> List[str]:
+    return [a.drone_id for a in agents if a.drone_id not in dropped]
+
+
+def _alive_sources(sources, dropped) -> List:
+    return [s for s in sources if getattr(s, "source_id", None) not in dropped]
+
+
+def _default_discover_partial(plane_ids: Sequence[int], timeout_s: float,
+                              min_count: int) -> Dict[int, str]:
+    from finals.flight.discovery import discover_required
+    return discover_required(plane_ids, timeout_s, min_count=min_count)
+
+
+async def _drop_drone(drone_id: str, agents, sources, dropped: set, events,
+                      reason: str) -> None:
+    """Pull ONE drone from the flying set: record it, log loud, and best-effort
+    safe it (stop its video source, disconnect its adapter). NEVER raises —
+    safing a casualty must not abort the survivors."""
+    dropped.add(drone_id)
+    if events is not None:
+        try:
+            events.log("mission", "drone_dropped", drone=drone_id, reason=reason)
+        except EventLogError as e:
+            print(f"[preflight] WARNING: could not log drop of {drone_id}: {e}",
+                  file=sys.stderr, flush=True)
+    print(f"  [degraded] DROPPED {drone_id}: {reason}",
+          file=sys.stderr, flush=True)
+    src = next((s for s in sources
+                if getattr(s, "source_id", None) == drone_id), None)
+    if src is not None:
+        try:
+            src.stop()                              # idempotent on an unstarted source
+        except (SensorError, OSError) as e:
+            print(f"[preflight] drop {drone_id}: source stop: {e}",
+                  file=sys.stderr, flush=True)
+    agent = next((a for a in agents if a.drone_id == drone_id), None)
+    if agent is not None:
+        try:
+            await asyncio.wait_for(_adapter_of(agent).disconnect(),
+                                   _DISCONNECT_TIMEOUT_S)
+        except (asyncio.TimeoutError, FlightError) as e:
+            print(f"[preflight] drop {drone_id}: disconnect: {e}",
+                  file=sys.stderr, flush=True)
+
+
+async def _p3_discovery_partial(cfg, agents, sources, discover_fn, dropped,
+                                min_drones, events) -> Tuple[bool, str, dict]:
+    plane_ids = [d.plane_id for d in cfg.drones]
+    if discover_fn is not None:
+        ips = discover_fn(plane_ids, cfg.discovery_timeout_s)   # may return a subset
+    else:
+        # Real partial discovery raises only if FEWER than min_drones answer.
+        ips = _default_discover_partial(plane_ids, cfg.discovery_timeout_s,
+                                        min_drones)
+    for drone, agent in zip(cfg.drones, agents):
+        if agent.drone_id != drone.id:
+            raise PreflightError(
+                f"preflight wiring: agent {agent.drone_id!r} != config drone "
+                f"{drone.id!r} (order mismatch in main)")
+        if drone.plane_id in ips:
+            _pyhulax_leaf(_adapter_of(agent)).set_target_ip(ips[drone.plane_id])
+        else:
+            await _drop_drone(drone.id, agents, sources, dropped, events,
+                              f"not discovered within "
+                              f"{cfg.discovery_timeout_s:.0f}s (Dola)")
+    alive = _alive_ids(agents, dropped)
+    ok = len(alive) >= min_drones
+    detail = (f"discovered {len(ips)}/{len(plane_ids)}; flying {alive}" if ok
+              else f"only {len(alive)} discovered, need >= {min_drones}")
+    return ok, detail, {"ips": ips, "dropped": sorted(dropped), "flying": alive}
+
+
+async def _p4_connect_partial(cfg, agents, sources, dropped, min_drones,
+                              events) -> Tuple[bool, str, dict]:
+    connected: List[str] = []
+    for agent in agents:
+        if agent.drone_id in dropped:
+            continue
+        try:
+            await _adapter_of(agent).connect(timeout_s=cfg.command_timeout_s)
+            connected.append(agent.drone_id)
+        except _GATE_ERRORS as e:
+            await _drop_drone(agent.drone_id, agents, sources, dropped, events,
+                              f"connect failed: {type(e).__name__}: {e}")
+    alive = _alive_ids(agents, dropped)
+    ok = len(alive) >= min_drones
+    detail = (f"connected {connected}; flying {alive}" if ok
+              else f"only {len(alive)} connected, need >= {min_drones}")
+    return ok, detail, {"connected": connected, "dropped": sorted(dropped),
+                        "flying": alive}
+
+
+async def _p5_telemetry_partial(cfg, agents, sources, dropped, min_drones,
+                                events) -> Tuple[bool, str, dict]:
+    now = time.monotonic()
+    data: dict = {}
+    stale_s = cfg.guards.telemetry_stale_s
+    for agent in agents:
+        if agent.drone_id in dropped:
+            continue
+        try:
+            t = _adapter_of(agent).telemetry()
+        except _GATE_ERRORS as e:
+            await _drop_drone(agent.drone_id, agents, sources, dropped, events,
+                              f"telemetry unavailable: {type(e).__name__}: {e}")
+            continue
+        age = t.age_s(now)
+        data[agent.drone_id] = {
+            "battery_pct": t.battery_pct, "altitude_m": t.altitude_m,
+            "telemetry_age_s": round(age, 2)}
+        problems: List[str] = []
+        if t.battery_pct is None or t.battery_pct < cfg.min_battery_pct:
+            problems.append(f"battery {t.battery_pct} < floor {cfg.min_battery_pct}")
+        if age > stale_s:
+            problems.append(f"telemetry STALE {age:.1f}s > {stale_s:.1f}s")
+        if t.altitude_m is not None and abs(t.altitude_m) > _ON_GROUND_ALT_TOL_M:
+            problems.append(f"not on ground (alt {t.altitude_m:.2f}m)")
+        if problems:
+            await _drop_drone(agent.drone_id, agents, sources, dropped, events,
+                              "; ".join(problems))
+    alive = _alive_ids(agents, dropped)
+    ok = len(alive) >= min_drones
+    detail = (f"telemetry OK for {alive}" if ok
+              else f"only {len(alive)} healthy, need >= {min_drones}")
+    return ok, detail, data
+
+
+async def _p6_video_partial(sources, started_sources, agents, dropped,
+                            min_drones, events) -> Tuple[bool, str, dict]:
+    if not sources:
+        alive = _alive_ids(agents, dropped)
+        return len(alive) >= min_drones, "no video sources wired (skipped)", {}
+    for source in sources:
+        if source.source_id in dropped:
+            continue
+        try:
+            source.start(timeout_s=_VIDEO_START_TIMEOUT_S)
+            started_sources.append(source)
+            if not source.healthy:
+                await _drop_drone(source.source_id, agents, sources, dropped,
+                                  events,
+                                  "video started but unhealthy (no frame progress)")
+        except _GATE_ERRORS as e:
+            await _drop_drone(source.source_id, agents, sources, dropped, events,
+                              f"video start failed: {type(e).__name__}: {e}")
+    alive = _alive_ids(agents, dropped)
+    ok = len(alive) >= min_drones
+    healthy = [s.source_id for s in sources if s.source_id not in dropped]
+    detail = (f"video healthy: {healthy}" if ok
+              else f"only {len(alive)} drone(s) with video, need >= {min_drones}")
+    return ok, detail, {"healthy": healthy, "dropped": sorted(dropped)}
+
+
+async def _p9_safety_partial(cfg, agents, dropped) -> Tuple[bool, str, dict]:
+    led_set: List[str] = []
+    for drone, agent in zip(cfg.drones, agents):
+        if drone.id in dropped:
+            continue
         if drone.led_rgb is not None:
             await _adapter_of(agent).set_led(*drone.led_rgb)
             led_set.append(f"{drone.id}={drone.led_rgb}")

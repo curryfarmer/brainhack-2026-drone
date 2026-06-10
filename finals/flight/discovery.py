@@ -100,15 +100,24 @@ def _parse_packet(packet: bytes, sender_ip: str) -> Optional[dict]:
 def discover_required(plane_ids: Iterable[int], timeout_s: float, *,
                       port: int = DISCOVERY_PORT,
                       listen_ip: str = "0.0.0.0",
-                      sock: Optional[socket.socket] = None) -> Dict[int, str]:
-    """Listen up to timeout_s for the broadcast and return {plane_id: ip} for
-    EVERY requested plane, or raise PreflightError naming the ones never heard.
+                      sock: Optional[socket.socket] = None,
+                      min_count: Optional[int] = None) -> Dict[int, str]:
+    """Listen up to timeout_s for the broadcast and return {plane_id: ip}.
 
-    Returns as soon as all requested planes are seen (no need to burn the full
-    timeout). Bounded by a wall-clock deadline (convention 3). The recv socket
-    is created here unless `sock` is injected (the test seam — a fake socket
-    feeds crafted packets so the found/missing logic is exercised with NO real
-    UDP, no firewall, no port binding).
+    STRICT (min_count is None, the default): require EVERY requested plane —
+    raise PreflightError naming the ones never heard. Returns as soon as all are
+    seen (no need to burn the full timeout).
+
+    DEGRADED (min_count set — the allow_partial_fleet path): require only
+    `min_count` of the requested planes. Listens the FULL window to collect as
+    many as answer, then returns WHATEVER subset was heard (>= min_count),
+    raising only if fewer than min_count appeared. The caller (preflight P3)
+    drops the un-found drones and flies the survivors.
+
+    Bounded by a wall-clock deadline (convention 3). The recv socket is created
+    here unless `sock` is injected (the test seam — a fake socket feeds crafted
+    packets so the found/missing logic is exercised with NO real UDP, no
+    firewall, no port binding).
     """
     wanted: List[int] = list(plane_ids)
     if not wanted:
@@ -121,6 +130,12 @@ def discover_required(plane_ids: Iterable[int], timeout_s: float, *,
     if not (isinstance(timeout_s, (int, float)) and timeout_s > 0):
         raise ValueError(
             f"discover_required: timeout_s must be > 0, got {timeout_s!r}")
+    if min_count is not None and not (
+            isinstance(min_count, int) and not isinstance(min_count, bool)
+            and 1 <= min_count <= len(wanted)):
+        raise ValueError(
+            f"discover_required: min_count must be an int in [1, {len(wanted)}] "
+            f"or None (strict), got {min_count!r}")
 
     wanted_set = set(wanted)
     found: Dict[int, str] = {}
@@ -179,11 +194,21 @@ def discover_required(plane_ids: Iterable[int], timeout_s: float, *,
                      "scan", parse_errors)
 
     missing = sorted(wanted_set - found.keys())
-    if missing:
-        found_ids = sorted(found)
-        raise PreflightError(
-            f"planes not found: {missing} — found {found_ids}; check "
-            f"Wi-Fi/SSID/power, that the aircraft are bound to this client, "
-            f"and UDP {port} firewall inbound (laptop on the drone network?)")
+    if min_count is None:
+        if missing:
+            found_ids = sorted(found)
+            raise PreflightError(
+                f"planes not found: {missing} — found {found_ids}; check "
+                f"Wi-Fi/SSID/power, that the aircraft are bound to this client, "
+                f"and UDP {port} firewall inbound (laptop on the drone network?)")
+        return {pid: found[pid] for pid in wanted}
 
-    return {pid: found[pid] for pid in wanted}
+    # DEGRADED: only min_count required. Return the found subset (in request
+    # order) if it clears the floor; otherwise a hard abort — too few to fly.
+    if len(found) < min_count:
+        raise PreflightError(
+            f"degraded-fleet discovery: only {len(found)} plane(s) found "
+            f"{sorted(found)}, need >= {min_count} (missing {missing}); check "
+            f"Wi-Fi/SSID/power, aircraft bound to this client, and UDP {port} "
+            f"firewall inbound (laptop on the drone network?)")
+    return {pid: found[pid] for pid in wanted if pid in found}
