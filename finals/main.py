@@ -71,10 +71,15 @@ from finals.guards import (AbortListener, BatteryGuard, GeofenceLite, Guard,
                            LoopOverrunGuard, MissionClockGuard, PhaseTimeout,
                            SafetyController, SectorGuard, TelemetryWatchdog,
                            VideoWatchdog)
+from typing import TYPE_CHECKING
+
 from finals.mission.agent import DroneAgent
 from finals.mission.orchestrator import Orchestrator
 from finals.mission.phase import MissionPhase
 from finals.mission.phases import resolve_phase
+
+if TYPE_CHECKING:  # type-only: the registry is built lazily in _build_convoy_registry
+    from finals.mission.convoy_registry import ConvoyRegistry
 from finals.sightings import SightingBus, SightingLog
 
 _CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
@@ -292,18 +297,44 @@ def _build_adapter(cfg: FinalsConfig, drone: DroneConfig, *, api=None):
     return flight_cls(drone.id)
 
 
-def _build_phases(drone_cfg: DroneConfig,
-                  cfg: FinalsConfig) -> List[MissionPhase]:
+def _build_phases(drone_cfg: DroneConfig, cfg: FinalsConfig,
+                  registry: "Optional[ConvoyRegistry]" = None,
+                  ) -> List[MissionPhase]:
     """Phase names -> instances. Soft convention: classes MAY define
     from_config(drone_cfg, cfg); otherwise no-arg construction. Stub phases
-    raise their session pointer loudly here, at wiring time."""
+    raise their session pointer loudly here, at wiring time.
+
+    WS-2: a phase that exposes bind_registry (track_convoy) gets the shared C2
+    ConvoyRegistry injected here — the same post-construction injection style as
+    perception<->agent wiring. Phases without it are untouched, so non-convoy
+    missions never see a registry."""
     phases: List[MissionPhase] = []
     for name in drone_cfg.phases:
         phase_cls = resolve_phase(name)
         factory = getattr(phase_cls, "from_config", None)
-        phases.append(factory(drone_cfg, cfg) if factory is not None
-                      else phase_cls())
+        phase = factory(drone_cfg, cfg) if factory is not None else phase_cls()
+        if registry is not None and hasattr(phase, "bind_registry"):
+            phase.bind_registry(registry)
+        phases.append(phase)
     return phases
+
+
+def _uses_track_convoy(cfg: FinalsConfig) -> bool:
+    """True iff any drone runs the track_convoy phase — the ONLY consumer of the
+    ConvoyRegistry. Gates registry construction so non-convoy missions keep a
+    clean heartbeat (no empty convoys block)."""
+    return any("track_convoy" in d.phases for d in cfg.drones)
+
+
+def _build_convoy_registry(cfg: FinalsConfig) -> "Optional[ConvoyRegistry]":
+    """The shared C2 convoy-ownership authority, built once per mission — but
+    only when a drone actually tracks convoys. lock_ttl_s and the known id set
+    (5-of-5 denominator) come from config; both were validated at load."""
+    if not _uses_track_convoy(cfg):
+        return None
+    from finals.mission.convoy_registry import ConvoyRegistry
+    return ConvoyRegistry(lock_ttl_s=cfg.convoy_lock_ttl_s,
+                          known_ids=cfg.convoy_ids)
 
 
 #: The orchestrator's supervision beat — shared with LoopOverrunGuard so the
@@ -513,7 +544,8 @@ def _perception_screamer(events: EventLog):
 
 async def _amain(cfg: FinalsConfig, agents: List[DroneAgent],
                  events: EventLog, run_dir: str, bus: SightingBus,
-                 perceptions: Sequence[Tuple[object, object]] = ()) -> int:
+                 perceptions: Sequence[Tuple[object, object]] = (),
+                 registry: "Optional[ConvoyRegistry]" = None) -> int:
     """Preflight gate -> perception tasks (S7, when frames are wired) ->
     Orchestrator.run (with the S5 abort listener armed around it), on ONE
     event loop. Perception teardown always runs (finally), in dependency
@@ -541,7 +573,8 @@ async def _amain(cfg: FinalsConfig, agents: List[DroneAgent],
                                 budget_s=cfg.mission_budget_s, bus=bus,
                                 heartbeat_period_s=_HEARTBEAT_PERIOD_S,
                                 swarm_guards=_build_swarm_guards(cfg),
-                                abort_event=abort_event)
+                                abort_event=abort_event,
+                                convoy_registry=registry)
     listener = AbortListener(abort_event,
                              on_abort=orchestrator.request_stop_threadsafe)
     p_stop = asyncio.Event()
@@ -582,6 +615,7 @@ async def _amain(cfg: FinalsConfig, agents: List[DroneAgent],
 def _build_agents(cfg: FinalsConfig, events: EventLog, bus: SightingBus,
                   slog: Optional[SightingLog], detector, csv_health, safety,
                   run_dir: str,
+                  registry: "Optional[ConvoyRegistry]" = None,
                   ) -> Tuple[List[DroneAgent], List[Tuple[object, object]]]:
     """One DroneAgent + its (source, perception) pair per cfg.drone. Shared by
     the mission path (_run_mission) and --preflight-only (_run_preflight_only)
@@ -609,7 +643,7 @@ def _build_agents(cfg: FinalsConfig, events: EventLog, bus: SightingBus,
             on_degrade = (lambda trip, p=perception:
                           p.shed(trip.reason))
         agent = DroneAgent(d.id, _build_adapter(cfg, d, api=api),
-                           _build_phases(d, cfg), events, bus=bus,
+                           _build_phases(d, cfg, registry), events, bus=bus,
                            command_timeout_s=cfg.command_timeout_s,
                            guards=_build_guards(cfg, d),
                            safety=safety,
@@ -659,13 +693,16 @@ def _run_mission(cfg: FinalsConfig) -> int:
     with EventLog(run_dir) as events:
         bus = SightingBus()
         safety = _build_safety(cfg, events)
+        registry = _build_convoy_registry(cfg)
         slog, detector, csv_health = _build_fleet_support(
             cfg, events, bus, run_dir)
         try:
             agents, perceptions = _build_agents(
-                cfg, events, bus, slog, detector, csv_health, safety, run_dir)
+                cfg, events, bus, slog, detector, csv_health, safety, run_dir,
+                registry=registry)
             return asyncio.run(_amain(cfg, agents, events, run_dir, bus,
-                                      perceptions=perceptions))
+                                      perceptions=perceptions,
+                                      registry=registry))
         finally:
             if detector is not None:
                 detector.stop()                # joins the worker threads
@@ -691,11 +728,13 @@ def _run_preflight_only(cfg: FinalsConfig) -> int:
         from finals.preflight import run_preflight
         bus = SightingBus()
         safety = _build_safety(cfg, events)
+        registry = _build_convoy_registry(cfg)
         slog, detector, csv_health = _build_fleet_support(
             cfg, events, bus, run_dir)
         try:
             agents, perceptions = _build_agents(
-                cfg, events, bus, slog, detector, csv_health, safety, run_dir)
+                cfg, events, bus, slog, detector, csv_health, safety, run_dir,
+                registry=registry)
             sources = [s for s, _p in perceptions]
             results = asyncio.run(run_preflight(
                 cfg.profile, agents, cfg, sources=sources, events=events,

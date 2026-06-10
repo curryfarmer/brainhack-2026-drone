@@ -78,12 +78,15 @@ import sys
 import threading
 import time
 import traceback
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence
 
 from finals.events import EventLog, EventLogError, write_heartbeat
 from finals.guards import Guard, GuardContext, TripAction, evaluate_guards
 from finals.mission.agent import AgentState, DroneAgent
 from finals.sightings import SightingBus
+
+if TYPE_CHECKING:  # type-only: the registry is duck-typed (expire/snapshot)
+    from finals.mission.convoy_registry import ConvoyRegistry
 
 #: Bounded wait for cancelled agent tasks to actually return (a cancelled
 #: agent unwinds through bounded awaits, so this is generous headroom).
@@ -103,6 +106,7 @@ class Orchestrator:
                  settle_grace_s: float = 60.0,
                  swarm_guards: Sequence[Guard] = (),
                  abort_event: Optional[threading.Event] = None,
+                 convoy_registry: Optional["ConvoyRegistry"] = None,
                  clock: Callable[[], float] = time.monotonic):
         if not isinstance(agents, list) or not agents \
                 or not all(isinstance(a, DroneAgent) for a in agents):
@@ -149,6 +153,10 @@ class Orchestrator:
         self._settle_grace_s = float(settle_grace_s)
         self._swarm_guards = list(swarm_guards)
         self._abort_event = abort_event
+        # WS-2 convoy coordination (None for non-convoy missions): expired each
+        # beat so a drone that dropped Wi-Fi frees its convoy; snapshotted into
+        # the heartbeat as the swarm-wide ownership view.
+        self._registry = convoy_registry
         self._clock = clock
 
         # Per-run counters (reset by run(); instance state, never module
@@ -323,6 +331,13 @@ class Orchestrator:
                 self._tick += 1
                 t0 = time.perf_counter()
                 try:
+                    if self._registry is not None:
+                        lost = self._registry.expire(now)
+                        if lost:
+                            self._try_log(_MISSION_ID, "convoy_lock_expired",
+                                          convoy_ids=lost,
+                                          note="no heartbeat for lock_ttl_s — "
+                                               "freed for re-claim")
                     self._drain_bus()
                     self._last_tick_latency_s = time.perf_counter() - t0
                     self._write_heartbeat(now, stop.is_set())
@@ -453,7 +468,7 @@ class Orchestrator:
     def _write_heartbeat(self, now: float, stop_signalled: bool,
                          final: bool = False) -> None:
         assert self._t_start is not None        # set first thing in run()
-        write_heartbeat(self._run_dir, {
+        payload = {
             "ts": time.time(),
             "tick": self._tick,
             "final": final,
@@ -465,7 +480,13 @@ class Orchestrator:
                            else round(self._last_beat_gap_s, 6)),
             "sightings_drained": self._n_sightings,
             "drones": {a.drone_id: a.status() for a in self._agents},
-        })
+        }
+        if self._registry is not None:
+            # The swarm-wide ownership view: serviced / in_flight / remaining
+            # (the 5-of-5 tally) + done. `now` folds in staleness even if a beat
+            # raced ahead of expire().
+            payload["convoys"] = self._registry.snapshot(now)
+        write_heartbeat(self._run_dir, payload)
 
     # ---------------- summary ----------------
     def _print_summary(self) -> None:

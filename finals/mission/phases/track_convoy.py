@@ -60,6 +60,7 @@ from finals.types import (Abort, Action, Direction, Done, Hover, Move, Rotate,
 
 if TYPE_CHECKING:  # type hints only — keeps the import graph minimal
     from finals.config import DroneConfig, FinalsConfig
+    from finals.mission.convoy_registry import ConvoyRegistry
 
 
 def _wrap180(deg: float) -> float:
@@ -83,7 +84,7 @@ class TrackConvoy(MissionPhase):
         "acquire_dwell_s", "acquire_budget_s", "center_tol_deg", "max_step_deg",
         "track_dwell_s", "approach_enabled", "approach_cm", "center_px_frac",
         "max_chase_cm", "lead_gain", "reacquire_dwell_s", "lost_timeout_s",
-        "investigate_budget_s",
+        "investigate_budget_s", "min_sightings_to_pass",
     )
 
     def __init__(self, *, height_cm: int = 80,
@@ -96,7 +97,9 @@ class TrackConvoy(MissionPhase):
                  max_chase_cm: int = 1000,
                  lead_gain: float = 0.0, reacquire_dwell_s: float = 0.5,
                  lost_timeout_s: float = 4.0,
-                 investigate_budget_s: float = 90.0):
+                 investigate_budget_s: float = 90.0,
+                 min_sightings_to_pass: int = 0,
+                 registry: "Optional[ConvoyRegistry]" = None):
         def _bad(key: str, value, why: str) -> ConfigError:
             return ConfigError(
                 f"track_convoy: {key}={value!r} invalid — {why} — check "
@@ -145,6 +148,18 @@ class TrackConvoy(MissionPhase):
                 or isinstance(lead_gain, bool)
                 or not math.isfinite(lead_gain) or lead_gain < 0):
             raise _bad("lead_gain", lead_gain, "must be a finite number >= 0")
+        if (not isinstance(min_sightings_to_pass, int)
+                or isinstance(min_sightings_to_pass, bool)
+                or min_sightings_to_pass < 0):
+            raise _bad("min_sightings_to_pass", min_sightings_to_pass,
+                       "must be an int >= 0 (0 = off; > 0 = fail loud with Abort "
+                       "if fewer sightings of the convoy were captured)")
+        if registry is not None and not all(
+                hasattr(registry, m) for m in
+                ("claim", "renew", "release", "claimable_ids")):
+            raise _bad("registry", type(registry).__name__,
+                       "must be a ConvoyRegistry or None (needs "
+                       "claim/renew/release/claimable_ids)")
 
         self.height_cm = height_cm
         self.track_marker_ids = (set(track_marker_ids)
@@ -164,6 +179,12 @@ class TrackConvoy(MissionPhase):
         self.reacquire_dwell_s = float(reacquire_dwell_s)
         self.lost_timeout_s = float(lost_timeout_s)
         self.investigate_budget_s = float(investigate_budget_s)
+        self.min_sightings_to_pass = min_sightings_to_pass
+        #: Shared C2 ConvoyRegistry (None = static track_marker_ids behavior).
+        #: from_config leaves it None; main._build_phases injects via
+        #: bind_registry so dynamic assignment turns on without a config-shape
+        #: change. See the class docstring.
+        self.registry = registry
 
         # --- mutable per-mission state (a fresh instance per drone) ---
         self._state = "init"
@@ -190,6 +211,20 @@ class TrackConvoy(MissionPhase):
         kwargs = _zone_kwargs(drone_cfg, "track_convoy", cls._TUNABLES)
         _height_from_band(kwargs, drone_cfg)
         return cls(**kwargs)
+
+    def bind_registry(self, registry: "ConvoyRegistry") -> None:
+        """Inject the shared C2 ConvoyRegistry after from_config (done by
+        main._build_phases). With a registry bound, ACQUIRE only locks ids it can
+        CLAIM and TRACK renews the lock each tick — turning a static
+        track_marker_ids list into dynamic, dedup'd, swarm-wide assignment. With
+        none, behavior is exactly as before. Idempotent."""
+        if registry is not None and not all(
+                hasattr(registry, m) for m in
+                ("claim", "renew", "release", "claimable_ids")):
+            raise ConfigError(
+                f"track_convoy.bind_registry: {type(registry).__name__!r} is not "
+                f"a ConvoyRegistry (needs claim/renew/release/claimable_ids)")
+        self.registry = registry
 
     def on_enter(self, ctx: AgentContext) -> None:
         self._t_enter = ctx.now
@@ -246,24 +281,30 @@ class TrackConvoy(MissionPhase):
     def _step_acquire(self, ctx: AgentContext,
                       elapsed: float) -> Optional[Action]:
         if elapsed > self.investigate_budget_s:
-            return Done(f"track_convoy[{ctx.drone_id}]: investigate budget "
-                        f"{self.investigate_budget_s:g}s elapsed before a lock "
-                        f"— handing back")
+            return self._finish(
+                ctx, f"track_convoy[{ctx.drone_id}]: investigate budget "
+                f"{self.investigate_budget_s:g}s elapsed before a lock — "
+                f"handing back", serviced=False)
         if self._t_acquire_start is None:          # defensive: always set above
             self._t_acquire_start = ctx.now
         acq_elapsed = ctx.now - self._t_acquire_start
         self._ingest(ctx)
-        locked = self._best_candidate()
+        locked = self._best_candidate(self._claimable(ctx))
         if locked is not None:
+            if self.registry is not None and not self.registry.claim(
+                    ctx.drone_id, locked, ctx.now):
+                # Lost a race between the claimable filter and the claim (another
+                # drone won this id this tick) — keep scanning for a free convoy.
+                return Hover(duration_s=self.acquire_dwell_s)
             self._target_id = locked
             self._state = "track"
             self._t_last_seen = ctx.now
             return None                    # steer this same tick
         if acq_elapsed > self.acquire_budget_s:
-            return Done(f"track_convoy[{ctx.drone_id}]: no id reached "
-                        f"{self.acquire_hits} hit(s) within "
-                        f"{self.acquire_budget_s:g}s — nothing to track, "
-                        f"handing back")
+            return self._finish(
+                ctx, f"track_convoy[{ctx.drone_id}]: no id reached "
+                f"{self.acquire_hits} hit(s) within {self.acquire_budget_s:g}s "
+                f"— nothing to track, handing back", serviced=False)
         return Hover(duration_s=self.acquire_dwell_s)
 
     def _step_track(self, ctx: AgentContext, elapsed: float) -> Action:
@@ -274,11 +315,25 @@ class TrackConvoy(MissionPhase):
         if fresh:
             self._t_last_seen = ctx.now
             self._seen_count += len(fresh)
+            if (self.registry is not None and not self.registry.renew(
+                    ctx.drone_id, self._target_id, ctx.now)):
+                # Our lock expired / was stolen / was handed off out from under
+                # us. We no longer own it (so no release), but we must stop
+                # tracking it and re-acquire whatever we can still claim.
+                self._lost_events += 1
+                self._target_id = None
+                self._obs.clear()
+                self._enter_acquire(ctx)
+                return Hover(duration_s=self.reacquire_dwell_s)
             return self._steer(ctx, fresh)
-        # lost this tick
+        # lost this tick (no fresh sighting)
         assert self._t_last_seen is not None
         if ctx.now - self._t_last_seen > self.lost_timeout_s:
             self._lost_events += 1         # drop the lock and re-acquire
+            # We still OWN the lock here — hand it back so a better-placed drone
+            # can pick the convoy up while we re-find it (expire() would free it
+            # eventually anyway; releasing now is the cooperative path).
+            self._release(ctx, serviced=False)
             self._target_id = None
             self._obs.clear()
             self._enter_acquire(ctx)       # fresh acquire_budget for the re-find
@@ -335,18 +390,41 @@ class TrackConvoy(MissionPhase):
         cutoff = ctx.now - self.acquire_window_s
         self._obs = [o for o in self._obs if o[0] >= cutoff]
 
-    def _best_candidate(self) -> Optional[int]:
+    def _best_candidate(self,
+                        claimable: Optional[set] = None) -> Optional[int]:
         """The id with the most hits in-window once it reaches acquire_hits;
-        ties broken by the most recent observation."""
+        ties broken by the most recent observation. When `claimable` is given
+        (registry bound), only ids the registry says this drone may still claim
+        are eligible — so a convoy another drone already owns is never chased."""
         counts: dict = {}
         latest: dict = {}
         for ts, mid in self._obs:
             counts[mid] = counts.get(mid, 0) + 1
             latest[mid] = max(latest.get(mid, ts), ts)
         ready = [mid for mid, n in counts.items() if n >= self.acquire_hits]
+        if claimable is not None:
+            ready = [mid for mid in ready if mid in claimable]
         if not ready:
             return None
         return max(ready, key=lambda mid: (counts[mid], latest[mid]))
+
+    def _claimable(self, ctx: AgentContext) -> Optional[set]:
+        """The in-window candidate ids this drone may still claim, per the
+        registry. None when no registry is bound -> _best_candidate keeps its
+        original 'any id that reached acquire_hits' behavior (static mode)."""
+        if self.registry is None:
+            return None
+        candidates = {mid for _ts, mid in self._obs}
+        return set(self.registry.claimable_ids(ctx.drone_id, ctx.now,
+                                               candidates))
+
+    def _release(self, ctx: AgentContext, *, serviced: bool) -> None:
+        """Hand our convoy lock back to the registry. No-op without a registry or
+        a current target. serviced=True -> SERVICED (counts to 5-of-5, never
+        re-claimable); False -> back to the pool (loss / clean handover)."""
+        if self.registry is not None and self._target_id is not None:
+            self.registry.release(ctx.drone_id, self._target_id, ctx.now,
+                                  serviced=serviced)
 
     def _lead(self, bearing: float, ts: float) -> float:
         """Azimuth lead for a moving target from the bearing rate (0 unless
@@ -381,8 +459,27 @@ class TrackConvoy(MissionPhase):
         return math.hypot((cx - w / 2.0) / (w / 2.0),
                           (cy - h / 2.0) / (h / 2.0))
 
-    def _done(self, ctx: AgentContext, why: str) -> Done:
-        return Done(
-            f"track_convoy[{ctx.drone_id}]: tracked id={self._target_id} "
-            f"({self._seen_count} sighting(s), chased {self._chase_used_cm} cm, "
-            f"{self._lost_events} reacquire(s)) — {why}")
+    def _done(self, ctx: AgentContext, why: str) -> Action:
+        """Successful end of a TRACK: release the lock as SERVICED, then Done
+        (subject to the min_sightings_to_pass guard in _finish)."""
+        msg = (f"track_convoy[{ctx.drone_id}]: tracked id={self._target_id} "
+               f"({self._seen_count} sighting(s), chased {self._chase_used_cm} cm, "
+               f"{self._lost_events} reacquire(s)) — {why}")
+        return self._finish(ctx, msg, serviced=True)
+
+    def _finish(self, ctx: AgentContext, done_msg: str, *,
+                serviced: bool) -> Action:
+        """End the phase: release any lock (serviced or back-to-pool), then Done —
+        UNLESS min_sightings_to_pass is set and we saw fewer than that, in which
+        case fail LOUD with Abort instead of reporting a clean Done over a convoy
+        we never actually saw (closes the silent-success hole). Default 0 = off,
+        so the give-up paths keep returning Done with their existing messages."""
+        self._release(ctx, serviced=serviced)
+        if (self.min_sightings_to_pass
+                and self._seen_count < self.min_sightings_to_pass):
+            return Abort(
+                f"track_convoy[{ctx.drone_id}]: only {self._seen_count} "
+                f"sighting(s) of the convoy — need >= "
+                f"{self.min_sightings_to_pass} (min_sightings_to_pass) — failing "
+                f"loud instead of reporting success ({done_msg})")
+        return Done(done_msg)

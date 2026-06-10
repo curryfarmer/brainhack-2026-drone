@@ -155,6 +155,14 @@ class FinalsConfig:
     gazebo_video_port: int = 5600               # localhost TCP port the bridge serves frames on
     use_uwb: bool = False
     uwb_serial_port: Optional[str] = None
+    # WS-2 convoy coordination (the C2 ConvoyRegistry, built only when a drone
+    # runs track_convoy): convoy_lock_ttl_s = seconds a CLAIMED convoy survives
+    # without a renew before expire() frees it for the swarm (size > the track
+    # renew cadence so a live drone never goes stale). convoy_ids = the known
+    # convoy id set (the 5-of-5 denominator); None -> dynamic tracking with no
+    # completion tally. See finals/mission/convoy_registry.py.
+    convoy_lock_ttl_s: float = 12.0
+    convoy_ids: Optional[List[int]] = None
     # Challenge-2A landing navigation (S11/NAV-0): the optional arena_name names a
     # finals/configs/arenas/<name>.json map (obstacles + pads + C2 frame). It is
     # resolved into `arena` at load time; `arena` is DERIVED, never set in JSON.
@@ -351,7 +359,8 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
             "sitl_address", "marker_backend", "save_marker_frames",
             "replay_dir", "replay_fps",
             "gazebo_video_host", "gazebo_video_port",
-            "use_uwb", "uwb_serial_port", "arena_name", "guards",
+            "use_uwb", "uwb_serial_port", "convoy_lock_ttl_s", "convoy_ids",
+            "arena_name", "guards",
         ),
         where=path,
     )
@@ -395,7 +404,8 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
             "sitl_address", "marker_backend", "save_marker_frames",
             "replay_dir", "replay_fps",
             "gazebo_video_host", "gazebo_video_port",
-            "use_uwb", "uwb_serial_port", "arena_name",
+            "use_uwb", "uwb_serial_port", "convoy_lock_ttl_s", "convoy_ids",
+            "arena_name",
         ) if k in top},
     )
 
@@ -444,6 +454,28 @@ def _validate(cfg: FinalsConfig, config_dir: str) -> None:
             f"marker_backend {cfg.marker_backend!r} invalid — one of "
             f"{VALID_MARKER_BACKENDS}"
         )
+
+    # WS-2 convoy coordination (validated here so --dry-run catches it, not a
+    # mid-mission registry construction). Both are only consumed when a drone
+    # runs track_convoy, but a malformed value is always loud.
+    if (not isinstance(cfg.convoy_lock_ttl_s, (int, float))
+            or isinstance(cfg.convoy_lock_ttl_s, bool)
+            or not math.isfinite(cfg.convoy_lock_ttl_s)
+            or cfg.convoy_lock_ttl_s <= 0):
+        raise ConfigError(
+            f"convoy_lock_ttl_s {cfg.convoy_lock_ttl_s!r} invalid — must be a "
+            f"finite number > 0 (seconds a CLAIMED convoy lock survives without "
+            f"a renew); size it above the track_convoy renew cadence")
+    if cfg.convoy_ids is not None:
+        if (not isinstance(cfg.convoy_ids, list)
+                or not cfg.convoy_ids
+                or not all(isinstance(c, int) and not isinstance(c, bool)
+                           for c in cfg.convoy_ids)
+                or len(set(cfg.convoy_ids)) != len(cfg.convoy_ids)):
+            raise ConfigError(
+                f"convoy_ids {cfg.convoy_ids!r} invalid — must be null or a "
+                f"non-empty list of DISTINCT int ArUco marker ids (the 5-of-5 "
+                f"completion denominator, e.g. [7, 11, 23, 42, 88])")
 
     if cfg.profile == "replay":
         if cfg.drones:

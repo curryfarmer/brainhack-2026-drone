@@ -240,6 +240,138 @@ def test_failed_action_aborts_with_underlying_error():
 
 
 # ============================================================
+# WS-2 — dynamic assignment via an injected ConvoyRegistry
+# ============================================================
+from finals.mission.convoy_registry import ConvoyRegistry   # noqa: E402
+
+
+def ctx_for(drone_id, now=100.0, yaw=0.0, is_flying=True, sightings=None):
+    """ctx() variant with a settable drone_id (the registry keys on it)."""
+    return AgentContext(
+        drone_id=drone_id, now=now, mission_elapsed_s=now,
+        telemetry=Telemetry(ts=now, yaw_deg=yaw, is_flying=is_flying),
+        sightings=sightings or [])
+
+
+def test_bind_registry_rejects_non_registry():
+    p = TrackConvoy()
+    with pytest.raises(ConfigError):
+        p.bind_registry(object())
+
+
+def test_registry_claims_the_locked_id_on_acquire():
+    reg = ConvoyRegistry()
+    p = TrackConvoy(acquire_hits=1, registry=reg)
+    p.step(ctx(yaw=0.0, sightings=[sight(7, bearing=0.0, ts=100.0)]))
+    assert p._target_id == 7
+    assert reg.owner_of(7, 100.0) == "alpha"          # the lock was taken
+
+
+def test_registry_skips_an_id_another_drone_owns():
+    reg = ConvoyRegistry()
+    reg.claim("bravo", 7, 100.0)                       # bravo already has 7
+    p = TrackConvoy(acquire_hits=1, acquire_budget_s=99.0, registry=reg)
+    a = p.step(ctx(yaw=0.0, sightings=[sight(7, bearing=0.0, ts=100.0)]))
+    assert p._target_id is None                        # never locked a taken id
+    assert isinstance(a, Hover)                        # keeps scanning
+    assert reg.owner_of(7, 100.0) == "bravo"           # untouched
+
+
+def test_registry_prefers_a_claimable_id_over_an_owned_one():
+    reg = ConvoyRegistry()
+    reg.claim("bravo", 7, 100.0)
+    p = TrackConvoy(acquire_hits=1, registry=reg)
+    p.step(ctx(yaw=0.0, sightings=[sight(7, bearing=0.0, ts=100.0),
+                                   sight(23, bearing=0.0, ts=100.0)]))
+    assert p._target_id == 23                          # took the free convoy
+    assert reg.owner_of(23, 100.0) == "alpha"
+
+
+def test_registry_renew_keeps_the_lock_fresh_during_track():
+    reg = ConvoyRegistry(lock_ttl_s=5.0)
+    p = TrackConvoy(acquire_hits=1, registry=reg)
+    for t in (100.0, 101.0, 102.0, 103.0):             # a fresh sighting each tick
+        p.step(ctx(yaw=0.0, sightings=[sight(7, bearing=0.0, ts=t)], now=t))
+    assert p._state == "track" and p._target_id == 7
+    assert reg.expire(107.9) == [], "renewed at 103 -> not stale within ttl"
+    assert reg.expire(108.1) == [7], "no renew past ttl -> freed"
+
+
+def test_registry_releases_serviced_on_track_completion():
+    reg = ConvoyRegistry(known_ids=[7])
+    p = TrackConvoy(acquire_hits=1, investigate_budget_s=1.0, registry=reg)
+    p.step(ctx(yaw=0.0, sightings=[sight(7, bearing=0.0, ts=100.0)], now=100.0))
+    a = p.step(ctx(yaw=0.0, sightings=[sight(7, bearing=0.0, ts=102.0)],
+                   now=102.0, last_action_ok=True))
+    assert isinstance(a, Done)
+    assert reg.serviced_ids() == [7] and reg.all_serviced() is True
+
+
+def test_registry_releases_to_pool_on_full_loss():
+    reg = ConvoyRegistry()
+    p = TrackConvoy(acquire_hits=1, lost_timeout_s=2.0, investigate_budget_s=99.0,
+                    registry=reg)
+    p.step(ctx(yaw=0.0, sightings=[sight(7, bearing=0.0, ts=100.0)], now=100.0))
+    assert reg.owner_of(7, 100.0) == "alpha"
+    a = p.step(ctx(now=103.0, sightings=[], last_action_ok=True))  # lost > 2 s
+    assert isinstance(a, Hover) and p._target_id is None
+    assert reg.owner_of(7, 103.0) is None              # handed back to the pool
+    assert reg.claim("bravo", 7, 103.0) is True        # another drone can take it
+
+
+def test_registry_renew_false_drops_to_reacquire():
+    reg = ConvoyRegistry(lock_ttl_s=5.0)
+    p = TrackConvoy(acquire_hits=1, registry=reg)
+    p.step(ctx(yaw=0.0, sightings=[sight(7, bearing=0.0, ts=100.0)], now=100.0))
+    # The lock goes stale and bravo steals it while alpha wasn't stepping.
+    reg.expire(106.0)
+    assert reg.claim("bravo", 7, 106.0) is True
+    a = p.step(ctx(now=106.0, sightings=[sight(7, bearing=0.0, ts=106.0)],
+                   last_action_ok=True))
+    assert p._target_id is None and p._state == "acquire"   # renew False -> drop
+    assert isinstance(a, Hover)
+
+
+def test_min_sightings_guard_aborts_when_convoy_never_seen():
+    p = TrackConvoy(acquire_hits=1, acquire_budget_s=1.0,
+                    investigate_budget_s=99.0, min_sightings_to_pass=2)
+    p.step(ctx(now=100.0))
+    a = p.step(ctx(now=102.0, last_action_ok=True))    # acquire budget elapsed, 0 seen
+    assert isinstance(a, Abort) and "min_sightings_to_pass" in a.reason
+
+
+def test_min_sightings_guard_passes_when_enough_seen():
+    p = TrackConvoy(acquire_hits=1, investigate_budget_s=1.0,
+                    min_sightings_to_pass=1)
+    p.step(ctx(yaw=0.0, sightings=[sight(7, bearing=0.0, ts=100.0)], now=100.0))
+    a = p.step(ctx(yaw=0.0, sightings=[sight(7, bearing=0.0, ts=102.0)],
+                   now=102.0, last_action_ok=True))
+    assert isinstance(a, Done)                          # 1 seen >= 1 required
+
+
+def test_two_drones_one_convoy_only_one_locks():
+    """The dedup property at the phase level: two drones sharing a registry see
+    the same id in the same tick; exactly one ends up tracking it."""
+    reg = ConvoyRegistry()
+    pa = TrackConvoy(acquire_hits=1, registry=reg)
+    pb = TrackConvoy(acquire_hits=1, acquire_budget_s=99.0, registry=reg)
+    pa.step(ctx_for("alpha", sightings=[sight(7, bearing=0.0, ts=100.0)]))
+    pb.step(ctx_for("bravo", sightings=[sight(7, bearing=0.0, ts=100.0)]))
+    locked = {pa._target_id, pb._target_id}
+    assert locked == {7, None}, "exactly one drone locks the convoy"
+    assert reg.owner_of(7, 100.0) == "alpha"
+
+
+def test_no_registry_is_unchanged_static_behavior():
+    """Sanity: without a registry, the phase locks the best id by hit-count
+    exactly as before (the registry=None default path)."""
+    p = TrackConvoy(acquire_hits=2)
+    s = [sight(7, bearing=0.0, ts=100.0) for _ in range(2)]
+    p.step(ctx(yaw=0.0, sightings=s))
+    assert p._target_id == 7
+
+
+# ============================================================
 # Target selection
 # ============================================================
 def test_track_marker_ids_filters_acquisition():
