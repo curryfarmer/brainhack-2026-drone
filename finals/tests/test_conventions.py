@@ -57,6 +57,12 @@ FINALS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # telemetry, socket/Dola discovery) and keep diagnosing the rest of the fleet.
 # Every catch logs the full traceback and issues NO flight command — it is a
 # read-only probe, never in the flight path. Same justification as detector.py.
+# dev-bench widening (reviewed): tools/live_view.py — the real-time CV feed
+# visualiser is the SAME class as hula_smoke: a read-only, no-flight diagnostic
+# that must survive the open pyhulax/cv2/ultralytics error set (connect, video
+# start, per-frame decode/inference) plus the never-raise teardown (stream stop +
+# disconnect). Five sites, each logging a full traceback via log.exc(); it issues
+# NO flight command.
 EXCEPT_EXCEPTION_WHITELIST = {
     os.path.join("finals", "guards.py"),
     os.path.join("finals", "mission", "orchestrator.py"),
@@ -64,6 +70,7 @@ EXCEPT_EXCEPTION_WHITELIST = {
     os.path.join("finals", "flight", "sitl_adapter.py"),
     os.path.join("finals", "flight", "pyhulax_adapter.py"),
     os.path.join("finals", "tools", "hula_smoke.py"),
+    os.path.join("finals", "tools", "live_view.py"),
 }
 
 # Modules that may import SDK/heavy-I/O packages at module top level.
