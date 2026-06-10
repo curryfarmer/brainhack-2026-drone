@@ -50,3 +50,21 @@ sim/run/
 .pptx_extract/
 # YOLO data staging
 finals/yolo_parts/
+
+# YOLO training dataset — large (images/labels), regenerated locally. The TRAINED
+# model (models/pad_v1.pt, negated above) is the tracked artifact, not the dataset.
+# Drop new pics+bboxes here (data/train, data/validation) and rerun pipeline.py.
+/data/
+
+# Stale qualifier-era class list (finals uses data/classes.txt = landing_pad)
+/classes.txt
+
+# Local Claude Code state (worktrees, scheduled-task locks)
+.claude/
+
+# Test caches
+.pytest_cache/
+.hypothesis/
+# Official resource pack — removed from git; uniques salvaged to docs/finals/example_code/.
+# Ignore if you re-download it locally.
+finalsrepo/
