@@ -436,6 +436,113 @@ def test_from_config_unknown_key_fails_loudly():
 
 
 # ============================================================
+# WS-7A — soft-zone exit flag + handover re-acquire
+# ============================================================
+def _tracking(reg, sector, *, drone="alpha", target=7, bearing=0.0,
+              t0=100.0):
+    """A TrackConvoy already LOCKED onto `target` for `drone`, with `sector`
+    bound and a registry claim held — the common WS-7A starting state."""
+    p = TrackConvoy(acquire_hits=1, investigate_budget_s=999.0,
+                    lost_timeout_s=99.0, registry=reg, sector_deg=sector)
+    p.step(ctx_for(drone, yaw=0.0, now=t0,
+                   sightings=[sight(target, bearing=bearing, ts=t0)]))
+    assert p._target_id == target and p._state == "track"
+    return p
+
+
+def test_bind_sector_rejects_malformed_wedge():
+    p = TrackConvoy()
+    with pytest.raises(ConfigError):
+        p.bind_sector([0.0])                          # not a 2-vector
+    with pytest.raises(ConfigError):
+        p.bind_sector([0.0, -5.0])                    # negative half-width
+    p.bind_sector([10.0, 45.0])                       # OK
+    assert p.sector_deg == (10.0, 45.0)
+    p.bind_sector(None)                               # disables soft-zoning
+    assert p.sector_deg is None
+
+
+def test_no_sector_is_byte_for_byte_today():
+    # With no sector bound, a convoy whose bearing is far outside any wedge is
+    # NEVER flagged — the default path must not touch the registry's flag.
+    reg = ConvoyRegistry()
+    p = _tracking(reg, sector=None, bearing=170.0)
+    p.step(ctx_for("alpha", yaw=0.0, now=101.0,
+                   sightings=[sight(7, bearing=170.0, ts=101.0)]))
+    assert reg.snapshot(101.0)["exited_zone"] == []   # nothing flagged
+
+
+def test_exit_flags_but_keeps_tracking():
+    reg = ConvoyRegistry()
+    # alpha's wedge: centred north (0), +/-30 deg. The convoy starts in-zone.
+    p = _tracking(reg, sector=[0.0, 30.0], bearing=0.0)
+    assert reg.snapshot(100.0)["exited_zone"] == []
+    # The car drifts to bearing 80 -> OUT of the +/-30 wedge.
+    a = p.step(ctx_for("alpha", yaw=0.0, now=101.0,
+                       sightings=[sight(7, bearing=80.0, ts=101.0)]))
+    # KEEPS tracking: still owns the lock, still in TRACK, still steering.
+    assert p._target_id == 7 and p._state == "track"
+    assert reg.owner_of(7, 101.0) == "alpha"
+    assert isinstance(a, Rotate)                       # still steering toward it
+    assert reg.snapshot(101.0)["exited_zone"] == [7]   # but FLAGGED
+    assert reg.flagged_exits(101.0) == [(7, "alpha", 80.0, None)]
+
+
+def test_reentry_clears_the_flag():
+    reg = ConvoyRegistry()
+    p = _tracking(reg, sector=[0.0, 30.0], bearing=0.0)
+    p.step(ctx_for("alpha", yaw=0.0, now=101.0,
+                   sightings=[sight(7, bearing=80.0, ts=101.0)]))
+    assert reg.snapshot(101.0)["exited_zone"] == [7]
+    # The car comes back into the wedge.
+    p.step(ctx_for("alpha", yaw=0.0, now=102.0,
+                   sightings=[sight(7, bearing=10.0, ts=102.0)]))
+    assert reg.snapshot(102.0)["exited_zone"] == []    # flag cleared
+    assert reg.owner_of(7, 102.0) == "alpha"           # still ours
+
+
+def test_handover_on_accept_stops_tracking_cleanly():
+    reg = ConvoyRegistry()
+    p = _tracking(reg, sector=[0.0, 30.0], bearing=0.0)
+    # The convoy exits alpha's sector -> flagged.
+    p.step(ctx_for("alpha", yaw=0.0, now=101.0,
+                   sightings=[sight(7, bearing=80.0, ts=101.0)]))
+    # The orchestrator offers it to bravo, who accepts (transfers ownership).
+    reg.offer_to(7, "bravo", 101.0)
+    assert reg.accept_offer("bravo", 7, 101.5) is True
+    assert reg.owner_of(7, 101.5) == "bravo"
+    # alpha's NEXT tick: renew() now returns False (bravo owns it). alpha stops
+    # tracking cleanly and re-acquires — counting it as a HANDOVER, not a loss.
+    a = p.step(ctx_for("alpha", yaw=0.0, now=102.0,
+                       sightings=[sight(7, bearing=80.0, ts=102.0)]))
+    assert p._target_id is None and p._state == "acquire"
+    assert isinstance(a, Hover)
+    assert p._handover_events == 1 and p._lost_events == 0
+    assert reg.owner_of(7, 102.0) == "bravo"           # bravo keeps it
+
+
+def test_renew_false_without_handover_counts_as_loss():
+    # A stolen/expired lock (now UNOWNED) must read as a LOSS, not a handover.
+    reg = ConvoyRegistry(lock_ttl_s=5.0)
+    p = _tracking(reg, sector=[0.0, 30.0], bearing=0.0)
+    reg.expire(108.0)                                  # alpha's lock goes stale
+    a = p.step(ctx_for("alpha", yaw=0.0, now=108.0,
+                       sightings=[sight(7, bearing=0.0, ts=108.0)]))
+    assert p._target_id is None and p._state == "acquire"
+    assert isinstance(a, Hover)
+    assert p._lost_events == 1 and p._handover_events == 0
+
+
+def test_soft_zone_no_op_without_bearing():
+    # A sighting with no bearing can't decide in/out -> the flag is unchanged.
+    reg = ConvoyRegistry()
+    p = _tracking(reg, sector=[0.0, 30.0], bearing=0.0)
+    p.step(ctx_for("alpha", yaw=0.0, now=101.0,
+                   sightings=[sight(7, bearing=None, ts=101.0)]))
+    assert reg.snapshot(101.0)["exited_zone"] == []
+
+
+# ============================================================
 # Integration — flies + completes over MockAdapter
 # ============================================================
 def test_takes_off_and_completes_over_mock_adapter(tmp_path):

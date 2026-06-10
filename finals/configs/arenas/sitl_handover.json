@@ -1,0 +1,6 @@
+{
+  "_comment": "WS-7A SOFT-ZONE HANDOVER arena — the (north_m, east_m) frame the per-drone sector_deg wedges in sitl3_handover_vision.json are measured in. Same frame as sitl_landing / convoy_3lane: arena north = gz +Y (NORTH), arena east = gz +X (EAST), C2 at gz origin (0,0) where the 3 PX4 drones launch (LANES3_POSES). c2_heading_deg 0 = arena north aligned to compass/magnetometer north. The wedges fan out from THIS c2_origin: a sighting's bearing_from_c2 is what track_convoy / the orchestrator matcher test against each drone's sector to decide in/out-of-zone and which neighbour a car entered. bounds_m generously contain C2 + all 3 diverging lanes (cars drive several metres out). NO pads / keep_out — this is a convoy-tracking demo, not the landing mission, so only the C2 origin + frame matter. RE-MEASURE the real lane bearings + reshape sector_deg onsite at gate F (tune config, not code).",
+  "bounds_m": [-8.0, -8.0, 12.0, 8.0],
+  "c2_origin_m": [0.0, 0.0],
+  "c2_heading_deg": 0.0
+}

@@ -347,6 +347,13 @@ def _build_phases(drone_cfg: DroneConfig, cfg: FinalsConfig,
             phase = phase_cls()
         if registry is not None and hasattr(phase, "bind_registry"):
             phase.bind_registry(registry)
+        # WS-7A: a phase that soft-zones (track_convoy) gets this drone's
+        # assigned sector injected so it can flag a convoy that leaves the wedge.
+        # Only when a registry is bound too (the handover needs the shared
+        # authority); a sector with no registry would flag into the void.
+        if (registry is not None and drone_cfg.sector_deg is not None
+                and hasattr(phase, "bind_sector")):
+            phase.bind_sector(list(drone_cfg.sector_deg))
         phases.append(phase)
     return phases
 
@@ -674,13 +681,20 @@ async def _amain(cfg: FinalsConfig, agents: List[DroneAgent],
                           f"(P0-P10 gates bench/real hardware; mock/sitl are "
                           f"pure software)")
     abort_event = threading.Event()
+    # WS-7A: per-drone sectors for the soft-zone handover matcher — only wired
+    # when convoys are tracked (the registry exists). A non-convoy mission, or
+    # drones with no sector_deg, get an empty map (matcher is a no-op).
+    drone_sectors = ({d.id: list(d.sector_deg) for d in cfg.drones
+                      if d.sector_deg is not None}
+                     if registry is not None else None)
     orchestrator = Orchestrator(agents, events, run_dir,
                                 budget_s=cfg.mission_budget_s, bus=bus,
                                 heartbeat_period_s=_HEARTBEAT_PERIOD_S,
                                 swarm_guards=_build_swarm_guards(cfg),
                                 abort_event=abort_event,
                                 convoy_registry=registry,
-                                validity_map=validity_map)
+                                validity_map=validity_map,
+                                drone_sectors=drone_sectors)
     listener = AbortListener(abort_event,
                              on_abort=orchestrator.request_stop_threadsafe)
     p_stop = asyncio.Event()

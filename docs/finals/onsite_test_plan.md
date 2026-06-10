@@ -154,6 +154,80 @@ behavior in the last 25 min — tune the JSON, not the code.**
 
 ---
 
+## Convoy-tag SITL rehearsals (VM only — prove the 2B LOGIC)
+
+The 2B convoy-tag mission (search → tag → track) is rehearsed on the VM the same
+way 2A is: PX4+Gazebo exercises the **backend-agnostic** perception + tracking +
+self-assignment logic; the real flight is HULA via pyhulax. These are NOT onsite
+steps — they are the evidence the swarm logic is sound before the hardware window.
+Run via [`sim/run_vision.sh`](../../sim/run_vision.sh) and
+[`sim/run_landing.sh`](../../sim/run_landing.sh) on the VM:
+
+| Gate | Proves | Config | Run |
+|---|---|---|---|
+| **S-scan** | 3 PX4 camera-drones fly `sentry_scan` over the moving convoy, all 5 ids seen | [`sitl3_vision.json`](../../finals/configs/sitl3_vision.json) (1-drone: [`sitl_vision.json`](../../finals/configs/sitl_vision.json)) | `bash sim/run_vision.sh stageB3` (`stageB`) |
+| **S-lanes** | 3 drones hover + photograph 3 diverging lane-cars (S11 Workstream A — `save_marker_frames` JPEGs) | [`sitl3_lanes_vision.json`](../../finals/configs/sitl3_lanes_vision.json) | `bash sim/run_vision.sh lanes3` |
+| **S-track** | 3 drones actively `track_convoy` (real bearing-pursuit chase, S11 Workstream B) | [`sitl3_track_vision.json`](../../finals/configs/sitl3_track_vision.json) | `bash sim/run_vision.sh track3` |
+| **S-dyn3** | WS-5 DYNAMIC self-assignment, clean case: 3 drones over 3 cars, no hardcoded mapping → 3 distinct owners, serviced 3/3 (the C2 `ConvoyRegistry` single-winner CAS) | [`sitl3_dyn3_vision.json`](../../finals/configs/sitl3_dyn3_vision.json) | `bash sim/run_vision.sh dyn3` |
+| **S-dyn5** | WS-5 contention: 3 drones over 5 cars → 3 distinct claims + 2 unclaimed; `dyn5-kill` frees a LOST car → re-claim | [`sitl3_dyn5_vision.json`](../../finals/configs/sitl3_dyn5_vision.json) | `bash sim/run_vision.sh dyn5` (`dyn5-kill`) |
+| **S-handover** | WS-7A SOFT-ZONE handover: a car curves OUT of one drone's `sector_deg` wedge → owner flags `exited_zone` (keeps tracking) → C2 offers it to the IDLE neighbour whose sector it entered → `accept_offer` transfers ownership under the registry lock | [`sitl3_handover_vision.json`](../../finals/configs/sitl3_handover_vision.json) · arena [`sitl_handover.json`](../../finals/configs/arenas/sitl_handover.json) | `bash sim/run_vision.sh handover3` |
+
+### Warm-up follow-convoy sims (WS-4 — `navigate` then `track_convoy`)
+
+The warm-up sims fly the FULL `[takeoff → navigate (obstacle detour) → track_convoy]`
+chain over a single car, validating the planner-detour + tracker hand-off in one
+run (no pad landing). They are the cleanest end-to-end obstacle-avoidance + follow
+demos. Run via [`sim/run_landing.sh`](../../sim/run_landing.sh) on the VM:
+
+| Gate | Proves | Config / world / arena | Run |
+|---|---|---|---|
+| **FB-1** | 1 drone detours ONE crate then follows ONE car | [`sitl1_followbox1.json`](../../finals/configs/sitl1_followbox1.json) · [`followbox1_px4.sdf`](../../sim/worlds/followbox1_px4.sdf) · [`sitl_followbox1.json`](../../finals/configs/arenas/sitl_followbox1.json) | `bash sim/run_landing.sh followbox1` |
+| **FB-multi** | 1 drone WEAVES 3 crates (slalom) then follows a car on an irregular route | [`sitl1_followbox_multi.json`](../../finals/configs/sitl1_followbox_multi.json) · [`followbox_multi_px4.sdf`](../../sim/worlds/followbox_multi_px4.sdf) · [`sitl_followbox_multi.json`](../../finals/configs/arenas/sitl_followbox_multi.json) | `bash sim/run_landing.sh followboxmulti` |
+
+> **SDF ↔ arena keep-out sync is a CI assertion.** Each warm-up/landing world's
+> crate `<pose>`+`<box>` footprint MUST be mirrored by a keep-out polygon in its
+> arena JSON ([`sitl_landing.json`](../../finals/configs/arenas/sitl_landing.json)
+> for [`landing_px4.sdf`](../../sim/worlds/landing_px4.sdf) /
+> [`landing_view.sdf`](../../sim/worlds/landing_view.sdf)), since the planner
+> detours around ARENA keep-outs, not SDF crates. The drift is caught locally by
+> `python -m finals.tools.verify_runbook` — run it before any commit that touches
+> a world or arena. The 3-lane track config also rehearses on
+> [`sitl3_landing.json`](../../finals/configs/sitl3_landing.json) (3-drone landing).
+
+---
+
+## Config inventory (every shipped profile — what runs it)
+
+`verify_runbook` asserts every `finals/configs/*.json` is named here, so a new
+config can never be smuggled in unmentioned. The real/bench configs are the onsite
+fleet; the `sitl*`/`mock*`/`replay` configs are VM rehearsals + dev fixtures.
+
+| Config | Profile | Used by |
+|---|---|---|
+| [`real.json`](../../finals/configs/real.json) | real | the scored 2B convoy-tag flight (`--profile real`) |
+| [`convoy_real.json`](../../finals/configs/convoy_real.json) | real | 2B convoy-tag real fleet (track_convoy variant) |
+| [`landing_real.json`](../../finals/configs/landing_real.json) | real | the scored 2A LANDING flight (`--profile real`) |
+| [`bench.json`](../../finals/configs/bench.json) | bench | the props-OFF B1–B8 bench tool (`--profile bench --preflight-only`) |
+| [`sitl1_landing.json`](../../finals/configs/sitl1_landing.json) | sitl | gate L1 / viewtest 1-drone landing rehearsal |
+| [`sitl3_landing.json`](../../finals/configs/sitl3_landing.json) | sitl | gate L2 3-drone staggered+serialized landing |
+| [`sitl1_followbox1.json`](../../finals/configs/sitl1_followbox1.json) | sitl | FB-1 warm-up (1 crate + 1 car) |
+| [`sitl1_followbox_multi.json`](../../finals/configs/sitl1_followbox_multi.json) | sitl | FB-multi warm-up (3-crate slalom) |
+| [`sitl3_vision.json`](../../finals/configs/sitl3_vision.json) | sitl | S-scan 3-drone sentry_scan over the convoy |
+| [`sitl_vision.json`](../../finals/configs/sitl_vision.json) | sitl | S-scan single-drone (stageB) |
+| [`sitl3_lanes_vision.json`](../../finals/configs/sitl3_lanes_vision.json) | sitl | S-lanes hover+photograph (S11 A) |
+| [`sitl3_track_vision.json`](../../finals/configs/sitl3_track_vision.json) | sitl | S-track active chase (S11 B) |
+| [`sitl3_dyn3_vision.json`](../../finals/configs/sitl3_dyn3_vision.json) | sitl | S-dyn3 dynamic self-assign (3 cars) |
+| [`sitl3_dyn5_vision.json`](../../finals/configs/sitl3_dyn5_vision.json) | sitl | S-dyn5 dynamic self-assign (5 cars / contention) |
+| [`sitl3_handover_vision.json`](../../finals/configs/sitl3_handover_vision.json) | sitl | S-handover soft-zone handover (WS-7A) |
+| [`sitl.json`](../../finals/configs/sitl.json) | sitl | minimal single-drone SITL smoke (`--profile sitl --dry-run`) |
+| [`sitl3.json`](../../finals/configs/sitl3.json) | sitl | 3-drone headless SITL band rehearsal |
+| [`mock.json`](../../finals/configs/mock.json) | mock | laptop-only mock flight (no SDK; CI smoke) |
+| [`mock_arena.json`](../../finals/configs/mock_arena.json) | mock | mock flight with an arena (NAV dry-run) |
+| [`mock_gazebo.json`](../../finals/configs/mock_gazebo.json) | mock | mock flight + gz frames (stageA transport smoke) |
+| [`replay.json`](../../finals/configs/replay.json) | replay | laptop-only frame replay (no drones) |
+
+---
+
 ## Hard rules (non-negotiable)
 
 1. **Tune config, not code.** Onsite changes are JSON edits. The one sanctioned
