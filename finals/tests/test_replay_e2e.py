@@ -30,6 +30,9 @@ def write_replay_config(tmp_path, **extra) -> str:
         "replay_fps": 5.0,
         "mission_budget_s": 20.0,
         "run_dir": str(tmp_path / "runs"),
+        # The committed fixtures are 6x6; pin the dict so they decode (the new
+        # real default is DICT_7X7_1000). An override may replace it via **extra.
+        "marker_dict": "DICT_6X6_250",
         "detector": {"backend": "none"},
         "drones": [],
         **extra,

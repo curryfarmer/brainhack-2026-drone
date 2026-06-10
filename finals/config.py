@@ -41,6 +41,50 @@ VALID_DETECTOR_BACKENDS = ("none", "ultralytics", "canned")
 # the alternate path for the still-open "QR 20x20 cm" confirmation. Both
 # feed the SAME Sighting stream (finals/vision/aruco.py).
 VALID_MARKER_BACKENDS = ("aruco", "qr")
+# The cv2.aruco predefined dictionaries we accept for marker_dict (PAD-DICT).
+# PURE NAME STRINGS only — config.py never imports cv2 (it loads for --dry-run
+# on cv2-less machines). finals/vision/aruco.py owns the NAME -> cv2.aruco
+# constant resolver (_resolve_marker_dict) and asserts at import that this tuple
+# is a subset of the real cv2.aruco constants, so a name listed here that cv2
+# does not define is caught the moment a cv2-bearing machine imports aruco — not
+# silently mid-flight. The real field is DICT_7X7_1000 (beacons 11/45/51/67/101);
+# the 6x6 sim/fixture configs pin DICT_6X6_250. APRILTAG / ARUCO_ORIGINAL
+# families are intentionally omitted (not in play for this campaign); add a name
+# here AND in aruco's import-time guard remains satisfied to enable one.
+VALID_MARKER_DICTS = (
+    "DICT_4X4_50", "DICT_4X4_100", "DICT_4X4_250", "DICT_4X4_1000",
+    "DICT_5X5_50", "DICT_5X5_100", "DICT_5X5_250", "DICT_5X5_1000",
+    "DICT_6X6_50", "DICT_6X6_100", "DICT_6X6_250", "DICT_6X6_1000",
+    "DICT_7X7_50", "DICT_7X7_100", "DICT_7X7_250", "DICT_7X7_1000",
+)
+# The real-field default (beacons 11/45/51/67/101). The single source of truth
+# for the FinalsConfig.marker_dict field default AND aruco's function defaults —
+# they must never drift (a 6x6-default detector reads nothing on the real field).
+DEFAULT_MARKER_DICT = "DICT_7X7_1000"
+assert DEFAULT_MARKER_DICT in VALID_MARKER_DICTS    # self-consistency
+# WHITELIST of cv2.aruco.DetectorParameters field names safe to override from
+# config (PAD-DICT) for the LOW-CONTRAST gray-on-white 7x7 beacons. PURE NAME
+# STRINGS — aruco.py applies the values onto a real DetectorParameters and
+# asserts at import that every name here is a real settable attribute. The set
+# covers the adaptive-threshold window, marker-perimeter/shape gates, contrast/
+# Otsu floors, border tolerance, and corner refinement — the knobs that move the
+# decode rate on faint markers. Deliberately EXCLUDES the readDetectorParameters/
+# writeDetectorParameters BOUND METHODS (a setattr would shadow the method) and
+# the AprilTag-only fields (a different detector family, not our path).
+VALID_ARUCO_PARAM_KEYS = frozenset((
+    "adaptiveThreshWinSizeMin", "adaptiveThreshWinSizeMax",
+    "adaptiveThreshWinSizeStep", "adaptiveThreshConstant",
+    "minMarkerPerimeterRate", "maxMarkerPerimeterRate",
+    "polygonalApproxAccuracyRate", "minCornerDistanceRate",
+    "minDistanceToBorder", "minMarkerDistanceRate",
+    "cornerRefinementMethod", "cornerRefinementWinSize",
+    "cornerRefinementMaxIterations", "cornerRefinementMinAccuracy",
+    "markerBorderBits", "perspectiveRemovePixelPerCell",
+    "perspectiveRemoveIgnoredMarginPerCell", "maxErroneousBitsInBorderRate",
+    "minOtsuStdDev", "errorCorrectionRate",
+    "detectInvertedMarker", "useAruco3Detection",
+    "minSideLengthCanonicalImg", "minMarkerLengthRatioOriginalImg",
+))
 # Optional DEPTH seam (SENSE-IR). "none" = the monocular HULA swarm path —
 # degrade-absent, mission logic must never require depth. SENSE-IR extends this
 # tuple when a real DepthSource backend is confirmed (the example_code RealSense
@@ -155,15 +199,15 @@ class FinalsConfig:
     marker_backend: str = "aruco"               # "aruco" | "qr" — the primary detector seam (S7)
     save_marker_frames: bool = False            # S11: aruco path saves an annotated JPEG per sighting (run_dir/marker_frames/<drone>)
     # ArUco DICTIONARY name. The real field is DICT_7X7_1000 (beacons
-    # 11/45/51/67/101); the detector historically hardcoded DICT_6X6_250.
-    # RESERVED Step 0 contract: the field + its shape validation live here so
-    # PAD-DICT only wires the cv2.aruco resolver in vision/aruco.py and pins the
-    # 6x6 sim/fixture configs (marker_dict:"DICT_6X6_250"). Until PAD-DICT lands
-    # its VALID_MARKER_DICTS membership check this is validated as a non-empty
-    # string only and has no consumer (the detector keeps its built-in dict).
-    marker_dict: str = "DICT_7X7_1000"
+    # 11/45/51/67/101); the detector historically hardcoded DICT_6X6_250 and so
+    # read NOTHING on the real field. PAD-DICT: STRICT VALID_MARKER_DICTS
+    # membership (config._validate) + the cv2.aruco resolver
+    # (vision/aruco._resolve_marker_dict), threaded through make_marker_detector;
+    # the 6x6 sim/fixture configs pin marker_dict:"DICT_6X6_250".
+    marker_dict: str = DEFAULT_MARKER_DICT
     # Optional cv2.aruco DetectorParameters overrides for the LOW-CONTRAST 7x7
-    # beacons (PAD-DICT whitelists the field names). None = library defaults.
+    # beacons (PAD-DICT whitelists the field names; values applied by aruco's
+    # _resolve_detector_params). None = library defaults.
     aruco_detector_params: Optional[Dict[str, Any]] = None
     # Optional DEPTH backend (SENSE-IR). "none" = monocular (degrade-absent).
     depth_backend: str = "none"
@@ -485,21 +529,38 @@ def _validate(cfg: FinalsConfig, config_dir: str) -> None:
             f"{VALID_MARKER_BACKENDS}"
         )
 
-    # ArUco dictionary name (Step 0 contract; PAD-DICT adds the cv2.aruco
-    # resolver + strict VALID_MARKER_DICTS membership). Here: a non-empty
-    # string, so a null/empty (which would later resolve to no dictionary) dies
-    # on the ground, not in the detector thread.
-    if not isinstance(cfg.marker_dict, str) or not cfg.marker_dict:
+    # ArUco dictionary name (PAD-DICT): STRICT VALID_MARKER_DICTS membership, so
+    # a typo ('DICT_7x7_1000', 'DICT_8X8_250') or a name cv2 cannot resolve dies
+    # on the GROUND at --dry-run, never in the detector thread reading nothing
+    # off the real field. The detector consumes cfg.marker_dict only via aruco's
+    # _resolve_marker_dict, which trusts this membership. NOTE: this is a PURE
+    # name check — no cv2 import here (config.py loads on cv2-less machines).
+    if cfg.marker_dict not in VALID_MARKER_DICTS:
         raise ConfigError(
-            f"marker_dict must be a non-empty string (the ArUco dictionary "
-            f"name — 'DICT_7X7_1000' for the real field, 'DICT_6X6_250' for the "
-            f"6x6 sim fixtures), got {cfg.marker_dict!r}")
-    if (cfg.aruco_detector_params is not None
-            and not isinstance(cfg.aruco_detector_params, dict)):
-        raise ConfigError(
-            f"aruco_detector_params must be null or a JSON object of cv2.aruco "
-            f"DetectorParameters overrides (PAD-DICT whitelists the field "
-            f"names), got {type(cfg.aruco_detector_params).__name__}")
+            f"marker_dict {cfg.marker_dict!r} invalid — one of "
+            f"{list(VALID_MARKER_DICTS)} (the real field is 'DICT_7X7_1000'; the "
+            f"6x6 sim/fixture configs pin 'DICT_6X6_250'). A 6x6 detector reads "
+            f"NOTHING off 7x7 markers, so this is checked strictly.")
+    # aruco_detector_params (PAD-DICT): null or a JSON object whose keys are ALL
+    # in the cv2.aruco.DetectorParameters whitelist. The low-contrast 7x7 beacons
+    # need tuning, but a TYPO ('minMarkerPerimterRate') would be a silent no-op
+    # that leaves the detector mis-tuned at the worst moment — so an unknown key
+    # is a loud ground failure (the weights-guard philosophy). Values are coerced
+    # by aruco._resolve_detector_params (cv2 owns the type contract); here we only
+    # gate the KEYS, purely, so --dry-run catches the typo without cv2.
+    if cfg.aruco_detector_params is not None:
+        if not isinstance(cfg.aruco_detector_params, dict):
+            raise ConfigError(
+                f"aruco_detector_params must be null or a JSON object of "
+                f"cv2.aruco DetectorParameters overrides (the field names are "
+                f"whitelisted), got {type(cfg.aruco_detector_params).__name__}")
+        unknown = sorted(set(cfg.aruco_detector_params) - VALID_ARUCO_PARAM_KEYS)
+        if unknown:
+            raise ConfigError(
+                f"aruco_detector_params: unknown key(s) {unknown} — a typo'd "
+                f"DetectorParameters field is a SILENT no-op that leaves the "
+                f"detector mis-tuned on the faint 7x7 beacons. Valid keys: "
+                f"{sorted(VALID_ARUCO_PARAM_KEYS)}")
     if cfg.depth_backend not in VALID_DEPTH_BACKENDS:
         raise ConfigError(
             f"depth_backend {cfg.depth_backend!r} invalid — one of "

@@ -8,8 +8,21 @@ YOLO (finals/vision/detector.py) is the optional, config-gated extra.
 Two pluggable paths feed the SAME Sighting stream (the QR-vs-ArUco intel
 question — "QR codes, 20x20 cm" — is still unconfirmed, so the seam is a
 config knob, marker_backend, not a code edit):
-- detect_aruco: cv2.aruco DICT_6X6_250 (the default);
+- detect_aruco: cv2.aruco over a CONFIGURABLE dictionary (cfg.marker_dict;
+  real-field default DICT_7X7_1000, the 6x6 sim/fixture configs pin
+  DICT_6X6_250) + optional whitelisted DetectorParameters overrides;
 - detect_qr:    cv2.QRCodeDetector.detectAndDecodeMulti (the alternate).
+
+PAD-DICT (campaign-critical): the ArUco detector USED to hardcode DICT_6X6_250 —
+a 6x6 detector reads NOTHING off the real DICT_7X7_1000 beacons
+(11/45/51/67/101), so a finals run would have detected nothing on the real field.
+The dictionary name is now resolved from config (VALID_MARKER_DICTS, loud
+ConfigError on an unknown name) and threaded through make_marker_detector +
+every caller; the default stays the config value. The low-contrast gray-on-white
+7x7 beacons (field_markers.md) need cv2 DetectorParameters tuning, so
+aruco_detector_params is a WHITELIST of safe DetectorParameters field names
+(VALID_ARUCO_PARAM_KEYS; loud ConfigError on an unknown key) applied over the
+library defaults — onsite gate F calibrates the actual values on real beacons.
 
 Design (binding):
 - Cheap (~2-5 ms/frame) and deterministic -> runs SYNCHRONOUSLY inside each
@@ -57,13 +70,32 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import cv2
 
-from finals.config import VALID_MARKER_BACKENDS
+from finals.config import (DEFAULT_MARKER_DICT, VALID_ARUCO_PARAM_KEYS,
+                           VALID_MARKER_BACKENDS, VALID_MARKER_DICTS)
 from finals.errors import ConfigError
 from finals.types import FrameStamped, Sighting
+
+# Import-time guards: the PURE name tuples live in config.py (which never
+# imports cv2); here, where cv2 IS present, prove every listed name actually
+# resolves on this cv2 build. A name that config promises but cv2 lacks would
+# otherwise surface as an AttributeError deep in the detector thread — catch it
+# the instant a cv2-bearing machine imports this module. RAISED (not assert) so
+# `python -O` cannot strip the invariant.
+_missing_dicts = [n for n in VALID_MARKER_DICTS if not hasattr(cv2.aruco, n)]
+if _missing_dicts:
+    raise ConfigError(
+        f"finals.vision.aruco: VALID_MARKER_DICTS names not on this cv2 "
+        f"({cv2.__version__}): {_missing_dicts} — fix config.VALID_MARKER_DICTS")
+_missing_params = [n for n in VALID_ARUCO_PARAM_KEYS
+                   if not hasattr(cv2.aruco.DetectorParameters(), n)]
+if _missing_params:
+    raise ConfigError(
+        f"finals.vision.aruco: VALID_ARUCO_PARAM_KEYS not on this cv2's "
+        f"DetectorParameters: {_missing_params} — fix config.VALID_ARUCO_PARAM_KEYS")
 
 #: A marker detector: (frame, drone_id) -> minimal Sightings. The perception
 #: loop holds ONE closure from make_marker_detector (per-loop detector state,
@@ -75,6 +107,50 @@ MarkerDetector = Callable[[FrameStamped, str], List[Sighting]]
 _QR_PAYLOAD_MAX = 64
 
 
+def _resolve_marker_dict(marker_dict: str) -> int:
+    """marker_dict NAME (e.g. 'DICT_7X7_1000') -> the cv2.aruco.DICT_* int
+    constant. Loud ConfigError on an unknown name, listing the valid set — the
+    same loud-loader convention as make_marker_detector's backend resolver. The
+    membership is ALSO enforced at config load (config._validate); this is the
+    detector-side backstop so detect_aruco / a hand-built call never silently
+    falls through to a wrong (or no) dictionary."""
+    if marker_dict not in VALID_MARKER_DICTS:
+        raise ConfigError(
+            f"unknown marker_dict {marker_dict!r} — one of "
+            f"{list(VALID_MARKER_DICTS)} (the real field is 'DICT_7X7_1000'; "
+            f"the 6x6 sim/fixture configs pin 'DICT_6X6_250'). A 6x6 detector "
+            f"reads NOTHING off 7x7 markers (finals/configs/*.json marker_dict)")
+    return getattr(cv2.aruco, marker_dict)
+
+
+def _resolve_detector_params(
+        params: Optional[Dict[str, Any]]) -> "cv2.aruco.DetectorParameters":
+    """Build a cv2.aruco.DetectorParameters, applying any WHITELISTED overrides
+    over the library defaults. None -> library defaults. Each key MUST be in
+    VALID_ARUCO_PARAM_KEYS (loud ConfigError otherwise — a typo'd field name is a
+    silent no-op that would leave the detector mis-tuned on the faint 7x7
+    beacons). cv2 owns the value-type contract: an int field given a string
+    raises cv2.error, surfaced here as a ConfigError naming the key. config
+    validation already gates the KEYS purely; this is the cv2-side application."""
+    dp = cv2.aruco.DetectorParameters()
+    if not params:
+        return dp
+    for key, value in params.items():
+        if key not in VALID_ARUCO_PARAM_KEYS:
+            raise ConfigError(
+                f"aruco_detector_params: unknown key {key!r} — not a "
+                f"whitelisted cv2.aruco.DetectorParameters field. Valid keys: "
+                f"{sorted(VALID_ARUCO_PARAM_KEYS)}")
+        try:
+            setattr(dp, key, value)
+        except (cv2.error, TypeError, OverflowError) as e:
+            raise ConfigError(
+                f"aruco_detector_params[{key!r}] = {value!r} rejected by "
+                f"cv2.aruco.DetectorParameters — check the value type/range "
+                f"(e.g. an int field needs an int): {e}") from e
+    return dp
+
+
 def _frame_shape(image) -> "tuple[int, int]":
     h, w = image.shape[:2]
     return (int(h), int(w))
@@ -83,10 +159,17 @@ def _frame_shape(image) -> "tuple[int, int]":
 # ============================================================
 # ArUco (primary)
 # ============================================================
-def detect_aruco(frame: FrameStamped, drone_id: str) -> List[Sighting]:
+def detect_aruco(frame: FrameStamped, drone_id: str, *,
+                 marker_dict: str = DEFAULT_MARKER_DICT,
+                 aruco_detector_params: Optional[Dict[str, Any]] = None
+                 ) -> List[Sighting]:
     """One-shot convenience: builds a detector per call. Hot paths hold the
-    closure from make_marker_detector("aruco") instead."""
-    return make_marker_detector("aruco")(frame, drone_id)
+    closure from make_marker_detector("aruco") instead. Default dictionary is
+    the real-field DICT_7X7_1000 (mirrors config); callers reading the 6x6
+    sim/fixture assets pass marker_dict='DICT_6X6_250'."""
+    return make_marker_detector(
+        "aruco", marker_dict=marker_dict,
+        aruco_detector_params=aruco_detector_params)(frame, drone_id)
 
 
 def _save_marker_frame(frame: FrameStamped, corners, ids, drone_id: str,
@@ -201,16 +284,32 @@ def _detect_qr_with(detector: "cv2.QRCodeDetector",
 # The pluggable seam
 # ============================================================
 def make_marker_detector(backend: str, *,
+                         marker_dict: str = DEFAULT_MARKER_DICT,
+                         aruco_detector_params: Optional[Dict[str, Any]] = None,
                          save_dir: Optional[str] = None) -> MarkerDetector:
     """marker_backend name -> a detector closure holding ONE cv2 detector
     instance (built once, reused every frame). ConfigError on unknown names
     — same loud-loader convention as the other backend resolvers.
+
+    marker_dict (PAD-DICT, ArUco only): the cv2.aruco dictionary NAME
+    (VALID_MARKER_DICTS; default DICT_7X7_1000 = the real beacons). The 6x6
+    sim/fixture configs pass DICT_6X6_250 so their 6x6 assets still decode. The
+    default mirrors config.FinalsConfig.marker_dict — callers pass cfg.marker_dict.
+    aruco_detector_params (PAD-DICT, ArUco only): WHITELISTED
+    cv2.aruco.DetectorParameters overrides for the faint 7x7 beacons; None =
+    library defaults. Both are resolved fail-loud (ConfigError) BEFORE any flight.
 
     save_dir (S11 save_marker_frames, ArUco only): when set, the ArUco detector
     writes an annotated JPEG per frame-with-markers and stamps frame_path. The
     directory is created HERE, fail-loud, before any flight (mirrors
     DetectorPool). None (default) keeps the minimal-Sighting behavior."""
     if backend == "aruco":
+        # Resolve the dict + params FIRST: a bad marker_dict / unknown param key
+        # must fail before we touch the filesystem (save_dir) — the loud-on-the-
+        # ground contract, no half-built detector + a created dir left behind.
+        dictionary = cv2.aruco.getPredefinedDictionary(
+            _resolve_marker_dict(marker_dict))
+        det_params = _resolve_detector_params(aruco_detector_params)
         if save_dir is not None:
             try:
                 os.makedirs(save_dir, exist_ok=True)
@@ -219,9 +318,7 @@ def make_marker_detector(backend: str, *,
                     f"make_marker_detector('aruco'): cannot create save_dir "
                     f"{save_dir!r} — errno {e.errno} ({e.strerror}) — check "
                     f"the path / permissions (save_marker_frames)") from e
-        detector = cv2.aruco.ArucoDetector(
-            cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250),
-            cv2.aruco.DetectorParameters())
+        detector = cv2.aruco.ArucoDetector(dictionary, det_params)
 
         def _aruco(frame: FrameStamped, drone_id: str) -> List[Sighting]:
             return _detect_aruco_with(detector, frame, drone_id, save_dir)

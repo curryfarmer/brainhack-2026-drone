@@ -3,6 +3,8 @@
   "profile": "sitl",
   "flight_backend": "mavsdk_sitl",
   "frame_backend": "gazebo",
+  "marker_backend": "aruco",
+  "marker_dict": "DICT_6X6_250",
   "sitl_address": "udpin://0.0.0.0:14540",
   "command_timeout_s": 30,
   "detector": { "backend": "none" },

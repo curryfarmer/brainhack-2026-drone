@@ -186,6 +186,57 @@ def test_marker_backend_default_and_membership(write_config, minimal_mock_config
         load_config(write_config(minimal_mock_config))
 
 
+# --- PAD-DICT: marker_dict strict membership + params whitelist ---------------
+def test_marker_dict_default_is_the_real_field(write_config, minimal_mock_config):
+    # The real default is DICT_7X7_1000 (the field beacons), NOT the 6x6 the
+    # detector used to hardcode.
+    cfg = load_config(write_config(dict(minimal_mock_config)))
+    assert cfg.marker_dict == "DICT_7X7_1000"
+
+
+def test_marker_dict_sim_pin_accepted(write_config, minimal_mock_config):
+    minimal_mock_config["marker_dict"] = "DICT_6X6_250"     # the sim/fixture pin
+    assert load_config(
+        write_config(minimal_mock_config)).marker_dict == "DICT_6X6_250"
+
+
+@pytest.mark.parametrize("bad", ["DICT_7x7_1000", "DICT_8X8_250", "", 7, None])
+def test_marker_dict_unknown_is_loud(write_config, minimal_mock_config, bad):
+    # a typo or a non-cv2 name dies on the ground (strict VALID_MARKER_DICTS),
+    # not in the detector thread reading nothing off the real field.
+    minimal_mock_config["marker_dict"] = bad
+    with pytest.raises(ConfigError, match="marker_dict"):
+        load_config(write_config(minimal_mock_config))
+
+
+def test_aruco_detector_params_none_default(write_config, minimal_mock_config):
+    assert load_config(
+        write_config(dict(minimal_mock_config))).aruco_detector_params is None
+
+
+def test_aruco_detector_params_whitelisted_key_accepted(
+        write_config, minimal_mock_config):
+    minimal_mock_config["aruco_detector_params"] = {
+        "minMarkerPerimeterRate": 0.01, "adaptiveThreshWinSizeMin": 5}
+    cfg = load_config(write_config(minimal_mock_config))
+    assert cfg.aruco_detector_params == {
+        "minMarkerPerimeterRate": 0.01, "adaptiveThreshWinSizeMin": 5}
+
+
+def test_aruco_detector_params_typo_key_is_loud(write_config, minimal_mock_config):
+    # a typo'd DetectorParameters field is a silent no-op on the real object —
+    # config rejects the KEY on the ground (the faint-beacon tuning trap).
+    minimal_mock_config["aruco_detector_params"] = {"minMarkerPerimterRate": 0.01}
+    with pytest.raises(ConfigError, match="aruco_detector_params"):
+        load_config(write_config(minimal_mock_config))
+
+
+def test_aruco_detector_params_non_object_is_loud(write_config, minimal_mock_config):
+    minimal_mock_config["aruco_detector_params"] = [1, 2, 3]      # not an object
+    with pytest.raises(ConfigError, match="aruco_detector_params"):
+        load_config(write_config(minimal_mock_config))
+
+
 @pytest.mark.parametrize("bad", [0, -1, float("inf"), True])
 def test_replay_fps_validated(write_config, minimal_mock_config, bad):
     minimal_mock_config["replay_fps"] = bad

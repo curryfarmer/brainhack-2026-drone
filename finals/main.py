@@ -543,8 +543,11 @@ def _build_perception(cfg: FinalsConfig, drone_id: str, bus: SightingBus,
                        if cfg.save_marker_frames else None)
     perception = PerceptionLoop(
         drone_id, source, bus, events,
-        detect_marker=make_marker_detector(cfg.marker_backend,
-                                           save_dir=marker_save_dir),
+        detect_marker=make_marker_detector(
+            cfg.marker_backend,
+            marker_dict=cfg.marker_dict,                 # PAD-DICT: real field 7x7
+            aruco_detector_params=cfg.aruco_detector_params,
+            save_dir=marker_save_dir),
         slog=slog, detector=detector,
         camera_hfov_deg=cfg.camera_hfov_deg,
         csv_health=csv_health,

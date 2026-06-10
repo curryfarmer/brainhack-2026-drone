@@ -6,6 +6,7 @@
   "replay_dir": "finals/tests/fixtures/frames",
   "replay_fps": 5.0,
   "marker_backend": "aruco",
+  "marker_dict": "DICT_6X6_250",
   "detector": { "backend": "none" },
   "drones": []
 }

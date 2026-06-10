@@ -137,24 +137,33 @@ is the only onboard backstop.
   orchestrator (built from sightings, fed to agents) so pads are read ONCE and no two
   drones chase the same/invalid pad. Own session; not done.
 
-## ⚠️ Required code change (independent of everything else)
+## ✅ Required code change — DONE (PAD-DICT, 2026-06-10)
 
-`finals/vision/aruco.py:223` hardcodes `cv2.aruco.DICT_6X6_250`. **A 6×6 detector
-cannot read 7×7 markers** — left as-is we detect **nothing** on the real field
-(campaign-critical). Fix:
+The hardcoded `cv2.aruco.DICT_6X6_250` (which read **nothing** off the real 7×7
+field — campaign-critical) is GONE. Shipped:
 
-1. Add config knob `marker_dict: str = "DICT_7X7_1000"` (the real default) in
-   `config.py`, with a name→`cv2.aruco` constant resolver (loud `ConfigError` on
-   unknown, same pattern as `marker_backend`).
-2. Thread it through `make_marker_detector(backend, *, marker_dict=..., save_dir=...)`
-   and its callers (`main` perception wiring, `preflight.py:229`, `detect_aruco`).
-3. **Keep the sim green**: sim assets (`sim/gen_markers.py`, the committed world
-   textures, `finals/tests/fixtures` frames) are DICT_6X6_250. Set
-   `marker_dict: "DICT_6X6_250"` in the sim vision configs (`sitl*_vision.json`,
-   `sitl*_landing.json`) and the cv2-gated fixture tests — OR regenerate those assets
-   as 7×7 (more modules ⇒ higher decode-px floor; the 720p real cam absorbs it, the
-   640 px sim is tighter). Per-repo bar: full suite green + mutation kill-check before
-   commit.
+1. ✅ Config knob `marker_dict: str = DEFAULT_MARKER_DICT` (= `"DICT_7X7_1000"`,
+   the real default) in `config.py`, with STRICT `VALID_MARKER_DICTS` membership
+   at load (loud `ConfigError` on a typo/non-cv2 name) + a name→`cv2.aruco`
+   constant resolver `vision/aruco._resolve_marker_dict`. `aruco_detector_params`
+   = a WHITELIST (`VALID_ARUCO_PARAM_KEYS`) of safe DetectorParameters fields for
+   the low-contrast 7×7 beacons (unknown key = loud ConfigError, on the ground).
+2. ✅ Threaded through `make_marker_detector(backend, *, marker_dict=...,
+   aruco_detector_params=..., save_dir=...)` and its callers (`main`
+   `_build_perception`, `preflight.py` P2, `detect_aruco`).
+3. ✅ Sim green: the committed `finals/tests/fixtures` frames + the sim world
+   assets are DICT_6X6_250, so the sim vision/landing configs (13:
+   `sitl*_vision.json`, `sitl*_landing.json`, `mock_gazebo`, `replay`, `sitl`,
+   the followbox/lanes/track/dyn vision configs) + the in-test replay/wiring
+   configs + the legacy cv2-gated aruco fixture tests pin
+   `marker_dict:"DICT_6X6_250"`. The REAL-field configs (`landing_real`,
+   `convoy_real`, `real`, `bench`) take the 7×7 default. Suite: 1332 green (cv2)
+   / 1293+12skip (cv2-less) + 3/3 mutation kill-check.
+
+Onsite-deferred (gate F): tune the actual `aruco_detector_params` values
+(adaptive-threshold window, `minMarkerPerimeterRate`, `minOtsuStdDev`, …) on the
+real gray-on-white beacons until they decode reliably — the whitelist + knob are
+in place; only the numbers are unknown.
 
 ## Optimisation levers (where the known coords pay off)
 

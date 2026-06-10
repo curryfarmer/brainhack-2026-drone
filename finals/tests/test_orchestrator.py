@@ -417,8 +417,9 @@ def _inject_fake_fleet(monkeypatch):
     monkeypatch.setattr(
         pf, "_default_discover",
         lambda plane_ids, timeout_s: {p: f"10.0.0.{p}" for p in plane_ids})
+    # **kw absorbs PAD-DICT's marker_dict / aruco_detector_params (+ save_dir).
     monkeypatch.setattr(aruco, "make_marker_detector",
-                        lambda backend, save_dir=None:
+                        lambda backend, **kw:
                         (lambda frame, source_id: []))
 
 

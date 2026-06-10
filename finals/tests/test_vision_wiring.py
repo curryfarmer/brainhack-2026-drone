@@ -74,6 +74,9 @@ def test_mock_flight_with_replay_frames_end_to_end(tmp_path, monkeypatch):
         "replay_dir": os.path.join(FIXTURES, "frames"),
         "replay_fps": 5.0,
         "run_dir": str(tmp_path / "runs"),
+        # The committed fixtures are 6x6; pin the dict so they decode (the new
+        # real default is DICT_7X7_1000 — PAD-DICT).
+        "marker_dict": "DICT_6X6_250",
         "detector": {"backend": "none"},
         "drones": [
             {"id": "alpha", "phases": ["takeoff_demo"]},
