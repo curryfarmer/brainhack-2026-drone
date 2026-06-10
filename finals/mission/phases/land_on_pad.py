@@ -38,13 +38,15 @@ State machine (internal sub-states, instance attributes):
 
   PAD_ACQUIRE  Keep a bounded recent window of the last M frames (M =
                acquire_window_frames). Each step() is one "frame": we record
-               whether THIS step saw a valid pad (a Sighting whose marker_id
-               is in valid_marker_ids — a non-valid id or a flicker below the
-               threshold is NOT a frame-hit). When >= N of the last M frames
-               hit (N = acquire_min_hits), we have the pad and remember the
-               BEST (largest-bbox-area, then lowest marker_id for a
-               deterministic tie-break — two valid pads in frame is resolved
-               HERE) sighting to centre on -> PAD_CENTER. While not acquired
+               whether THIS step saw a SERVO CANDIDATE — in the default
+               "marker" mode a Sighting whose marker_id is in valid_marker_ids;
+               in "pad" mode a YOLO Sighting whose class_name is in pad_classes
+               (see PAD-DETECT below). A non-candidate (wrong id / wrong class)
+               or a flicker below the threshold is NOT a frame-hit. When >= N of
+               the last M frames hit (N = acquire_min_hits), we have the pad and
+               remember the BEST (largest-bbox-area, then the deterministic
+               tie-break — two candidates in frame is resolved HERE) sighting to
+               centre on -> PAD_CENTER. While not acquired
                we emit a bounded Rotate scan (acquire_scan_step_deg, default
                from the search.py convention) to sweep the FOV. If the pad is
                not acquired by acquire_timeout_s (a per-phase wall deadline,
@@ -107,6 +109,49 @@ Direction.RIGHT; altitude×similar-triangles scaling; deadband INCLUSIVE);
 finals/mission/phases/search.py SentryScan (the _zone_kwargs validated-tunable
 / from_config / no-op-trap template); finals/mission/phase.py (the pure
 MissionPhase contract + AgentContext). Implemented — session S11 (NAV-6).
+
+================================ PAD-DETECT (YOLO pad servo) =================
+By default (`servo_on="marker"`) the phase centres on the validity BEACON's
+ArUco bbox (the AS-BUILT behaviour above — every existing land test stays
+unchanged). The Roboverse field instead marks each landing pad with a big white
+A3 sheet carrying the orange Roboverse roundel, and a SEPARATE ArUco beacon
+~20-30 cm AWAY validates which pad is legal (finals/docs/field_markers.md). A
+trained YOLO model (the EXISTING `ultralytics` / `canned` detector backend)
+detects the PAD itself; the PerceptionLoop publishes those detections as
+`Sighting(source="yolo", class_name=<the model's pad class>, marker_id=None)`.
+Servoing onto the YOLO pad bbox lands ON the pad, not 20-30 cm off it over the
+beacon.
+
+`servo_on="pad"` switches the SERVO GEOMETRY (where to centre/descend) to the
+best YOLO pad sighting: `source=="yolo"` AND `class_name in pad_classes`, picked
+by largest bbox area, with a deterministic tie-break (lexicographically lowest
+class_name — a YOLO pad sighting has no marker_id). The acquire WINDOW and the
+centre/descend "lost" gating then key off the SAME servo-candidate presence, so
+a pure-pad stream (NO beacon in frame) still acquires, centres, descends, and
+commits. `servo_on` defaults to "marker", so omitting both knobs is the exact
+legacy behaviour.
+
+WEIGHTS + CLASS CONTRACT (the model is a DATA artifact the user trains/provides,
+like the convoy best.pt — NOT this phase's job):
+  * Train a detector that emits ONE class for the landing pad (the white-A3 +
+    roundel blob). Recommended canonical class name: "landing_pad".
+  * Point the config at it: detector.backend "ultralytics" + detector.weights
+    "<pad>.pt"; if the model's raw label differs from "landing_pad", map it with
+    detector.class_map ({"<raw>": "landing_pad"}) so the published Sighting's
+    class_name matches a member of pad_classes.
+  * Set the phase up to servo on it:
+        zone["land_on_pad"]: {"servo_on": "pad",
+                              "pad_classes": ["landing_pad"], ...}
+  * The bbox the model emits IS the servo target; tighter/centred boxes land
+    tighter. The beacon ArUco still drives VALIDITY (PAD-VALID's
+    _valid_sightings predicate) — two-factor commit = pad detector says WHERE,
+    beacon says WHETHER.
+
+OWNERSHIP (hand-merge note): PAD-DETECT owns the SERVO GEOMETRY — `_pick_target`,
+the `_servo_candidates`/`_pad_sightings`/`_servo_target` selectors, and the
+target picks inside `_step_center`/`_step_descend`. PAD-VALID owns the validity
+PREDICATE `_valid_sightings` (which markers/beacons count as legal). The two
+sessions edit DISJOINT methods so the branches hand-merge cleanly.
 """
 from __future__ import annotations
 
@@ -125,6 +170,12 @@ from finals.types import (Abort, Action, Direction, Done, Hover, Land, Move,
 
 if TYPE_CHECKING:  # type hints only — keeps the import graph minimal
     from finals.config import DroneConfig, FinalsConfig
+
+#: The two servo-geometry modes (where the centre/descend servo aims).
+#: "marker" (DEFAULT) = the validity beacon's ArUco bbox (legacy behaviour);
+#: "pad" = the best YOLO pad sighting bbox (PAD-DETECT). Any other value is a
+#: loud ConfigError so a typo ("Pad", "yolo") never silently falls back.
+VALID_SERVO_MODES = ("marker", "pad")
 
 
 class _SubState(enum.Enum):
@@ -150,6 +201,9 @@ class LandOnPad(MissionPhase):
         "center_persist_frames", "acquire_window_frames", "acquire_min_hits",
         "commit_alt_m", "acquire_timeout_s", "total_budget_s",
         "max_loss_retries", "acquire_scan_step_deg", "scan_dwell_s",
+        # PAD-DETECT: the YOLO pad-servo knobs (default to the legacy marker
+        # behaviour when omitted).
+        "servo_on", "pad_classes",
     )
 
     def __init__(self, *, valid_marker_ids: Optional[List[int]] = None,
@@ -164,7 +218,9 @@ class LandOnPad(MissionPhase):
                  total_budget_s: float = 90.0,
                  max_loss_retries: int = 3,
                  acquire_scan_step_deg: float = 30.0,
-                 scan_dwell_s: float = 0.5):
+                 scan_dwell_s: float = 0.5,
+                 servo_on: str = "marker",
+                 pad_classes: Optional[List[str]] = None):
         # Config-shaped values are validated HERE, loudly, before any flight —
         # a no-op lander (empty valid_marker_ids that never acquires, a 0
         # descend step that never descends, persist counters that can never be
@@ -288,6 +344,46 @@ class LandOnPad(MissionPhase):
             "must be a finite number > 0 (s; the hover dwell between scan "
             "rotates so a frame can be observed)")
 
+        # PAD-DETECT servo-geometry mode + the YOLO pad class set. servo_on
+        # defaults to "marker" (the legacy beacon-bbox behaviour). Validate
+        # loudly: a typo'd mode ("Pad", "yolo") would otherwise silently fall
+        # back to marker servoing and the drone would chase the WRONG target.
+        if servo_on not in VALID_SERVO_MODES:
+            raise _bad(
+                "servo_on", servo_on,
+                f"must be one of {list(VALID_SERVO_MODES)} ('marker' = the "
+                f"validity-beacon ArUco bbox, the default; 'pad' = the YOLO "
+                f"pad-class bbox)")
+        self.servo_on = servo_on
+        # pad_classes: the YOLO class_name(s) that ARE the landing pad. REQUIRED
+        # and non-empty in "pad" mode — an empty/missing set would match no YOLO
+        # sighting and the pad servo could NEVER acquire (the no-op trap, same
+        # class as an empty valid_marker_ids). In "marker" mode it is unused, so
+        # a None/empty there is harmless and accepted (stored as an empty set).
+        if servo_on == "pad":
+            if (not isinstance(pad_classes, (list, tuple)) or not pad_classes
+                    or not all(isinstance(c, str) and c and "\n" not in c
+                               and "\r" not in c for c in pad_classes)):
+                raise _bad(
+                    "pad_classes", pad_classes,
+                    'must be a non-empty list of non-empty single-line strings '
+                    '(the YOLO class_name(s) that ARE the landing pad, e.g. '
+                    '["landing_pad"]) when servo_on=="pad" — an empty set '
+                    'matches no YOLO sighting and would NEVER acquire')
+            self.pad_classes = frozenset(pad_classes)
+        else:
+            # Still reject a malformed pad_classes even when unused, so a config
+            # that flips servo_on to "pad" later cannot carry a silent landmine.
+            if pad_classes is not None and (
+                    not isinstance(pad_classes, (list, tuple))
+                    or not all(isinstance(c, str) for c in pad_classes)):
+                raise _bad(
+                    "pad_classes", pad_classes,
+                    "must be a list of strings (the YOLO pad class_name(s)) or "
+                    "omitted — it is unused while servo_on=='marker' but a "
+                    "malformed value is still a config bug")
+            self.pad_classes = frozenset(pad_classes or ())
+
         # ---- runtime state (per drone, per mission) ----
         self._sub = _SubState.PAD_ACQUIRE
         # bounded recent-frame hit window (convention 3: bounded, not growing).
@@ -295,6 +391,10 @@ class LandOnPad(MissionPhase):
         self._center_streak = 0
         self._loss_retries = 0
         self._target_marker_id: Optional[int] = None
+        # PAD-DETECT: a human-readable label for the locked target, for the
+        # landing event. marker mode -> "marker <id>"; pad mode -> the YOLO
+        # class_name (which has no marker_id). None until a target is locked.
+        self._target_label: Optional[str] = None
         # Acquire deadline is captured on first step() (mission_elapsed_s is
         # the phase's clock; the phase may start mid-mission).
         self._t0_elapsed_s: Optional[float] = None
@@ -320,16 +420,69 @@ class LandOnPad(MissionPhase):
                 if s.marker_id is not None
                 and s.marker_id in self.valid_marker_ids]
 
+    def _pad_sightings(self, ctx: AgentContext) -> List[Sighting]:
+        """PAD-DETECT: the NEW YOLO pad-class sightings this step — source
+        "yolo" AND class_name in pad_classes. The YOLO model detects the pad
+        BLOB (white-A3 + roundel) itself; a robomaster/other yolo class or a
+        beacon ArUco sighting is deliberately dropped so it never drives the pad
+        servo. marker_id is None on a pad sighting (it is not a marker)."""
+        return [s for s in ctx.sightings
+                if s.source == "yolo" and s.class_name in self.pad_classes]
+
+    def _servo_candidates(self, ctx: AgentContext) -> List[Sighting]:
+        """PAD-DETECT: the sightings the SERVO may aim at this frame, by mode.
+        "marker" (default) -> the valid-marker bbox (PAD-VALID's
+        _valid_sightings predicate, unchanged). "pad" -> the YOLO pad-class
+        bbox. This is the ONE place the mode forks; every downstream consumer
+        (the acquire window, the centre/descend lost-gate, _pick_target) reads
+        the SAME candidate set, so a pure-pad stream acquires and a marker
+        stream behaves exactly as before."""
+        if self.servo_on == "pad":
+            return self._pad_sightings(ctx)
+        return self._valid_sightings(ctx)
+
     @staticmethod
     def _bbox_area(s: Sighting) -> float:
         x0, y0, x1, y1 = s.bbox_xyxy
         return abs((float(x1) - float(x0)) * (float(y1) - float(y0)))
 
-    def _pick_target(self, valid: List[Sighting]) -> Sighting:
-        """Two valid pads in frame -> pick ONE deterministically: the largest
-        bbox area (closest/most reliable), tie-broken by the lowest marker_id.
-        Determinism matters — a flapping target choice would never centre."""
-        return max(valid, key=lambda s: (self._bbox_area(s), -s.marker_id))
+    def _pick_target(self, candidates: List[Sighting]) -> Sighting:
+        """Two servo candidates in frame -> pick ONE deterministically: the
+        LARGEST bbox area (closest/most reliable), tie-broken (on equal area) by
+        the LOWEST marker_id for markers, or the LOWEST class_name for YOLO pads
+        (which have marker_id None). Determinism matters — a flapping target
+        choice would never centre.
+
+        Implemented as min over (-area, kind, marker_id_or_0, class_name): the
+        smallest -area is the largest area, and every tie-break field is then
+        ascending so the LOWEST wins. The leading `kind` flag (0=marker, 1=pad)
+        keeps an int marker_id from ever being compared against a str
+        class_name (all candidates in one mode are the same kind anyway)."""
+        def _key(s: Sighting):
+            if s.marker_id is not None:
+                return (-self._bbox_area(s), 0, s.marker_id, "")
+            return (-self._bbox_area(s), 1, 0, s.class_name)
+        return min(candidates, key=_key)
+
+    def _servo_target(self, ctx: AgentContext) -> Optional[Sighting]:
+        """PAD-DETECT: the single servo target sighting this frame (mode-aware),
+        or None when nothing servo-able is in view. _step_center / _step_descend
+        call THIS for the centre/descend geometry — the named seam PAD-DETECT
+        owns and PAD-VALID does not touch."""
+        candidates = self._servo_candidates(ctx)
+        if not candidates:
+            return None
+        return self._pick_target(candidates)
+
+    def _remember_target(self, target: Sighting) -> None:
+        """Record the locked target for the landing event. marker mode keeps the
+        legacy _target_marker_id (the beacon id); pad mode has no marker_id, so
+        the label carries the YOLO class_name instead."""
+        self._target_marker_id = target.marker_id
+        if target.marker_id is not None:
+            self._target_label = f"marker {target.marker_id}"
+        else:
+            self._target_label = f"yolo pad {target.class_name!r}"
 
     def _recent_hits(self) -> int:
         return sum(1 for hit in self._recent if hit)
@@ -381,10 +534,10 @@ class LandOnPad(MissionPhase):
             reason = self._fallback_reason
             if reason is not None:
                 return Done(f"land_on_pad[{ctx.drone_id}] {reason}")
+            target_desc = self._target_label or f"marker {self._target_marker_id}"
             return Done(
                 f"land_on_pad[{ctx.drone_id}] VERIFIED_LANDING: on a valid pad "
-                f"(marker {self._target_marker_id}); is_flying=False after the "
-                f"descend/commit")
+                f"({target_desc}); is_flying=False after the descend/commit")
 
         # If we have already committed to a blind Fallback land, keep landing
         # until is_flying flips (Land is idempotent per the adapter contract).
@@ -412,8 +565,12 @@ class LandOnPad(MissionPhase):
                 and math.isfinite(alt_m) and alt_m <= self.commit_alt_m):
             return Land()
 
-        # Record THIS frame's valid-pad hit into the bounded recent window.
-        valid = self._valid_sightings(ctx)
+        # Record THIS frame's SERVO-CANDIDATE hit into the bounded recent
+        # window. PAD-DETECT: the candidate set is mode-aware (marker bbox vs
+        # YOLO pad bbox) but the acquire/lost accounting is identical for both —
+        # in the default "marker" mode this is exactly self._valid_sightings(ctx)
+        # (the legacy behaviour), so every existing land test is unchanged.
+        valid = self._servo_candidates(ctx)
         seen_valid = bool(valid)
         self._recent.append(seen_valid)
 
@@ -439,21 +596,30 @@ class LandOnPad(MissionPhase):
         # never converging — the recursion bug class.)
         if valid and self._recent_hits() >= self.acquire_min_hits:
             # Acquired: lock the target deterministically, reset centering.
-            self._target_marker_id = self._pick_target(valid).marker_id
+            self._remember_target(self._pick_target(valid))
             self._center_streak = 0
             self._sub = _SubState.PAD_CENTER
             return self._step_center(ctx, valid, ctx.telemetry.altitude_m)
 
         # Not yet acquired — has the acquire deadline fired?
         if phase_elapsed_s >= self.acquire_timeout_s:
+            # PAD-DETECT: name the right tunable in the actionable message —
+            # the YOLO pad classes in "pad" mode, the beacon marker ids in
+            # "marker" mode.
+            if self.servo_on == "pad":
+                target_hint = (f"check servo_on='pad' pad_classes "
+                               f"{sorted(self.pad_classes)} vs the YOLO model's "
+                               f"pad class and the detector confidence / range")
+            else:
+                target_hint = (f"check valid_marker_ids "
+                               f"{sorted(self.valid_marker_ids)} vs the pad "
+                               f"markers and the marker read range / altitude")
             self._go_fallback(
                 f"UNVERIFIED_LANDING: no valid pad acquired within "
                 f"{self.acquire_timeout_s:g} s (saw "
                 f"{self._recent_hits()}/{len(self._recent)} of the last frames "
-                f"with a valid marker, need {self.acquire_min_hits}) — "
-                f"blind-landing in place; check valid_marker_ids "
-                f"{sorted(self.valid_marker_ids)} vs the pad markers and the "
-                f"marker read range / altitude")
+                f"with a servo target, need {self.acquire_min_hits}) — "
+                f"blind-landing in place; {target_hint}")
             return Land()
 
         # Bounded rotate scan to sweep the FOV: alternate Rotate then Hover so
@@ -481,8 +647,11 @@ class LandOnPad(MissionPhase):
 
         if not self._alt_finite(alt_m):
             return self._abort_bad_altitude(ctx, "PAD_CENTER")
-        target = self._pick_target(valid)
-        self._target_marker_id = target.marker_id
+        # PAD-DETECT: the SERVO GEOMETRY target (mode-aware: marker bbox or YOLO
+        # pad bbox). `valid` was already proven non-empty above, so _servo_target
+        # is non-None here (it reads the same mode-correct candidate set).
+        target = self._servo_target(ctx)
+        self._remember_target(target)
         frame_w = target.frame_shape[1]
         move = pixel_offset_to_move(
             bbox_xyxy=target.bbox_xyxy, frame_w=frame_w, altitude_m=alt_m,
@@ -523,8 +692,10 @@ class LandOnPad(MissionPhase):
             return self._abort_bad_altitude(ctx, "PAD_DESCEND")
         # RE-GATE centering after the prior step (drift -> back to PAD_CENTER):
         # re-run the servo; any out-of-deadband correction drops us back.
-        target = self._pick_target(valid)
-        self._target_marker_id = target.marker_id
+        # PAD-DETECT: same mode-aware servo geometry as PAD_CENTER (non-None —
+        # `valid` was proven non-empty above).
+        target = self._servo_target(ctx)
+        self._remember_target(target)
         frame_w = target.frame_shape[1]
         move = pixel_offset_to_move(
             bbox_xyxy=target.bbox_xyxy, frame_w=frame_w, altitude_m=alt_m,

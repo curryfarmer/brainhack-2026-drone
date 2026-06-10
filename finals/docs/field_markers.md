@@ -146,12 +146,38 @@ is the only onboard backstop.
 
 - ✅ Validity check — `valid_marker_ids` already models the safe dict.
 - ✅ Route-between-obstacles — visibility_graph A* already does this.
-- 🟧 **Pad locator is NEW** — a colour (orange-on-white) detector feeds the servo target;
-  today `land_on_pad` centres on the MARKER. Rework: servo on the pad blob, read the
-  adjacent beacon for the id. (New `vision/pad_detector.py` + land_on_pad change.)
+- ✅ **Pad locator (YOLO path) — DONE (PAD-DETECT)** — `land_on_pad` can now servo on a
+  YOLO pad-class bbox instead of the marker. Set `zone["land_on_pad"]`:
+  `{"servo_on": "pad", "pad_classes": ["landing_pad"]}` and point the EXISTING
+  `detector` backend at the pad weights (below). Default `servo_on="marker"` keeps the
+  legacy beacon-bbox servo, so nothing changes until the knobs are set. (A colour
+  orange-on-white detector emitting `source="pad"` is a SEPARATE, still-open path — it
+  is NOT picked by the YOLO pad servo.)
 - 🟥 **Cross-drone validity sharing is NEW** — a shared pad-validity/claim map in the
   orchestrator (built from sightings, fed to agents) so pads are read ONCE and no two
   drones chase the same/invalid pad. Own session; not done.
+
+### YOLO landing-pad WEIGHTS + CLASS contract (PAD-DETECT — onsite/data, not code)
+
+The pad locator is the EXISTING `ultralytics`/`canned` detector backend running a
+USER-TRAINED model (a `.pt` data artifact, like the convoy `best.pt`). The model is NOT
+this session's job; the pipeline that consumes it is. Contract the model + config MUST
+satisfy for `land_on_pad servo_on="pad"`:
+
+1. **Class** — the model emits ONE class for the landing pad (the white-A3 + orange
+   roundel blob). Recommended canonical `class_name`: **`landing_pad`**. If the raw model
+   label differs, map it via `detector.class_map` (`{"<raw>": "landing_pad"}`) so the
+   published `Sighting.class_name` matches a member of `pad_classes`.
+2. **Wiring** — `detector.backend "ultralytics"` + `detector.weights "<pad>.pt"`; the
+   PerceptionLoop publishes each detection as
+   `Sighting(source="yolo", class_name=<mapped>, marker_id=None, bbox_xyxy=<box>)` (the
+   exact shape `land_on_pad._pad_sightings` filters on).
+3. **Phase** — `zone["land_on_pad"]: {"servo_on": "pad", "pad_classes": ["landing_pad"]}`;
+   the bbox the model emits IS the servo target (tighter/centred boxes land tighter).
+4. **Two-factor commit** — the beacon ArUco still drives VALIDITY (PAD-VALID's
+   `valid_marker_ids` predicate). Pad detector says WHERE to land; beacon says WHETHER.
+5. **Gate F (onsite)** — train/verify the model on the real pad + lighting, then calibrate
+   the pad-servo `k_lateral` / `commit_alt_m` against the down-cam pad-blob pixel size.
 
 ## ✅ Required code change — DONE (PAD-DICT, 2026-06-10)
 
