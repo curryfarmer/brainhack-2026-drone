@@ -53,8 +53,15 @@ Live run (OFFLINE, on the drone Wi-Fi) — 60s live scan by default:
     python finals\tools\hula_smoke.py                               # discover+ONE
     python finals\tools\hula_smoke.py --all                         # fleet (later)
 
+CAPTURE (the retraining photographer) — swaps stage 5 for a raw-frame grab (NO
+ArUco/YOLO inference): point the cam at the LANDING PAD, then your HAND, then
+empty background; label the frames (landing_pad + hard negatives) into
+data/train + data/validation and retrain via precomp/pipeline.py:
+    python finals\tools\hula_smoke.py --ip 192.168.100.1 --capture            # ~3 min
+    python finals\tools\hula_smoke.py --ip 192.168.100.1 --capture --capture-secs 120
+
 Everything lands in runs\hula_smoke_<timestamp>\ : smoke.log (paste THIS back),
-summary.json, and per-drone raw + annotated JPEGs.
+summary.json, and per-drone raw + annotated JPEGs (or <id>/capture/ in --capture).
 """
 from __future__ import annotations
 
@@ -424,19 +431,23 @@ async def run_fleet(log: _Log, summary: dict, args, outdir: Path,
 
     try:
         telemetry_sweep(log, summary, fleet, args.telemetry_secs)
-        # Stage 5 is a LIVE scan: it grabs frames for the whole scan window and
-        # runs ArUco + YOLO INLINE (logging hits as they happen), so stages 6/7
-        # just report what the live scan already found.
-        scan_fleet(log, summary, fleet, outdir, args, weights)
-        log.rule("STAGE 6/8  aruco (live-scan results, per drone)")
-        for dr in fleet:
-            _report_aruco(log, summary, dr)
-        log.rule("STAGE 7/8  yolo (live-scan results, per drone)")
-        if args.no_yolo:
-            log.line("skipped (--no-yolo)")
+        if args.capture:
+            # CAPTURE mode: skip ArUco/YOLO, just save raw frames for retraining.
+            capture_fleet(log, summary, fleet, outdir, args)
         else:
+            # Stage 5 is a LIVE scan: it grabs frames for the whole scan window
+            # and runs ArUco + YOLO INLINE (logging hits as they happen), so
+            # stages 6/7 just report what the live scan already found.
+            scan_fleet(log, summary, fleet, outdir, args, weights)
+            log.rule("STAGE 6/8  aruco (live-scan results, per drone)")
             for dr in fleet:
-                _report_yolo(log, summary, dr)
+                _report_aruco(log, summary, dr)
+            log.rule("STAGE 7/8  yolo (live-scan results, per drone)")
+            if args.no_yolo:
+                log.line("skipped (--no-yolo)")
+            else:
+                for dr in fleet:
+                    _report_yolo(log, summary, dr)
     finally:
         await _teardown_fleet(log, summary, fleet)
 
@@ -769,6 +780,112 @@ def scan_fleet(log, summary, fleet: List[_Drone], outdir, args, weights) -> None
         summary["video"][did] = rec
 
 
+def capture_fleet(log, summary, fleet: List[_Drone], outdir, args) -> None:
+    """CAPTURE mode (the retraining photographer): connect the camera and save
+    RAW, unannotated frames at a steady cadence for --capture-secs — NO ArUco/YOLO
+    inference. Point the drone at the LANDING PAD, then your HAND (the hand-in-
+    corner false positive), then empty background (hard negatives); it fills a
+    folder you label and feed back into the YOLO training set. Frames land in
+    <outdir>/<id>/capture/ + a capture_manifest.json per drone."""
+    import cv2
+    from finals.vision.pyhulax_video import PyhulaxVideoSource
+
+    log.rule("STAGE 5/8  video — CAPTURE (raw frames for YOLO retraining)")
+    summary["capture"] = {}
+    by_id = {dr.id: dr for dr in fleet}
+    sources = {}
+    capdirs = {}
+    for dr in fleet:
+        api = getattr(dr.adapter, "_api", None)
+        if api is None:
+            log.error(f"[{dr.id}] adapter has no _api after connect")
+            continue
+        try:
+            src = PyhulaxVideoSource(dr.id, api,
+                                     video_channel_order=dr.channel_order)
+            src.start(timeout_s=args.video_timeout)
+            sources[dr.id] = src
+            cd = outdir / dr.id / "capture"
+            cd.mkdir(parents=True, exist_ok=True)
+            capdirs[dr.id] = cd
+            log.line(f"  [{dr.id}] stream started")
+        except Exception:
+            log.exc(f"video.start[{dr.id}]")
+
+    cap_secs = max(0.0, args.capture_secs)
+    period = max(0.05, args.capture_period)
+    cap_max = max(1, args.capture_max)
+    if sources and cap_secs > 0:
+        log.line(f"  >>> CAPTURING {cap_secs:.0f}s @ every {period:.2f}s (up to "
+                 f"{cap_max} frames/drone) — move the LANDING PAD, then your HAND, "
+                 f"then empty background through each camera's view now <<<")
+
+    start = time.monotonic()
+    deadline = start + cap_secs
+    st = {did: {"last_t": 0.0} for did in sources}
+    while sources and time.monotonic() < deadline:
+        now = time.monotonic()
+        for did, src in sources.items():
+            dr = by_id[did]
+            if dr.saved >= cap_max or now - st[did]["last_t"] < period:
+                continue
+            try:
+                fs = src.get_frame()
+            except Exception:
+                log.exc(f"get_frame[{did}]")
+                continue
+            if fs is None:
+                continue
+            st[did]["last_t"] = now
+            dr.frames_seen += 1
+            dr.last_image = fs.image
+            elapsed = now - start
+            try:
+                cv2.imwrite(str(capdirs[did]
+                            / f"cap_{dr.saved:04d}_t{elapsed:.0f}.jpg"), fs.image)
+                dr.saved += 1
+                if dr.saved % 20 == 0:
+                    log.line(f"  [{did}] t={elapsed:5.1f}s  {dr.saved} frames saved")
+            except Exception:
+                log.exc(f"save capture[{did}]")
+        time.sleep(0.01)
+
+    # ---- stop streams + per-drone manifest ----
+    for did, src in sources.items():
+        dr = by_id[did]
+        try:
+            healthy = src.healthy
+        except Exception:
+            healthy = None
+        try:
+            src.stop()
+        except Exception:
+            log.exc(f"video.stop[{did}]")
+        elapsed = max(1e-6, time.monotonic() - start)
+        dr.fps = round(dr.frames_seen / elapsed, 1)
+        manifest = {"saved": dr.saved, "elapsed_s": round(elapsed, 1),
+                    "period_s": period, "channel_order": dr.channel_order,
+                    "healthy": healthy, "dir": str(capdirs.get(did, ""))}
+        if dr.last_image is not None:
+            h, w = dr.last_image.shape[:2]
+            manifest["shape"] = [w, h]
+        summary["capture"][did] = manifest
+        if dr.saved == 0:
+            log.error(f"[{did}] captured NO frames in {elapsed:.0f}s — camera/link/"
+                      f"decode (check the video stream P6 first-frame)")
+        else:
+            log.line(f"  [{did}] CAPTURED {dr.saved} frames -> {capdirs[did]}")
+            try:
+                (capdirs[did] / "capture_manifest.json").write_text(
+                    json.dumps(manifest, indent=2), encoding="utf-8")
+            except Exception:
+                log.exc(f"manifest[{did}]")
+    if any(dr.saved for dr in fleet):
+        log.line("  NEXT: label these (landing_pad + hand/background hard "
+                 "negatives), drop into data/train + data/validation, then retrain "
+                 "+ redeploy via the training pipeline (precomp/pipeline.py)")
+
+
 def _report_aruco(log, summary, dr: _Drone) -> None:
     summary.setdefault("aruco", {})
     by_dict = {name: c for name, c in dr.aruco_ids.items() if c}
@@ -866,6 +983,20 @@ def _parse_args(argv) -> argparse.Namespace:
     p.add_argument("--yolo-period", type=float, default=1.5,
                    help="seconds between YOLO inferences during the scan "
                         "(throttle; ArUco runs every frame; default 1.5)")
+    # ---- CAPTURE mode (the retraining photographer): --capture swaps the scan
+    # stage for a pure raw-frame grab — NO ArUco/YOLO inference, max frame rate ----
+    p.add_argument("--capture", action="store_true",
+                   help="CAPTURE mode: save RAW unannotated frames for YOLO "
+                        "retraining INSTEAD of the ArUco/YOLO scan — point the "
+                        "drone at the landing pad, then your hand, then empty "
+                        "background; label them and feed precomp/pipeline.py")
+    p.add_argument("--capture-secs", type=float, default=180.0,
+                   help="CAPTURE duration in seconds (default 180 = ~3 min)")
+    p.add_argument("--capture-period", type=float, default=0.5,
+                   help="seconds between saved capture frames "
+                        "(default 0.5 = ~2 fps)")
+    p.add_argument("--capture-max", type=int, default=1200,
+                   help="cap on saved capture frames per drone (default 1200)")
     # ---- ArUco (fix the real-hardware double-decode) ----
     p.add_argument("--aruco-dict", default="DICT_7X7_1000", choices=_ARUCO_DICTS,
                    help="LOCK ArUco decode to ONE dictionary (default "

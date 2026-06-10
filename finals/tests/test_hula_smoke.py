@@ -81,3 +81,48 @@ def test_removed_yolo_postproc_knobs_are_gone():
     for dead in ("--edge-margin", "--yolo-preproc", "--channel-order"):
         with pytest.raises(SystemExit):
             hs._parse_args([dead, "x"])
+
+
+# ---------------- capture mode (W1: raw frames for YOLO retraining) ----------
+def test_args_capture_mode_defaults():
+    a = hs._parse_args([])
+    assert a.capture is False          # scan is the default, not capture
+    assert a.capture_secs == 180.0     # ~3 min photographer window
+    assert a.capture_period == 0.5     # ~2 fps
+    assert a.capture_max == 1200       # per-drone frame cap
+
+
+def test_args_capture_flag_and_overrides():
+    a = hs._parse_args(["--capture", "--capture-secs", "30",
+                        "--capture-period", "0.25", "--capture-max", "200"])
+    assert a.capture is True
+    assert a.capture_secs == 30.0
+    assert a.capture_period == 0.25
+    assert a.capture_max == 200
+
+
+def test_capture_fake_writes_raw_frames_and_manifest(tmp_path):
+    # End-to-end --fake --capture: the photographer saves REAL frames (synthetic
+    # numpy) + a per-drone manifest, with NO ArUco/YOLO inference. Needs cv2 +
+    # numpy (cv2.imwrite + the synthetic frame); skipped on the bare venv.
+    pytest.importorskip("cv2")
+    pytest.importorskip("numpy")
+    rc = hs.main(["--fake", "--capture", "--capture-secs", "1",
+                  "--capture-period", "0.05", "--out", str(tmp_path)])
+    assert rc == 0                                          # teardown never-raises
+    manifests = list(tmp_path.rglob("capture_manifest.json"))
+    frames = list(tmp_path.rglob("cap_*.jpg"))
+    assert manifests, "no capture_manifest.json written"
+    assert frames, "no raw capture frames written"
+
+
+def test_capture_period_bounds_the_frame_count(tmp_path):
+    # Cadence MUST throttle saves: a 1 s window @ 0.5 s period can save at most
+    # ~2-3 frames per drone (kill-check — drop the period gate and this blows up).
+    pytest.importorskip("cv2")
+    pytest.importorskip("numpy")
+    rc = hs.main(["--fake", "--capture", "--capture-secs", "1",
+                  "--capture-period", "0.5", "--out", str(tmp_path)])
+    assert rc == 0
+    frames = list(tmp_path.rglob("cap_*.jpg"))
+    assert 1 <= len(frames) <= 4, f"period not throttling saves: {len(frames)}"
