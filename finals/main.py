@@ -78,8 +78,9 @@ from finals.mission.orchestrator import Orchestrator
 from finals.mission.phase import MissionPhase
 from finals.mission.phases import resolve_phase
 
-if TYPE_CHECKING:  # type-only: the registry is built lazily in _build_convoy_registry
+if TYPE_CHECKING:  # type-only: built lazily in _build_convoy_registry/_build_obstacle_map
     from finals.mission.convoy_registry import ConvoyRegistry
+    from finals.mission.obstacle_map import ObstacleMap
 from finals.sightings import SightingBus, SightingLog
 
 _CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
@@ -299,6 +300,7 @@ def _build_adapter(cfg: FinalsConfig, drone: DroneConfig, *, api=None):
 
 def _build_phases(drone_cfg: DroneConfig, cfg: FinalsConfig,
                   registry: "Optional[ConvoyRegistry]" = None,
+                  obstacle_map: "Optional[ObstacleMap]" = None,
                   ) -> List[MissionPhase]:
     """Phase names -> instances. Soft convention: classes MAY define
     from_config(drone_cfg, cfg); otherwise no-arg construction. Stub phases
@@ -307,12 +309,28 @@ def _build_phases(drone_cfg: DroneConfig, cfg: FinalsConfig,
     WS-2: a phase that exposes bind_registry (track_convoy) gets the shared C2
     ConvoyRegistry injected here — the same post-construction injection style as
     perception<->agent wiring. Phases without it are untouched, so non-convoy
-    missions never see a registry."""
+    missions never see a registry.
+
+    WS-6: a from_config that ACCEPTS an `obstacle_map` parameter (navigate) gets
+    the shared collective map passed in (signature-checked, so other phases'
+    from_config are untouched). None map -> static-arena-only behaviour."""
+    import inspect
     phases: List[MissionPhase] = []
     for name in drone_cfg.phases:
         phase_cls = resolve_phase(name)
         factory = getattr(phase_cls, "from_config", None)
-        phase = factory(drone_cfg, cfg) if factory is not None else phase_cls()
+        if factory is not None:
+            kw = {}
+            if obstacle_map is not None:
+                try:
+                    accepts = "obstacle_map" in inspect.signature(factory).parameters
+                except (TypeError, ValueError):
+                    accepts = False
+                if accepts:
+                    kw["obstacle_map"] = obstacle_map
+            phase = factory(drone_cfg, cfg, **kw)
+        else:
+            phase = phase_cls()
         if registry is not None and hasattr(phase, "bind_registry"):
             phase.bind_registry(registry)
         phases.append(phase)
@@ -335,6 +353,30 @@ def _build_convoy_registry(cfg: FinalsConfig) -> "Optional[ConvoyRegistry]":
     from finals.mission.convoy_registry import ConvoyRegistry
     return ConvoyRegistry(lock_ttl_s=cfg.convoy_lock_ttl_s,
                           known_ids=cfg.convoy_ids)
+
+
+def _uses_navigate(cfg: FinalsConfig) -> bool:
+    """True iff any drone runs navigate — the ONLY consumer of the shared
+    ObstacleMap (it merges the map into its transit plan)."""
+    return any("navigate" in d.phases for d in cfg.drones)
+
+
+def _build_obstacle_map(cfg: FinalsConfig) -> "Optional[ObstacleMap]":
+    """The shared collective map of FIXED obstacles (WS-6 extension), built once
+    per mission and threaded into EVERY navigating drone so a keep-out one drone
+    (or the operator pre-flight tap) contributed routes ALL of them. Built only
+    when a drone navigates; pre-seeded from cfg.observed_keep_out (validated at
+    load) with provenance 'operator'. Returns None when nothing navigates OR no
+    observations exist (so the static-arena path is byte-for-byte unchanged)."""
+    if not _uses_navigate(cfg) or not cfg.observed_keep_out:
+        return None
+    from finals.mission.obstacle_map import ObstacleMap
+    from finals.mission.planning.types import KeepOut
+    omap = ObstacleMap()
+    for i, raw in enumerate(cfg.observed_keep_out):
+        ko = KeepOut.from_dict(raw, index=f"observed_keep_out[{i}]")
+        omap.add_keep_out("operator", ko, now=0.0)     # pre-flight survey ts
+    return omap
 
 
 #: The orchestrator's supervision beat — shared with LoopOverrunGuard so the
@@ -616,6 +658,7 @@ def _build_agents(cfg: FinalsConfig, events: EventLog, bus: SightingBus,
                   slog: Optional[SightingLog], detector, csv_health, safety,
                   run_dir: str,
                   registry: "Optional[ConvoyRegistry]" = None,
+                  obstacle_map: "Optional[ObstacleMap]" = None,
                   ) -> Tuple[List[DroneAgent], List[Tuple[object, object]]]:
     """One DroneAgent + its (source, perception) pair per cfg.drone. Shared by
     the mission path (_run_mission) and --preflight-only (_run_preflight_only)
@@ -643,7 +686,8 @@ def _build_agents(cfg: FinalsConfig, events: EventLog, bus: SightingBus,
             on_degrade = (lambda trip, p=perception:
                           p.shed(trip.reason))
         agent = DroneAgent(d.id, _build_adapter(cfg, d, api=api),
-                           _build_phases(d, cfg, registry), events, bus=bus,
+                           _build_phases(d, cfg, registry, obstacle_map),
+                           events, bus=bus,
                            command_timeout_s=cfg.command_timeout_s,
                            guards=_build_guards(cfg, d),
                            safety=safety,
@@ -694,12 +738,13 @@ def _run_mission(cfg: FinalsConfig) -> int:
         bus = SightingBus()
         safety = _build_safety(cfg, events)
         registry = _build_convoy_registry(cfg)
+        obstacle_map = _build_obstacle_map(cfg)
         slog, detector, csv_health = _build_fleet_support(
             cfg, events, bus, run_dir)
         try:
             agents, perceptions = _build_agents(
                 cfg, events, bus, slog, detector, csv_health, safety, run_dir,
-                registry=registry)
+                registry=registry, obstacle_map=obstacle_map)
             return asyncio.run(_amain(cfg, agents, events, run_dir, bus,
                                       perceptions=perceptions,
                                       registry=registry))
@@ -729,12 +774,13 @@ def _run_preflight_only(cfg: FinalsConfig) -> int:
         bus = SightingBus()
         safety = _build_safety(cfg, events)
         registry = _build_convoy_registry(cfg)
+        obstacle_map = _build_obstacle_map(cfg)
         slog, detector, csv_health = _build_fleet_support(
             cfg, events, bus, run_dir)
         try:
             agents, perceptions = _build_agents(
                 cfg, events, bus, slog, detector, csv_health, safety, run_dir,
-                registry=registry)
+                registry=registry, obstacle_map=obstacle_map)
             sources = [s for s, _p in perceptions]
             results = asyncio.run(run_preflight(
                 cfg.profile, agents, cfg, sources=sources, events=events,

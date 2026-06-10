@@ -40,6 +40,7 @@ Implemented — session S11 (NAV-5). See finals/docs/module_map.md.
 """
 from __future__ import annotations
 
+import dataclasses
 import math
 from typing import TYPE_CHECKING, Optional, Tuple
 
@@ -53,6 +54,7 @@ from finals.types import Abort, Action, Direction, Done, Move
 
 if TYPE_CHECKING:  # type hints only — no import-time coupling to config
     from finals.config import DroneConfig, FinalsConfig
+    from finals.mission.obstacle_map import ObstacleMap
 
 #: Constructor keywords settable from DroneConfig.zone["navigate"]. Exactly ONE
 #: of pad_id / goal_ne_m names the goal; the rest are transit tunables.
@@ -138,9 +140,16 @@ class Navigate(MissionPhase):
 
     @classmethod
     def from_config(cls, drone_cfg: "DroneConfig",
-                    cfg: "FinalsConfig") -> "Navigate":
+                    cfg: "FinalsConfig",
+                    obstacle_map: "Optional[ObstacleMap]" = None) -> "Navigate":
         """Resolve the goal + transit tunables from config and PRE-PLAN the
         Legs (fail loud at wiring time, never mid-air). `cfg` carries the arena.
+
+        WS-6 extension: `obstacle_map` is the SHARED collective map (one instance
+        threaded into every drone by finals.main). Any keep-out a drone or the
+        operator pre-flight tap contributed is MERGED with the static arena
+        keep-outs before planning, so this drone routes around an obstacle it
+        never saw itself. None / empty -> today's static-arena-only behaviour.
         """
         kwargs = _zone_kwargs(drone_cfg)
 
@@ -205,6 +214,15 @@ class Navigate(MissionPhase):
         total_budget_s = _pos_float(
             "total_budget_s", kwargs.get("total_budget_s", 120.0),
             allow_zero=False)
+
+        # WS-6: merge the shared collective map. Static arena keep-outs stay
+        # AUTHORITATIVE (ObstacleMap.merge only ADDS ids the arena lacks), so a
+        # contribution can make us MORE cautious, never less. Empty/None map ->
+        # arena unchanged. Rebuild a frozen ArenaMap with the merged keep-outs.
+        if obstacle_map is not None and len(obstacle_map) > 0:
+            merged = obstacle_map.merge(arena.keep_out)
+            if len(merged) != len(arena.keep_out):
+                arena = dataclasses.replace(arena, keep_out=tuple(merged))
 
         start_m = arena.c2_origin_m
         # plan() raises ValueError on out-of-domain args (guarded above) and

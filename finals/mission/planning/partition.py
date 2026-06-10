@@ -55,15 +55,38 @@ class DroneRegion:
 
 def region_to_keep_outs(mine: DroneRegion,
                         others: Tuple[DroneRegion, ...]) -> Tuple[KeepOut, ...]:
-    """STUB (session S11, NAV map-partition). Convert the OTHER drones' keep-in
-    regions into keep-out polygons for `mine`'s planner, so planned corridors
-    never overlap.
+    """Convert the OTHER drones' keep-in regions into keep-out polygons for
+    `mine`'s planner, so the inflated transit corridors never overlap — spatial
+    deconfliction BY CONSTRUCTION at PLAN time (the only kind a POSITION-BLIND
+    drone can honour; the runtime SectorGuard stays an advisory backstop).
 
-    Not implemented: kept as a stub by design — the advisory SectorGuard is the
-    active spatial-deconfliction mechanism for now. See finals/docs/module_map.md
-    for how to fill it (the module docstring lists the four steps).
+    Each other region becomes a KeepOut id `region_<drone_id>`; the visibility-
+    graph planner then routes `mine` around every neighbour's territory. A region
+    matching `mine.drone_id` is skipped (a drone is never walled out of its own
+    area). Output sorted by drone_id (deterministic). Validation REUSES
+    KeepOut.from_dict (>= 3 distinct finite vertices) so a malformed region fails
+    LOUD exactly like a bad arena keep-out.
+
+    NOTE: this returns the OTHER-region keep-outs only; the matching keep-IN clip
+    (confining `mine`'s plan to its own polygon) is the planner's follow-on (the
+    module docstring step 2) — these keep-outs alone already force disjoint
+    corridors when the regions tile the arena. PURE: stdlib only.
     """
-    raise NotImplementedError(
-        "finals.mission.planning.partition.region_to_keep_outs: session S11 "
-        "(NAV map-partition) — kept as a stub by design; advisory SectorGuard "
-        "is the active spatial deconfliction. See finals/docs/module_map.md")
+    if not isinstance(mine, DroneRegion):
+        raise ValueError(
+            f"partition.region_to_keep_outs: `mine` must be a DroneRegion, got "
+            f"{type(mine).__name__}")
+    out = []
+    for other in others:
+        if not isinstance(other, DroneRegion):
+            raise ValueError(
+                f"partition.region_to_keep_outs: every `others` entry must be a "
+                f"DroneRegion, got {type(other).__name__}")
+        if other.drone_id == mine.drone_id:
+            continue                       # never wall a drone out of its own area
+        ko = KeepOut.from_dict(
+            {"id": f"region_{other.drone_id}",
+             "polygon_m": list(other.keep_in_polygon_m)},
+            index=other.drone_id)
+        out.append(ko)
+    return tuple(sorted(out, key=lambda k: k.id))

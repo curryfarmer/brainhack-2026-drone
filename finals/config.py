@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from finals.errors import ConfigError
-from finals.mission.planning.types import ArenaMap
+from finals.mission.planning.types import ArenaMap, KeepOut
 
 VALID_PROFILES = ("mock", "sitl", "replay", "bench", "real")
 VALID_FRAME_BACKENDS = ("none", "gazebo", "pyhulax", "replay")
@@ -163,6 +163,14 @@ class FinalsConfig:
     # completion tally. See finals/mission/convoy_registry.py.
     convoy_lock_ttl_s: float = 12.0
     convoy_ids: Optional[List[int]] = None
+    # WS-6 shared obstacle map (extension): a list of OBSERVED keep-outs (same
+    # shape as an arena keep_out: {"id","polygon_m"}) from the operator pre-flight
+    # tap (map_sensing lever A) or a teammate survey. finals.main loads these into
+    # ONE shared ObstacleMap that every drone's navigate MERGES with the
+    # AUTHORITATIVE arena keep-outs (adds-only: a contribution can add caution,
+    # never relax the surveyed map). None/absent -> static arena only. See
+    # finals/mission/obstacle_map.py.
+    observed_keep_out: Optional[List[Any]] = None
     # Challenge-2A landing navigation (S11/NAV-0): the optional arena_name names a
     # finals/configs/arenas/<name>.json map (obstacles + pads + C2 frame). It is
     # resolved into `arena` at load time; `arena` is DERIVED, never set in JSON.
@@ -360,6 +368,7 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
             "replay_dir", "replay_fps",
             "gazebo_video_host", "gazebo_video_port",
             "use_uwb", "uwb_serial_port", "convoy_lock_ttl_s", "convoy_ids",
+            "observed_keep_out",
             "arena_name", "guards",
         ),
         where=path,
@@ -405,6 +414,7 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
             "replay_dir", "replay_fps",
             "gazebo_video_host", "gazebo_video_port",
             "use_uwb", "uwb_serial_port", "convoy_lock_ttl_s", "convoy_ids",
+            "observed_keep_out",
             "arena_name",
         ) if k in top},
     )
@@ -476,6 +486,29 @@ def _validate(cfg: FinalsConfig, config_dir: str) -> None:
                 f"convoy_ids {cfg.convoy_ids!r} invalid — must be null or a "
                 f"non-empty list of DISTINCT int ArUco marker ids (the 5-of-5 "
                 f"completion denominator, e.g. [7, 11, 23, 42, 88])")
+
+    # WS-6 shared obstacle map: validate the OBSERVED keep-outs at LOAD (so
+    # --dry-run catches a mistapped footprint, not the mission wiring). Reuse the
+    # arena keep-out validator (KeepOut.from_dict: id + >= 3 distinct vertices)
+    # AND require ids distinct from each other (two contributions must not collide
+    # on one id). The objects are rebuilt in finals.main._build_obstacle_map; here
+    # we parse-and-discard purely to fail loud early.
+    if cfg.observed_keep_out is not None:
+        if not isinstance(cfg.observed_keep_out, list):
+            raise ConfigError(
+                f"observed_keep_out must be null or a list of keep-out objects "
+                f'({{"id","polygon_m"}}), got {type(cfg.observed_keep_out).__name__} '
+                f"— CHECK the config block (it is the operator/teammate obstacle "
+                f"contributions for the shared map)")
+        seen_ids = set()
+        for i, raw in enumerate(cfg.observed_keep_out):
+            ko = KeepOut.from_dict(raw, index=f"observed_keep_out[{i}]")
+            if ko.id in seen_ids:
+                raise ConfigError(
+                    f"observed_keep_out[{i}] duplicate id {ko.id!r} — each "
+                    f"contributed keep-out needs a UNIQUE id (a second tap of the "
+                    f"same crate must reuse its id to UPDATE, not duplicate)")
+            seen_ids.add(ko.id)
 
     if cfg.profile == "replay":
         if cfg.drones:

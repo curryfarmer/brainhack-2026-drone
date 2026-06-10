@@ -41,6 +41,7 @@ finals/docs/module_map.md (S11 NAV map-sensing row). PURE: stdlib only.
 """
 from __future__ import annotations
 
+import math
 from typing import Dict, Sequence, Tuple
 
 from finals.mission.planning.types import KeepOut, Point
@@ -50,41 +51,85 @@ from finals.mission.planning.types import KeepOut, Point
 
 
 def position_fix_from_marker(marker_world_m: Point, bearing_deg: float,
-                             ground_range_m: float, drone_yaw_deg: float) -> Point:
-    """STUB (C). Solve the drone's absolute (north_m, east_m) from a sighting of
-    a marker at a KNOWN world coord.
+                             ground_range_m: float) -> Point:
+    """Lever C — solve the drone's absolute (north_m, east_m) from a sighting of
+    a marker at a KNOWN world coord. The position fix that RESETS dead-reckon
+    drift on POSITION-BLIND HULA (field_markers: 5 static markers at fixed (x,y)).
 
-    Inputs (all from the down-cam ArUco decode + telemetry): marker_world_m = the
-    marker's known (north_m, east_m); bearing_deg = measured bearing to it
-    (deg, CCW+, the perception convention); ground_range_m = horizontal distance
-    (from pixel offset + altitude, similar triangles); drone_yaw_deg = compass
-    heading. Returns the drone's (north_m, east_m) so the caller can RESET the
-    dead-reckon XY (the position fix that defeats open-loop drift).
+    Inputs (all from the down-cam ArUco decode + telemetry):
+      marker_world_m  : the marker's KNOWN (north_m, east_m).
+      bearing_deg     : the ABSOLUTE compass bearing from the drone TO the marker
+                        (deg, CCW+). This is exactly Sighting.bearing_deg, which
+                        finals.vision.perception.bearing_from_bbox already builds
+                        as `yaw_deg - pixel_offset_frac*hfov` — i.e. the drone's
+                        heading is ALREADY folded in, so no separate yaw arg.
+      ground_range_m  : HORIZONTAL distance drone->marker (from the pixel offset
+                        + altitude by similar triangles), metres.
 
-    Not implemented: kept a stub by design; the hand map + DeadReckoner are the
-    active path. See finals/docs/module_map.md.
+    Returns the drone's (north_m, east_m). Geometry uses the project heading
+    convention (visibility_graph): a step of range r at compass bearing b
+    advances (dN, dE) = (r*cos b, -r*sin b). The marker sits at that offset FROM
+    the drone, so the drone is the marker MINUS it:
+        drone = (M_n - r*cos b, M_e + r*sin b).
+
+    Fail loud on non-finite / negative range (a degenerate fix would silently
+    teleport the dead-reckoner). PURE — the cv2 decode + range estimate are the
+    caller's (vision/) job; this is the closed-form solve only.
     """
-    raise NotImplementedError(
-        "finals.mission.planning.map_sensing.position_fix_from_marker: session "
-        "S11 (NAV map-sensing, lever C) — kept a stub by design. See "
-        "finals/docs/module_map.md")
+    mn, me = _require_point(marker_world_m, "marker_world_m")
+    if not isinstance(bearing_deg, (int, float)) or isinstance(bearing_deg, bool) \
+            or not math.isfinite(bearing_deg):
+        raise ValueError(
+            f"map_sensing.position_fix_from_marker: bearing_deg must be a finite "
+            f"number (deg, CCW+, absolute), got {bearing_deg!r}")
+    if not isinstance(ground_range_m, (int, float)) \
+            or isinstance(ground_range_m, bool) \
+            or not math.isfinite(ground_range_m) or ground_range_m < 0:
+        raise ValueError(
+            f"map_sensing.position_fix_from_marker: ground_range_m must be a "
+            f"finite distance >= 0 (m), got {ground_range_m!r} — a negative/NaN "
+            f"range would teleport the dead-reckoner")
+    b = math.radians(bearing_deg)
+    return (mn - ground_range_m * math.cos(b),
+            me + ground_range_m * math.sin(b))
 
 
 def keep_outs_from_overhead_corners(
         corners_by_id: Dict[str, Sequence[Point]]) -> Tuple[KeepOut, ...]:
-    """STUB (A). Assemble operator-tapped crate corners into validated KeepOut
-    polygons for the arena.
+    """Lever A — assemble operator-tapped crate corners into validated KeepOut
+    polygons. The "can't walk and measure" map source: the operator taps each
+    crate's footprint on ONE rectified overhead image (drone hover-high once, or
+    a phone over the cage); the pixel->world rectification is the caller's job,
+    so this takes already-(north_m, east_m) corner rings.
 
-    corners_by_id maps a crate id -> its ring of (north_m, east_m) corners,
-    already rectified from one overhead image (the operator taps each crate's
-    footprint on a tablet; the pixel->world rectification is the caller's job).
-    Returns KeepOuts ready to merge into ArenaMap.keep_out — the "can't walk and
-    measure" map source.
+    corners_by_id maps crate id -> its ring of (north_m, east_m) corners. Returns
+    KeepOuts (sorted by id, deterministic) ready to feed ObstacleMap.add_keep_out
+    or to merge into ArenaMap.keep_out.
 
-    Not implemented: kept a stub by design; hand-traced keep_out (or omit it for
-    straight-line transit) is the active path. See finals/docs/module_map.md.
+    Validation REUSES KeepOut.from_dict (the arena loader's rule: >= 3 distinct
+    finite vertices), so a mistapped point/edge fails LOUD with the SAME message
+    an operator already knows from the arena JSON — never a silently-dropped
+    obstacle. PURE: stdlib only.
     """
-    raise NotImplementedError(
-        "finals.mission.planning.map_sensing.keep_outs_from_overhead_corners: "
-        "session S11 (NAV map-sensing, lever A) — kept a stub by design. See "
-        "finals/docs/module_map.md")
+    if not isinstance(corners_by_id, dict):
+        raise ValueError(
+            f"map_sensing.keep_outs_from_overhead_corners: corners_by_id must be "
+            f"a dict of id -> corner ring, got {type(corners_by_id).__name__}")
+    out = []
+    for cid in sorted(corners_by_id):
+        ring = corners_by_id[cid]
+        # Reuse the arena keep-out validator (>= 3 distinct finite vertices) so
+        # the contract + error text match the hand-authored arena exactly.
+        ko = KeepOut.from_dict({"id": cid, "polygon_m": list(ring)}, index=cid)
+        out.append(ko)
+    return tuple(out)
+
+
+def _require_point(raw, where: str) -> Point:
+    if (not isinstance(raw, (list, tuple)) or len(raw) != 2
+            or any(not isinstance(c, (int, float)) or isinstance(c, bool)
+                   or not math.isfinite(c) for c in raw)):
+        raise ValueError(
+            f"map_sensing: {where} must be a finite [north_m, east_m] pair, got "
+            f"{raw!r}")
+    return (float(raw[0]), float(raw[1]))
