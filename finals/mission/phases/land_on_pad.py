@@ -125,6 +125,7 @@ from finals.types import (Abort, Action, Direction, Done, Hover, Land, Move,
 
 if TYPE_CHECKING:  # type hints only — keeps the import graph minimal
     from finals.config import DroneConfig, FinalsConfig
+    from finals.mission.pad_validity import PadValidityMap
 
 
 class _SubState(enum.Enum):
@@ -164,7 +165,8 @@ class LandOnPad(MissionPhase):
                  total_budget_s: float = 90.0,
                  max_loss_retries: int = 3,
                  acquire_scan_step_deg: float = 30.0,
-                 scan_dwell_s: float = 0.5):
+                 scan_dwell_s: float = 0.5,
+                 validity_map: "Optional[PadValidityMap]" = None):
         # Config-shaped values are validated HERE, loudly, before any flight —
         # a no-op lander (empty valid_marker_ids that never acquires, a 0
         # descend step that never descends, persist counters that can never be
@@ -301,24 +303,89 @@ class LandOnPad(MissionPhase):
         self._scan_pending_dwell = False   # alternate Rotate / Hover while scanning
         self._fallback_reason: Optional[str] = None
 
+        # ---- cross-drone pad-validity coordination (PAD-VALID) ----
+        # The shared PadValidityMap (one instance threaded into every drone by
+        # finals.main). None = today's static valid_marker_ids-only behaviour:
+        # every existing land test stays green. When present, _valid_sightings
+        # ALSO (a) broadcasts each beacon's validity so a red pad one drone
+        # reads is skipped by the others, (b) drops a beacon another drone has
+        # already claimed, and (c) claims the pad this drone locks onto.
+        self._validity_map: "Optional[PadValidityMap]" = validity_map
+
     @classmethod
     def from_config(cls, drone_cfg: "DroneConfig",
-                    cfg: "FinalsConfig") -> "LandOnPad":
+                    cfg: "FinalsConfig",
+                    validity_map: "Optional[PadValidityMap]" = None
+                    ) -> "LandOnPad":
         """Build from config (`cfg` unused — keeps the factory signature
         uniform across phases). All tunables validated in __init__; the camera
         HFOV folded into k_lateral and the commit_alt_m depth floor are
-        ONSITE-CALIBRATED (gate F), so they are config, NOT hardcoded."""
+        ONSITE-CALIBRATED (gate F), so they are config, NOT hardcoded.
+
+        PAD-VALID: `validity_map` is the SHARED cross-drone PadValidityMap (one
+        instance threaded into every drone by finals.main, signature-checked at
+        the _build_phases injection site like navigate's obstacle_map). None ->
+        today's static-set-only behaviour (byte-for-byte unchanged)."""
         kwargs = _zone_kwargs(drone_cfg, "land_on_pad", cls._TUNABLES)
-        return cls(**kwargs)
+        return cls(validity_map=validity_map, **kwargs)
 
     # ---------------- helpers ----------------
     def _valid_sightings(self, ctx: AgentContext) -> List[Sighting]:
-        """The NEW sightings this step whose marker_id is a valid pad. A
-        non-valid id (e.g. an INVALID/red pad marker) is deliberately dropped
-        here so it never drives centering."""
-        return [s for s in ctx.sightings
-                if s.marker_id is not None
-                and s.marker_id in self.valid_marker_ids]
+        """The NEW sightings this step whose marker_id is a valid pad to servo
+        onto. A non-valid id (e.g. an INVALID/red pad marker) is deliberately
+        dropped here so it never drives centering.
+
+        STATIC (validity_map=None — today's behaviour, every existing land test
+        stays green): keep exactly the sightings whose marker_id is in the
+        static valid_marker_ids set.
+
+        SHARED (validity_map set — PAD-VALID cross-drone coordination): the same
+        static set is the per-drone ground truth, PLUS the shared map. Per step:
+          1. BROADCAST every beacon read this step (valid AND invalid) into the
+             map, so an INVALID (red) pad ONE drone reads is published for all —
+             the others skip it instead of re-flying it.
+          2. KEEP a statically-valid sighting only when the map does NOT mark its
+             beacon invalid AND no OTHER drone has claimed that pad (the "valid
+             AND not claimed by another drone" rule).
+          3. CLAIM the single pad this drone will commit to (the deterministic
+             _pick_target choice) so two drones never chase the same valid pad.
+             The claim is a race-free single-winner CAS: if this drone LOSES the
+             tick race for its top pick, that pad is dropped THIS step and the
+             drone falls back to the other unclaimed valid pads (or re-acquires).
+        """
+        statically_valid = [s for s in ctx.sightings
+                            if s.marker_id is not None
+                            and s.marker_id in self.valid_marker_ids]
+        vmap = self._validity_map
+        if vmap is None:
+            return statically_valid
+
+        # 1. Broadcast EVERY beacon read this step (the cross-drone share). A
+        #    red beacon (id not in the static set) is recorded valid=False so
+        #    the other drones drop it; a green one is recorded valid=True.
+        for s in ctx.sightings:
+            if s.marker_id is not None:
+                vmap.record(s.marker_id, s.marker_id in self.valid_marker_ids,
+                            ctx.drone_id, ctx.now)
+
+        # 2. Drop a statically-valid pad the map marks invalid (a stale
+        #    broadcast can never resurrect a red pad) or one ANOTHER drone owns.
+        candidates = [s for s in statically_valid
+                      if vmap.is_valid(s.marker_id) is not False
+                      and not vmap.claimed_by_other(s.marker_id, ctx.drone_id)]
+        if not candidates:
+            return []
+
+        # 3. Claim the ONE pad this drone commits to — the SAME deterministic
+        #    pick the centering uses (_pick_target), so the claim and the servo
+        #    target agree. Single-winner CAS: claim() True => ours (now or
+        #    already); claim() False => another drone won this pad in the same
+        #    tick, so exclude just that pad and keep the rest (two drones never
+        #    end up OWNING one pad — the loser re-targets next step).
+        target = self._pick_target(candidates)
+        if vmap.claim(target.marker_id, ctx.drone_id):
+            return candidates
+        return [s for s in candidates if s.marker_id != target.marker_id]
 
     @staticmethod
     def _bbox_area(s: Sighting) -> float:

@@ -85,8 +85,9 @@ from finals.guards import Guard, GuardContext, TripAction, evaluate_guards
 from finals.mission.agent import AgentState, DroneAgent
 from finals.sightings import SightingBus
 
-if TYPE_CHECKING:  # type-only: the registry is duck-typed (expire/snapshot)
+if TYPE_CHECKING:  # type-only: the registry/map are duck-typed (expire/snapshot)
     from finals.mission.convoy_registry import ConvoyRegistry
+    from finals.mission.pad_validity import PadValidityMap
 
 #: Bounded wait for cancelled agent tasks to actually return (a cancelled
 #: agent unwinds through bounded awaits, so this is generous headroom).
@@ -107,6 +108,7 @@ class Orchestrator:
                  swarm_guards: Sequence[Guard] = (),
                  abort_event: Optional[threading.Event] = None,
                  convoy_registry: Optional["ConvoyRegistry"] = None,
+                 validity_map: Optional["PadValidityMap"] = None,
                  clock: Callable[[], float] = time.monotonic):
         if not isinstance(agents, list) or not agents \
                 or not all(isinstance(a, DroneAgent) for a in agents):
@@ -157,6 +159,11 @@ class Orchestrator:
         # beat so a drone that dropped Wi-Fi frees its convoy; snapshotted into
         # the heartbeat as the swarm-wide ownership view.
         self._registry = convoy_registry
+        # PAD-VALID landing coordination (None for non-landing missions): the
+        # shared pad-validity / claim store. Snapshot-ONLY here (no expire —
+        # landing is terminal, a claimed pad is never freed); folded into the
+        # heartbeat each beat as the swarm-wide pad-validity view.
+        self._validity_map = validity_map
         self._clock = clock
 
         # Per-run counters (reset by run(); instance state, never module
@@ -486,6 +493,11 @@ class Orchestrator:
             # (the 5-of-5 tally) + done. `now` folds in staleness even if a beat
             # raced ahead of expire().
             payload["convoys"] = self._registry.snapshot(now)
+        if self._validity_map is not None:
+            # The swarm-wide pad-validity view: per-beacon validity + the
+            # broadcast invalid_ids (red pads the others skip) + claimed_by
+            # (which drone owns which valid pad). `now` stamps read-age.
+            payload["pad_validity"] = self._validity_map.snapshot(now)
         write_heartbeat(self._run_dir, payload)
 
     # ---------------- summary ----------------

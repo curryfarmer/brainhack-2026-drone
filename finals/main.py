@@ -81,6 +81,7 @@ from finals.mission.phases import resolve_phase
 if TYPE_CHECKING:  # type-only: built lazily in _build_convoy_registry/_build_obstacle_map
     from finals.mission.convoy_registry import ConvoyRegistry
     from finals.mission.obstacle_map import ObstacleMap
+    from finals.mission.pad_validity import PadValidityMap
 from finals.sightings import SightingBus, SightingLog
 
 _CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
@@ -301,6 +302,7 @@ def _build_adapter(cfg: FinalsConfig, drone: DroneConfig, *, api=None):
 def _build_phases(drone_cfg: DroneConfig, cfg: FinalsConfig,
                   registry: "Optional[ConvoyRegistry]" = None,
                   obstacle_map: "Optional[ObstacleMap]" = None,
+                  validity_map: "Optional[PadValidityMap]" = None,
                   ) -> List[MissionPhase]:
     """Phase names -> instances. Soft convention: classes MAY define
     from_config(drone_cfg, cfg); otherwise no-arg construction. Stub phases
@@ -311,23 +313,26 @@ def _build_phases(drone_cfg: DroneConfig, cfg: FinalsConfig,
     perception<->agent wiring. Phases without it are untouched, so non-convoy
     missions never see a registry.
 
-    WS-6: a from_config that ACCEPTS an `obstacle_map` parameter (navigate) gets
-    the shared collective map passed in (signature-checked, so other phases'
-    from_config are untouched). None map -> static-arena-only behaviour."""
+    WS-6 / PAD-VALID: a from_config that ACCEPTS an `obstacle_map` parameter
+    (navigate) or a `validity_map` parameter (land_on_pad) gets the matching
+    shared object passed in — signature-checked, so other phases' from_config
+    are untouched. A None map -> that phase's static-only behaviour."""
     import inspect
+    # (param name -> the shared object) signature-checked into each from_config.
+    shared_by_param = {"obstacle_map": obstacle_map, "validity_map": validity_map}
     phases: List[MissionPhase] = []
     for name in drone_cfg.phases:
         phase_cls = resolve_phase(name)
         factory = getattr(phase_cls, "from_config", None)
         if factory is not None:
             kw = {}
-            if obstacle_map is not None:
-                try:
-                    accepts = "obstacle_map" in inspect.signature(factory).parameters
-                except (TypeError, ValueError):
-                    accepts = False
-                if accepts:
-                    kw["obstacle_map"] = obstacle_map
+            try:
+                accepted = set(inspect.signature(factory).parameters)
+            except (TypeError, ValueError):
+                accepted = set()
+            for param, shared in shared_by_param.items():
+                if shared is not None and param in accepted:
+                    kw[param] = shared
             phase = factory(drone_cfg, cfg, **kw)
         else:
             phase = phase_cls()
@@ -377,6 +382,25 @@ def _build_obstacle_map(cfg: FinalsConfig) -> "Optional[ObstacleMap]":
         ko = KeepOut.from_dict(raw, index=f"observed_keep_out[{i}]")
         omap.add_keep_out("operator", ko, now=0.0)     # pre-flight survey ts
     return omap
+
+
+def _uses_land_on_pad(cfg: FinalsConfig) -> bool:
+    """True iff any drone runs land_on_pad — the ONLY consumer of the shared
+    PadValidityMap (the cross-drone pad-validity broadcast + claim store)."""
+    return any("land_on_pad" in d.phases for d in cfg.drones)
+
+
+def _build_validity_map(cfg: FinalsConfig) -> "Optional[PadValidityMap]":
+    """The shared cross-drone pad-validity / claim store (PAD-VALID), built once
+    per mission and threaded into EVERY landing drone so a red pad ONE drone
+    reads is broadcast to all (the others skip it) and two drones never claim the
+    same valid pad. Built ONLY when a drone runs land_on_pad; returns None
+    otherwise (so non-landing missions keep a clean heartbeat with no empty
+    pad_validity block, and the static valid_marker_ids path is unchanged)."""
+    if not _uses_land_on_pad(cfg):
+        return None
+    from finals.mission.pad_validity import PadValidityMap
+    return PadValidityMap()
 
 
 #: The orchestrator's supervision beat — shared with LoopOverrunGuard so the
@@ -587,7 +611,8 @@ def _perception_screamer(events: EventLog):
 async def _amain(cfg: FinalsConfig, agents: List[DroneAgent],
                  events: EventLog, run_dir: str, bus: SightingBus,
                  perceptions: Sequence[Tuple[object, object]] = (),
-                 registry: "Optional[ConvoyRegistry]" = None) -> int:
+                 registry: "Optional[ConvoyRegistry]" = None,
+                 validity_map: "Optional[PadValidityMap]" = None) -> int:
     """Preflight gate -> perception tasks (S7, when frames are wired) ->
     Orchestrator.run (with the S5 abort listener armed around it), on ONE
     event loop. Perception teardown always runs (finally), in dependency
@@ -616,7 +641,8 @@ async def _amain(cfg: FinalsConfig, agents: List[DroneAgent],
                                 heartbeat_period_s=_HEARTBEAT_PERIOD_S,
                                 swarm_guards=_build_swarm_guards(cfg),
                                 abort_event=abort_event,
-                                convoy_registry=registry)
+                                convoy_registry=registry,
+                                validity_map=validity_map)
     listener = AbortListener(abort_event,
                              on_abort=orchestrator.request_stop_threadsafe)
     p_stop = asyncio.Event()
@@ -659,6 +685,7 @@ def _build_agents(cfg: FinalsConfig, events: EventLog, bus: SightingBus,
                   run_dir: str,
                   registry: "Optional[ConvoyRegistry]" = None,
                   obstacle_map: "Optional[ObstacleMap]" = None,
+                  validity_map: "Optional[PadValidityMap]" = None,
                   ) -> Tuple[List[DroneAgent], List[Tuple[object, object]]]:
     """One DroneAgent + its (source, perception) pair per cfg.drone. Shared by
     the mission path (_run_mission) and --preflight-only (_run_preflight_only)
@@ -686,7 +713,8 @@ def _build_agents(cfg: FinalsConfig, events: EventLog, bus: SightingBus,
             on_degrade = (lambda trip, p=perception:
                           p.shed(trip.reason))
         agent = DroneAgent(d.id, _build_adapter(cfg, d, api=api),
-                           _build_phases(d, cfg, registry, obstacle_map),
+                           _build_phases(d, cfg, registry, obstacle_map,
+                                         validity_map),
                            events, bus=bus,
                            command_timeout_s=cfg.command_timeout_s,
                            guards=_build_guards(cfg, d),
@@ -739,15 +767,18 @@ def _run_mission(cfg: FinalsConfig) -> int:
         safety = _build_safety(cfg, events)
         registry = _build_convoy_registry(cfg)
         obstacle_map = _build_obstacle_map(cfg)
+        validity_map = _build_validity_map(cfg)
         slog, detector, csv_health = _build_fleet_support(
             cfg, events, bus, run_dir)
         try:
             agents, perceptions = _build_agents(
                 cfg, events, bus, slog, detector, csv_health, safety, run_dir,
-                registry=registry, obstacle_map=obstacle_map)
+                registry=registry, obstacle_map=obstacle_map,
+                validity_map=validity_map)
             return asyncio.run(_amain(cfg, agents, events, run_dir, bus,
                                       perceptions=perceptions,
-                                      registry=registry))
+                                      registry=registry,
+                                      validity_map=validity_map))
         finally:
             if detector is not None:
                 detector.stop()                # joins the worker threads
@@ -775,12 +806,14 @@ def _run_preflight_only(cfg: FinalsConfig) -> int:
         safety = _build_safety(cfg, events)
         registry = _build_convoy_registry(cfg)
         obstacle_map = _build_obstacle_map(cfg)
+        validity_map = _build_validity_map(cfg)
         slog, detector, csv_health = _build_fleet_support(
             cfg, events, bus, run_dir)
         try:
             agents, perceptions = _build_agents(
                 cfg, events, bus, slog, detector, csv_health, safety, run_dir,
-                registry=registry, obstacle_map=obstacle_map)
+                registry=registry, obstacle_map=obstacle_map,
+                validity_map=validity_map)
             sources = [s for s, _p in perceptions]
             results = asyncio.run(run_preflight(
                 cfg.profile, agents, cfg, sources=sources, events=events,
