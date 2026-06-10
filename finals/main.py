@@ -69,8 +69,8 @@ from finals.events import (EventLog, EventLogError, create_run_dir,
                            install_crash_hooks)
 from finals.guards import (AbortListener, BatteryGuard, GeofenceLite, Guard,
                            LoopOverrunGuard, MissionClockGuard, PhaseTimeout,
-                           SafetyController, SectorGuard, TelemetryWatchdog,
-                           VideoWatchdog)
+                           ProximityGuard, SafetyController, SectorGuard,
+                           TelemetryWatchdog, VideoWatchdog)
 from typing import TYPE_CHECKING
 
 from finals.mission.agent import DroneAgent
@@ -172,6 +172,14 @@ def format_resolved_plan(cfg: FinalsConfig, flight_cls: Optional[Type],
         "=" * 72,
         f"flight_backend : {cfg.flight_backend:<12} -> {flight_cls.__name__ if flight_cls else '(none)'}",
         f"frame_backend  : {cfg.frame_backend:<12} -> {video_cls.__name__ if video_cls else '(none)'}",
+        f"depth_backend  : {cfg.depth_backend:<12} -> "
+        + ("(none — monocular)" if cfg.depth_backend == "none"
+           else resolve_depth_source_cls(cfg.depth_backend).__name__),
+        f"IR proximity   : "
+        + (f"ProximityGuard ON (warn {cfg.guards.proximity_warn_cm:g} cm / land "
+           f"{cfg.guards.proximity_land_cm:g} cm; LIVE read = onsite gate, "
+           f"synthetic feed wired)" if cfg.guards.proximity_enable
+           else "(off — guards.proximity_enable false)"),
         "detection      : "
         + ("(no frame source — perception off)" if cfg.frame_backend == "none" else
            f"{cfg.marker_backend} (primary, always on) + yolo: " + cfg.detector.backend
@@ -233,6 +241,7 @@ def run(argv: Optional[List[str]] = None) -> int:
     # Resolve EVERYTHING before doing anything: unknown names die here, loudly.
     flight_cls = resolve_flight_adapter_cls(cfg.flight_backend)
     video_cls = resolve_video_source_cls(cfg.frame_backend)
+    resolve_depth_source_cls(cfg.depth_backend)   # SENSE-IR: unknown -> loud here
     for d in cfg.drones:
         for phase_name in d.phases:
             resolve_phase(phase_name)  # ConfigError lists available phases
@@ -433,6 +442,13 @@ def _build_guards(cfg: FinalsConfig, drone: DroneConfig) -> List[Guard]:
             c2_origin_m=cfg.arena.c2_origin_m,
             sector_center_deg=center_deg,
             sector_half_width_deg=half_width_deg))
+    if g.proximity_enable:
+        # SENSE-IR: the HULA 4-directional IR obstacle guard (advisory->LAND
+        # ladder). Built only when enabled; the reading reaches it via the
+        # agent's proximity_fn (the synthetic feed in _build_agents — the LIVE
+        # pyhulax IR read is an ONSITE gate, pyhulax exposes no IR getter today).
+        guards.append(ProximityGuard(warn_cm=g.proximity_warn_cm,
+                                     land_cm=g.proximity_land_cm))
     if _frames_wired(cfg):
         # S7: built ONLY when the perception wiring also feeds this drone's
         # agent a frame timestamp (frame_ts_fn -> GuardContext.last_frame_ts
@@ -592,8 +608,27 @@ async def _amain(cfg: FinalsConfig, agents: List[DroneAgent],
     Orchestrator.run (with the S5 abort listener armed around it), on ONE
     event loop. Perception teardown always runs (finally), in dependency
     order: stop sampling -> stop sources (the detector pool is stopped by
-    _run_mission, which owns it)."""
+    _run_mission, which owns it).
+
+    SENSE-IR: the OPTIONAL per-drone DepthSource (depth_backend != "none") is
+    lifecycle-managed here alongside the RGB sources — started before the
+    mission, stopped in finally — but is NEVER a hard dependency: with
+    depth_backend "none" (the default) `depth_sources` is empty and this whole
+    path is a no-op (the monocular mission is byte-for-byte unchanged). Depth is
+    not yet a perception CONSUMER (the swarm path is monocular); the seam exists
+    so a future drift-correct/obstacle consumer plugs in without re-touching the
+    lifecycle. A depth source that fails to start raises SensorTimeout, like the
+    RGB source — loud, before anything arms."""
     sources = [s for s, _p in perceptions]
+    # Optional depth sources — one per drone with perception wired (depth is a
+    # per-drone sensor, parallel to the RGB source). Empty unless depth_backend
+    # is set; absence = clean no-op.
+    depth_sources = []
+    if cfg.depth_backend != "none" and perceptions:
+        for source, _perception in perceptions:
+            ds = _build_depth(cfg, source.source_id)
+            if ds is not None:
+                depth_sources.append(ds)
     # bench/real: preflight (S10) owns connect (P4) AND video start (P6) — it
     # leaves adapters CONNECTED and sources STARTED for the orchestrator, so the
     # generic source.start loop below MUST skip them (PyhulaxVideoSource.start
@@ -632,6 +667,10 @@ async def _amain(cfg: FinalsConfig, agents: List[DroneAgent],
                 for source, perception in perceptions:
                     source.start(timeout_s=10.0)   # SensorTimeout -> loud abort
                                                    # BEFORE anything arms
+                for ds in depth_sources:           # SENSE-IR optional depth
+                    ds.start(timeout_s=10.0)       # SensorTimeout -> loud abort
+                    events.log("mission", "depth_source_started",
+                               drone=ds.source_id, backend=cfg.depth_backend)
             for source, perception in perceptions:
                 task = asyncio.get_running_loop().create_task(
                     perception.run(deadline=p_deadline, stop_event=p_stop),
@@ -652,6 +691,59 @@ async def _amain(cfg: FinalsConfig, agents: List[DroneAgent],
                     task.cancel()
         for source, _perception in perceptions:
             source.stop()                      # idempotent, never raises
+        for ds in depth_sources:
+            ds.stop()                          # SENSE-IR: idempotent, never raises
+
+
+def resolve_depth_source_cls(backend: str) -> Optional[Type]:
+    """depth_backend name -> DepthSource class (None for 'none'). ConfigError on
+    unknown. The OPTIONAL SENSE-IR seam: 'none' (the default monocular swarm
+    path) wires NO depth at all; 'fake' wires the dependency-free
+    FakeDepthSource. A real 'realsense' backend is out of scope (reference only
+    — see finals/vision/depth.py)."""
+    if backend == "none":
+        return None
+    if backend == "fake":
+        from finals.vision.depth import FakeDepthSource
+        return FakeDepthSource
+    raise ConfigError(
+        f"unknown depth_backend {backend!r} — one of: none, fake "
+        f"(realsense is reference-only, not wired — the swarm path is "
+        f"monocular; see finals/vision/depth.py)")
+
+
+def _build_depth(cfg: FinalsConfig, drone_id: str):
+    """The OPTIONAL per-drone DepthSource (SENSE-IR), or None when
+    depth_backend is 'none' (the degrade-absent default) — so the monocular
+    mission is byte-for-byte unchanged. Built behind the perception wiring; the
+    source is lifecycle-managed (start/stop) alongside the RGB sources but is
+    NEVER a hard dependency — perception works identically with it None. The
+    real RealSense backend is out of scope (reference only)."""
+    depth_cls = resolve_depth_source_cls(cfg.depth_backend)
+    if depth_cls is None:
+        return None
+    # Only "fake" reaches here today (resolve_depth_source_cls guards the rest).
+    return depth_cls(drone_id)
+
+
+def _build_proximity_fn(cfg: FinalsConfig, drone: DroneConfig, *, api=None):
+    """The per-drone IR proximity_fn for the agent (SENSE-IR), or None when
+    the ProximityGuard is OFF (proximity_enable False) — so a non-IR mission is
+    byte-for-byte unchanged.
+
+    LIVE-WIRE = ONSITE GATE: pyhulax exposes no IR getter today (see
+    finals/flight/proximity.py / pyhulax_adapter.py), so the live
+    PyhulaxProximitySensor stays a stub. We wire SyntheticProximitySensor with
+    its DEFAULT (reading=None): the guard gets an honest 'no live IR reading'
+    every tick and SKIPS — never a fabricated clear lane. At the hardware
+    window, swap to PyhulaxProximitySensor(drone.id, api) and the guard goes
+    live with NO other change. Returns the sensor's bound read method (the
+    agent's proximity_fn injectable)."""
+    if not cfg.guards.proximity_enable:
+        return None
+    from finals.flight.proximity import SyntheticProximitySensor
+    sensor = SyntheticProximitySensor(drone.id)   # reading=None -> guard SKIPS
+    return sensor.read
 
 
 def _build_agents(cfg: FinalsConfig, events: EventLog, bus: SightingBus,
@@ -692,7 +784,8 @@ def _build_agents(cfg: FinalsConfig, events: EventLog, bus: SightingBus,
                            guards=_build_guards(cfg, d),
                            safety=safety,
                            frame_ts_fn=frame_ts_fn,
-                           on_degrade=on_degrade)
+                           on_degrade=on_degrade,
+                           proximity_fn=_build_proximity_fn(cfg, d, api=api))
         if perception is not None:
             # Wire-once AFTER the agent exists (the perception<->agent
             # reference cycle): enrichment reads the agent's cached per-tick

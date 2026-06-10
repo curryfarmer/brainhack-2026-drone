@@ -17,7 +17,7 @@ Surface (S5, implemented):
 - Concrete guards (every threshold is a config/constructor param — the
   onsite rule is tune config, not code): TelemetryWatchdog, VideoWatchdog,
   BatteryGuard, MissionClockGuard, LoopOverrunGuard, GeofenceLite,
-  PhaseTimeout.
+  SectorGuard, ProximityGuard, PhaseTimeout.
 - SafetyController: the LANDING SLOT (at most ONE drone in a NORMAL landing
   at a time — serialized descent through the altitude bands is half the
   collision guarantee) + the bounded land-retry ladder (default 1 Hz for
@@ -109,7 +109,7 @@ from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Callable, Dict, List, Optional, Sequence,
-                    TextIO)
+                    TextIO, Tuple)
 
 from finals.errors import FlightError, FlightTimeout
 from finals.events import EventLog, EventLogError
@@ -142,6 +142,31 @@ class Trip:
 
 
 @dataclass(frozen=True)
+class ProximityReading:
+    """One snapshot of the HULA 4-directional IR obstacle-avoidance sensor
+    (the CONFIRMED short-range collision sense, ~30-50 cm). Each direction is
+    the clear-distance in CENTIMETRES, or None = CLEAR (no return inside the
+    sensing window) — None is NOT 'missing', it is 'nothing close that way'.
+    A reading whose four directions are all None means all-clear (the guard
+    re-arms); gctx.proximity itself being None means NO feed (the guard skips).
+
+    Stamped with ts (the agent clock) so a future staleness guard can reject a
+    frozen feed; ProximityGuard itself reads only the ranges."""
+
+    ts: float
+    front_cm: Optional[float] = None
+    back_cm: Optional[float] = None
+    left_cm: Optional[float] = None
+    right_cm: Optional[float] = None
+
+    def items_cm(self) -> "Tuple[Tuple[str, Optional[float]], ...]":
+        """The four directions as (label, range_cm) pairs — the stable iteration
+        order the guard walks to find the closest valid return."""
+        return (("front", self.front_cm), ("back", self.back_cm),
+                ("left", self.left_cm), ("right", self.right_cm))
+
+
+@dataclass(frozen=True)
 class GuardContext:
     """Read-only inputs for one guard evaluation. Per-drone fields are None
     at the swarm level and vice versa — guards skip on missing inputs."""
@@ -153,6 +178,7 @@ class GuardContext:
     phase_name: Optional[str] = None             # per-drone only
     phase_elapsed_s: Optional[float] = None      # None until phase entered
     last_frame_ts: Optional[float] = None        # per-drone; None = no frame yet
+    proximity: Optional["ProximityReading"] = None  # per-drone IR; None = no feed
     tick_latency_s: Optional[float] = None       # swarm-level only: the
                                                  # BEAT-TO-BEAT supervision gap
                                                  # (None on the first beat) —
@@ -558,6 +584,106 @@ class SectorGuard(Guard):
             f"TIME slots + open-loop routes are the real separation); the "
             f"drone may have drifted toward a neighbour's space — check it "
             f"visually / the route tuning")
+
+
+class ProximityGuard(Guard):
+    """The HULA 4-directional IR obstacle-avoidance sensor -> the LAND ladder
+    (SENSE-IR). The CONFIRMED short-range collision sense (~30-50 cm); the
+    real deliverable of this session.
+
+    Ladder (acts on the CLOSEST of the four directions each tick):
+      - any direction <= land_cm  -> LAND_THIS (clean descent — an obstacle is
+        inside the hard stop; keep flying and you hit it). The strongest trip
+        wins, so a co-fired ADVISORY is irrelevant.
+      - else any direction <= warn_cm -> ADVISORY (an obstacle is closing but
+        not yet critical; event only, flight UNAFFECTED). Edge-triggered: ONE
+        advisory per approach episode, re-arms once every direction is back
+        clear of warn_cm — so a slow drift toward a wall does not spam the log.
+      - else (all directions clear / None) -> quiet.
+
+    WHY a real LAND, not advisory like GeofenceLite/SectorGuard: this is a
+    MEASURED short-range reading, not the drifting dead-reckon estimate — an IR
+    return at 35 cm is a real wall, and landing is the safe response (the drone
+    cannot be trusted to steer around it open-loop under the ~1.1 m ceiling).
+    That is the same reasoning that makes BatteryGuard's floor a real LAND.
+
+    Skips silently (returns None) when there is NO proximity reading
+    (gctx.proximity is None) — the IR feed is an OPTIONAL degrade-absent seam
+    (a drone with no IR wired, or before the first reading): the guard never
+    fabricates a range, exactly like every other guard on a missing input.
+    A per-direction None means that direction is CLEAR (no return in the
+    sensing window), NOT missing — clear directions are ignored.
+
+    enabled=False -> the guard is a no-op (main builds it only when
+    guards.proximity_enable; this flag is a second belt so a constructed-but-
+    disabled instance can never trip)."""
+
+    def __init__(self, warn_cm: float, land_cm: float, *,
+                 enabled: bool = True):
+        self._warn_cm = _check_threshold("ProximityGuard", "warn_cm", warn_cm)
+        self._land_cm = _check_threshold("ProximityGuard", "land_cm", land_cm)
+        if self._land_cm >= self._warn_cm:
+            raise ValueError(
+                f"ProximityGuard: need land_cm < warn_cm (the LAND stop must be "
+                f"CLOSER than the ADVISORY warning — the ladder goes "
+                f"clear -> warn -> land as an obstacle approaches), got "
+                f"warn_cm={warn_cm!r} land_cm={land_cm!r} — check "
+                f"guards.proximity_warn_cm / proximity_land_cm")
+        self._enabled = bool(enabled)
+        self._warned = False                     # edge latch (advisory episode)
+
+    def check(self, gctx: GuardContext) -> Optional[Trip]:
+        if not self._enabled:
+            return None
+        reading = gctx.proximity
+        if reading is None:
+            return None                          # no IR feed -> skip, no guess
+        # The closest VALID return across the four directions. A None
+        # direction = clear (ignored); a negative/non-finite range is a sensor
+        # bug we reject loudly rather than read as "right on top of us".
+        closest_dir: Optional[str] = None
+        closest_cm: Optional[float] = None
+        for label, value in reading.items_cm():
+            if value is None:
+                continue                         # that direction is clear
+            if (not isinstance(value, (int, float)) or isinstance(value, bool)
+                    or not math.isfinite(value) or value < 0):
+                return self._trip(
+                    TripAction.LAND_THIS,
+                    f"{gctx.drone_id}: IR proximity {label} reads {value!r} cm "
+                    f"— not a valid distance (must be finite and >= 0); a bad "
+                    f"reading is treated as a hard stop (LAND_THIS) because a "
+                    f"blind avoidance sensor must fail SAFE — check the IR "
+                    f"wiring / the pyhulax avoidance feed")
+            if closest_cm is None or value < closest_cm:
+                closest_cm = value
+                closest_dir = label
+        if closest_cm is None:
+            self._warned = False                 # all clear re-arms the advisory
+            return None
+        if closest_cm <= self._land_cm:
+            # The hard stop wins outright; the advisory latch does not gate it.
+            return self._trip(
+                TripAction.LAND_THIS,
+                f"{gctx.drone_id}: IR proximity {closest_dir} obstacle at "
+                f"{closest_cm:.0f} cm is at/under the {self._land_cm:.0f} cm "
+                f"hard-stop — landing this drone cleanly NOW before contact "
+                f"(open-loop flight cannot steer around it under the low "
+                f"ceiling) — check the obstacle / clear the lane")
+        if closest_cm <= self._warn_cm:
+            if self._warned:
+                return None                      # one advisory per approach
+            self._warned = True
+            return self._trip(
+                TripAction.ADVISORY,
+                f"{gctx.drone_id}: IR proximity {closest_dir} obstacle at "
+                f"{closest_cm:.0f} cm is at/under the {self._warn_cm:.0f} cm "
+                f"warning (hard-stop {self._land_cm:.0f} cm) — ADVISORY ONLY, "
+                f"flight unaffected; an obstacle is closing — check the lane / "
+                f"the route tuning")
+        # closest_cm > warn_cm: everything is back clear of the warning band.
+        self._warned = False
+        return None
 
 
 class PhaseTimeout(Guard):
