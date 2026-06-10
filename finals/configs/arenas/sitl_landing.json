@@ -1,0 +1,27 @@
+{
+  "_comment": "NAV-9 SITL LANDING arena — the finals (north_m, east_m) mirror of sim/worlds/landing_px4.sdf. Authored DIRECTLY in the compass/gz frame so NO discord-coord rotation is needed: arena north = gz +Y (NORTH), arena east = gz +X (EAST), and a gz pose (x=E, y=N) is arena (north=y, east=x). c2_origin_m is gz (0,0) = where the drones launch (PX4 spawns them within ~1 m of it; the open-loop transit plans from this single C2 origin and the visual land_on_pad servo absorbs each drone's spawn offset). c2_heading_deg 0 = arena north aligned to true/compass north (the drone's magnetometer 0). bounds_m generously contain C2 + all pads + the crate. The ONE crate keep_out mirrors the gz crate footprint (gz E in [-0.5,0.5], N in [1.5,2.5]); inflation_m 0.5 (config) grows it so alpha's straight C2->pad_101 line is blocked and the planner must detour. Pads: pad_101 due north behind the crate (alpha), pad_100 NW (bravo), pad_102 NE (charlie); radius_m 0.25 = a ~0.5 m hoop. valid_marker_ids in sitl{1,3}_landing.json match these ArUco ids (100/101/102). RE-MEASURE + overwrite onsite at gate F (tune config, not code).",
+  "bounds_m": [-1.0, -3.0, 6.0, 3.0],
+  "c2_origin_m": [0.0, 0.0],
+  "c2_heading_deg": 0.0,
+  "keep_out": [
+    {
+      "_comment": "crate: gz box centre (E=0, N=2), 1.0x1.0 footprint -> arena ring north 1.5..2.5, east -0.5..0.5.",
+      "id": "crate",
+      "polygon_m": [[1.5, -0.5], [2.5, -0.5], [2.5, 0.5], [1.5, 0.5]]
+    }
+  ],
+  "pads": [
+    {
+      "_comment": "pad_101 = gz(0, 4.0). alpha's target; directly behind the crate (forces the detour).",
+      "id": "pad_101", "center_m": [4.0, 0.0], "radius_m": 0.25, "valid": true
+    },
+    {
+      "_comment": "pad_100 = gz(-1.5, 3.5). bravo's target (NW).",
+      "id": "pad_100", "center_m": [3.5, -1.5], "radius_m": 0.25, "valid": true
+    },
+    {
+      "_comment": "pad_102 = gz(1.5, 3.5). charlie's target (NE).",
+      "id": "pad_102", "center_m": [3.5, 1.5], "radius_m": 0.25, "valid": true
+    }
+  ]
+}

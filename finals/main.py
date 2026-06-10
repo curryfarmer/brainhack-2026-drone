@@ -69,7 +69,8 @@ from finals.events import (EventLog, EventLogError, create_run_dir,
                            install_crash_hooks)
 from finals.guards import (AbortListener, BatteryGuard, GeofenceLite, Guard,
                            LoopOverrunGuard, MissionClockGuard, PhaseTimeout,
-                           SafetyController, TelemetryWatchdog, VideoWatchdog)
+                           SafetyController, SectorGuard, TelemetryWatchdog,
+                           VideoWatchdog)
 from finals.mission.agent import DroneAgent
 from finals.mission.orchestrator import Orchestrator
 from finals.mission.phase import MissionPhase
@@ -344,6 +345,21 @@ def _build_guards(cfg: FinalsConfig, drone: DroneConfig) -> List[Guard]:
     if g.geofence_radius_m is not None:
         guards.append(GeofenceLite(radius_m=g.geofence_radius_m,
                                    alt_max_m=g.geofence_alt_m))
+    if drone.sector_deg is not None:
+        # NAV-8 advisory per-drone sector keep-in (SPACE half of the
+        # deconfliction). Needs the C2 origin from the arena; a sector_deg
+        # without an arena is a wiring error (ConfigError, fail loud — the
+        # operator must set arena_name). ADVISORY ONLY (never a control input).
+        if cfg.arena is None:
+            raise ConfigError(
+                f"drone {drone.id!r}: sector_deg is set but cfg.arena is None "
+                f"— the advisory SectorGuard needs the C2 origin "
+                f"(arena.c2_origin_m); set arena_name in the profile config")
+        center_deg, half_width_deg = drone.sector_deg
+        guards.append(SectorGuard(
+            c2_origin_m=cfg.arena.c2_origin_m,
+            sector_center_deg=center_deg,
+            sector_half_width_deg=half_width_deg))
     if _frames_wired(cfg):
         # S7: built ONLY when the perception wiring also feeds this drone's
         # agent a frame timestamp (frame_ts_fn -> GuardContext.last_frame_ts
@@ -630,7 +646,8 @@ def _build_safety(cfg: FinalsConfig, events: EventLog) -> SafetyController:
         land_retry_period_s=cfg.guards.land_retry_period_s,
         land_retry_window_s=cfg.guards.land_retry_window_s,
         command_timeout_s=cfg.command_timeout_s,
-        slot_wait_s=cfg.guards.slot_wait_s)
+        slot_wait_s=cfg.guards.slot_wait_s,
+        launch_slot_wait_s=cfg.guards.launch_slot_wait_s)
 
 
 def _run_mission(cfg: FinalsConfig) -> int:

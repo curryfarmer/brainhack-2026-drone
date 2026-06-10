@@ -67,7 +67,12 @@ QR_MODULE_PX = 24           # crisp upscale: px per QR module before the quiet b
 def make_aruco_png(marker_id: int) -> np.ndarray:
     """DICT_6X6_250 marker at >=800 px with a >=1-module white quiet zone (BGR)."""
     dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
-    img = cv2.aruco.generateImageMarker(dictionary, marker_id, ARUCO_SRC_PX, borderBits=1)
+    # generateImageMarker is the 4.7+ name; the VM ships cv2 4.5.4 where the SAME
+    # function is the legacy drawMarker (identical signature: dict,id,sidePixels,
+    # borderBits). Fall back so generation works on both (the produced DICT_6X6_250
+    # marker is byte-identical, so decode is unaffected).
+    _gen = getattr(cv2.aruco, "generateImageMarker", None) or cv2.aruco.drawMarker
+    img = _gen(dictionary, marker_id, ARUCO_SRC_PX, borderBits=1)
     # DICT_6X6 markers are 8 modules wide (6 data + 1 black border each side).
     module_px = ARUCO_SRC_PX // 8
     quiet = ARUCO_QUIET_MODULES * module_px

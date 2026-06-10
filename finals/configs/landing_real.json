@@ -1,0 +1,65 @@
+{
+  "_comment": "Challenge-2A LANDING mission (NAV-8), profile 'real' (3 HULA drones via pyhulax). Each drone: takeoff (HOLD airborne) -> navigate to its OWN valid pad avoiding the inflated crates -> land_on_pad (visual servo onto the green/valid ArUco pad). DECONFLICTION = TIME + SPACE, NEVER altitude bands: the ~1.1 m ceiling + no-overfly rule make altitude-band separation ILLEGAL. (1) TIME: the SafetyController launch-corridor slot serializes takeoff (one drone in the C2 zone at a time) and the landing slot serializes descent (one drone over the pads at a time) — both bounded waits (launch_slot_wait_s / slot_wait_s), never infinite. (2) SPACE: each drone gets a distinct advisory sector_deg wedge from C2 toward its pad (ADVISORY-only SectorGuard over the dead-reckoned estimate; never a control input). Bands are deliberately ABSENT — the bench/real multi-drone separation guard accepts sector_deg on every drone INSTEAD of distinct bands (config.py). arena_name 'sample' supplies the keep-outs + the C2 launch frame the planner needs; it is the SAMPLE map (test/dry-run geometry) — re-measure + overwrite finals/configs/arenas/sample.json at gate F (tune config, not code). valid_marker_ids per drone are PLACEHOLDER ArUco ids — set them to the briefing's real green-pad markers onsite (gate F). command_timeout_s 30 / mission_budget_s 600 are sized for 3 SERIALIZED takeoffs + transits + SERIALIZED visual landings under real-link latency; the budget is a MAX (the orchestrator exits on all-DONE).",
+  "profile": "real",
+  "flight_backend": "pyhulax",
+  "frame_backend": "pyhulax",
+  "command_timeout_s": 30,
+  "mission_budget_s": 600,
+  "marker_backend": "aruco",
+  "arena_name": "sample",
+  "detector": { "backend": "none" },
+  "guards": {
+    "_comment": "launch_slot_wait_s / slot_wait_s: the bounded staggered-launch + serialized-landing corridor waits — generous (each drone may queue behind the other two's takeoff/descent) but FINITE (a stuck corridor raises FlightTimeout, never hangs). landing_reserve_s 60: MissionClockGuard lands all 60 s before the budget so nobody is still airborne at expiry. geofence_radius_m: advisory keep-in over the arena (dead-reckoned, never acted on).",
+    "launch_slot_wait_s": 180,
+    "slot_wait_s": 180,
+    "landing_reserve_s": 60,
+    "geofence_radius_m": 14.0
+  },
+  "drones": [
+    {
+      "_comment": "alpha -> pad_north (due north of C2, bearing ~0 deg). Sector centred on its pad bearing, +/-30 deg wedge.",
+      "id": "alpha", "plane_id": 1, "led_rgb": [255, 0, 0],
+      "phases": ["takeoff", "navigate", "land_on_pad"],
+      "sector_deg": [0.0, 30.0],
+      "zone": {
+        "takeoff": { "height_cm": 100 },
+        "navigate": { "pad_id": "pad_north", "inflation_m": 0.5, "total_budget_s": 120 },
+        "land_on_pad": {
+          "_comment_marker": "PLACEHOLDER green-pad ArUco id for pad_north — set to the real briefing marker at gate F.",
+          "valid_marker_ids": [10],
+          "commit_alt_m": 0.5, "total_budget_s": 90, "acquire_timeout_s": 20
+        }
+      }
+    },
+    {
+      "_comment": "bravo -> pad_se (bearing ~-69 deg from C2). Wedge centred there.",
+      "id": "bravo", "plane_id": 2, "led_rgb": [0, 255, 0],
+      "phases": ["takeoff", "navigate", "land_on_pad"],
+      "sector_deg": [-69.0, 30.0],
+      "zone": {
+        "takeoff": { "height_cm": 100 },
+        "navigate": { "pad_id": "pad_se", "inflation_m": 0.5, "total_budget_s": 120 },
+        "land_on_pad": {
+          "_comment_marker": "PLACEHOLDER green-pad ArUco id for pad_se — set at gate F.",
+          "valid_marker_ids": [11],
+          "commit_alt_m": 0.5, "total_budget_s": 90, "acquire_timeout_s": 20
+        }
+      }
+    },
+    {
+      "_comment": "charlie -> pad_mid (bearing ~10 deg from C2). Wedge centred there.",
+      "id": "charlie", "plane_id": 3, "led_rgb": [0, 0, 255],
+      "phases": ["takeoff", "navigate", "land_on_pad"],
+      "sector_deg": [10.0, 30.0],
+      "zone": {
+        "takeoff": { "height_cm": 100 },
+        "navigate": { "pad_id": "pad_mid", "inflation_m": 0.5, "total_budget_s": 120 },
+        "land_on_pad": {
+          "_comment_marker": "PLACEHOLDER green-pad ArUco id for pad_mid — set at gate F.",
+          "valid_marker_ids": [12],
+          "commit_alt_m": 0.5, "total_budget_s": 90, "acquire_timeout_s": 20
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,119 @@
+<?xml version="1.0"?>
+<!-- NAV-9 LANDING world + OVERVIEW CAMERA, for the watchable third-person footage.
+
+     This is sim/worlds/landing_px4.sdf VERBATIM (same flight-sensor systems, ENU
+     origin, ground, crate, 3 pads) PLUS one static oblique "spectator" camera
+     that frames the whole arena, so a recorder can save a third-person mp4 of the
+     drones lifting off, detouring around the crate, and visual-landing on the
+     hoops. Kept a SEPARATE world (not folded into landing_px4) because every extra
+     camera loads the single-threaded gz render thread (SIM-3/5): this world is run
+     ONE-DRONE only (sim/run_landing.sh viewtest) so the total is 2 cameras
+     (1 onboard + 1 overview) and the lockstep stays healthy. The headless L1/L2
+     numeric gates use landing_px4.sdf (no spectator cam).
+
+     World NAME is "landing_view" -> the overview topic is
+     /world/landing_view/model/overview_cam/link/link/sensor/camera/image
+     and the onboard topic is
+     /world/landing_view/model/x500_mono_cam_640_0/link/camera_link/sensor/camera/image. -->
+<sdf version="1.9">
+  <world name="landing_view">
+
+    <plugin filename="gz-sim-physics-system"           name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system"     name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system"           name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-imu-system"               name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-air-pressure-system"      name="gz::sim::systems::AirPressure"/>
+    <plugin filename="gz-sim-air-speed-system"         name="gz::sim::systems::AirSpeed"/>
+    <plugin filename="gz-sim-altimeter-system"         name="gz::sim::systems::Altimeter"/>
+    <plugin filename="gz-sim-magnetometer-system"      name="gz::sim::systems::Magnetometer"/>
+    <plugin filename="gz-sim-navsat-system"            name="gz::sim::systems::NavSat"/>
+    <plugin filename="gz-sim-forcetorque-system"       name="gz::sim::systems::ForceTorque"/>
+    <plugin filename="gz-sim-contact-system"           name="gz::sim::systems::Contact"/>
+
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>47.397971057728974</latitude_deg>
+      <longitude_deg>8.546163739800146</longitude_deg>
+      <elevation>0</elevation>
+    </spherical_coordinates>
+
+    <scene>
+      <ambient>0.5 0.5 0.5 1</ambient>
+      <background>0.7 0.7 0.75 1</background>
+      <grid>false</grid>
+    </scene>
+
+    <light type="directional" name="sun">
+      <cast_shadows>false</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>1 1 1 1</diffuse>
+      <specular>0.3 0.3 0.3 1</specular>
+      <direction>0.2 0.2 -1.0</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="col">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+        </collision>
+        <visual name="vis">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+          <material><diffuse>0.5 0.5 0.5 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="crate">
+      <static>true</static>
+      <pose>0 2 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="col">
+          <geometry><box><size>1.0 1.0 1.5</size></box></geometry>
+        </collision>
+        <visual name="vis">
+          <geometry><box><size>1.0 1.0 1.5</size></box></geometry>
+          <material>
+            <ambient>0.55 0.27 0.07 1</ambient>
+            <diffuse>0.72 0.40 0.12 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <include><uri>model://pad_101</uri><name>pad_101</name><pose>0 4.0 0 0 0 0</pose></include>
+    <include><uri>model://pad_100</uri><name>pad_100</name><pose>-1.5 3.5 0 0 0 0</pose></include>
+    <include><uri>model://pad_102</uri><name>pad_102</name><pose>1.5 3.5 0 0 0 0</pose></include>
+
+    <!-- OVERVIEW spectator camera: static, south of C2 (gz N=-3) and elevated 3.5 m,
+         pitched 26 deg down and yawed +90 deg so its +X optical axis points NORTH
+         and slightly down over the arena (same +X-optical-axis convention as the
+         drone cam: pose r p y, axis = (cos y cos p, sin y cos p, -sin p) ->
+         (0, 0.90, -0.44)). Frames lift-off at C2 (foreground), the crate detour
+         (mid), and the pad landings (far). HFOV 1.3 rad (~74 deg) sees the whole
+         arena; 1280x720 @ 10 Hz for smooth footage. update_rate is the render-load
+         knob — drop it (or the resolution) if the 2-cam lockstep dips. -->
+    <model name="overview_cam">
+      <static>true</static>
+      <pose>0 -3 3.5 0 0.454 1.5707</pose>
+      <link name="link">
+        <sensor name="camera" type="camera">
+          <camera>
+            <horizontal_fov>1.3</horizontal_fov>
+            <image><width>1280</width><height>720</height><format>R8G8B8</format></image>
+            <clip><near>0.1</near><far>100.0</far></clip>
+          </camera>
+          <always_on>1</always_on>
+          <update_rate>10</update_rate>
+          <visualize>true</visualize>
+        </sensor>
+      </link>
+    </model>
+
+  </world>
+</sdf>

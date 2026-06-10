@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from finals.errors import ConfigError
+from finals.mission.planning.types import ArenaMap
 
 VALID_PROFILES = ("mock", "sitl", "replay", "bench", "real")
 VALID_FRAME_BACKENDS = ("none", "gazebo", "pyhulax", "replay")
@@ -98,6 +99,9 @@ class GuardsConfig:
     land_retry_period_s: float = 1.0        # SafetyController ladder cadence
     land_retry_window_s: float = 30.0       # ladder total -> operator alarm
     slot_wait_s: float = 120.0              # max wait for the landing slot
+    launch_slot_wait_s: float = 120.0       # max wait for the C2 launch
+                                            # corridor slot (NAV-8 staggered
+                                            # launch); bounded, never infinite
 
 
 @dataclass
@@ -108,6 +112,11 @@ class DroneConfig:
     led_rgb: Optional[Tuple[int, int, int]] = None    # identity colour (bench/real)
     altitude_band_m: Optional[float] = None     # swarm vertical separation (1.2/1.7/2.2)
     zone: Dict[str, Any] = field(default_factory=dict)  # per-drone search params (briefing-shaped)
+    # NAV-8 per-drone ADVISORY sector keep-in wedge (SPACE half of the
+    # deconfliction): [center_deg, half_width_deg], a heading range from C2
+    # (deg, CCW+, 0 = +north). ADVISORY ONLY (SectorGuard, never a control
+    # input). Optional; omit -> no sector guard for this drone.
+    sector_deg: Optional[Tuple[float, float]] = None
     # SITL multi-instance endpoints (S6/SIM-1): instance i listens on UDP
     # 14540+i and its mavsdk_server takes gRPC 50051+i. REQUIRED (and
     # distinct) on every drone when a sitl profile has >1 drone; a single
@@ -146,6 +155,12 @@ class FinalsConfig:
     gazebo_video_port: int = 5600               # localhost TCP port the bridge serves frames on
     use_uwb: bool = False
     uwb_serial_port: Optional[str] = None
+    # Challenge-2A landing navigation (S11/NAV-0): the optional arena_name names a
+    # finals/configs/arenas/<name>.json map (obstacles + pads + C2 frame). It is
+    # resolved into `arena` at load time; `arena` is DERIVED, never set in JSON.
+    # NAV-2 hardens the arena validation + ships configs/arenas/sample.json.
+    arena_name: Optional[str] = None
+    arena: Optional[ArenaMap] = None
     guards: GuardsConfig = field(default_factory=GuardsConfig)
 
 
@@ -244,7 +259,8 @@ def _build_drone(raw: Dict[str, Any], index: int) -> DroneConfig:
         raw,
         required=("id", "phases"),
         optional=("plane_id", "led_rgb", "altitude_band_m", "zone",
-                  "sitl_address", "mavsdk_grpc_port", "gazebo_video_port"),
+                  "sitl_address", "mavsdk_grpc_port", "gazebo_video_port",
+                  "sector_deg"),
         where=where,
     )
     phases = data["phases"]
@@ -280,6 +296,21 @@ def _build_drone(raw: Dict[str, Any], index: int) -> DroneConfig:
         raise ConfigError(
             f"{where}.gazebo_video_port must be an int in [1024, 65535] "
             f"(the per-drone gz_camera_bridge TCP port) — got {gz_port!r}")
+    sector = data.get("sector_deg")
+    if sector is not None:
+        if (not isinstance(sector, (list, tuple)) or len(sector) != 2
+                or any(not isinstance(c, (int, float)) or isinstance(c, bool)
+                       or not math.isfinite(c) for c in sector)):
+            raise ConfigError(
+                f"{where}.sector_deg must be [center_deg, half_width_deg] "
+                f"finite numbers (the ADVISORY keep-in wedge from C2, deg, "
+                f"CCW+) — got {sector!r}")
+        if sector[1] < 0:
+            raise ConfigError(
+                f"{where}.sector_deg half_width_deg must be >= 0 (a negative "
+                f"wedge half-angle would strand the drone outside every "
+                f"sector) — got {sector!r}")
+        sector = (float(sector[0]), float(sector[1]))
     return DroneConfig(
         id=str(data["id"]),
         plane_id=data.get("plane_id"),
@@ -290,6 +321,7 @@ def _build_drone(raw: Dict[str, Any], index: int) -> DroneConfig:
         sitl_address=sitl_address,
         mavsdk_grpc_port=grpc_port,
         gazebo_video_port=gz_port,
+        sector_deg=sector,
     )
 
 
@@ -319,7 +351,7 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
             "sitl_address", "marker_backend", "save_marker_frames",
             "replay_dir", "replay_fps",
             "gazebo_video_host", "gazebo_video_port",
-            "use_uwb", "uwb_serial_port", "guards",
+            "use_uwb", "uwb_serial_port", "arena_name", "guards",
         ),
         where=path,
     )
@@ -339,7 +371,8 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
         optional=("telemetry_stale_s", "battery_warn_pct", "video_stale_s",
                   "landing_reserve_s", "phase_timeout_s", "geofence_radius_m",
                   "geofence_alt_m", "loop_overrun_factor", "loop_overrun_ticks",
-                  "land_retry_period_s", "land_retry_window_s", "slot_wait_s"),
+                  "land_retry_period_s", "land_retry_window_s", "slot_wait_s",
+                  "launch_slot_wait_s"),
         where=f"{path}: guards",
     )
     guards = GuardsConfig(**guards_data)
@@ -362,7 +395,7 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
             "sitl_address", "marker_backend", "save_marker_frames",
             "replay_dir", "replay_fps",
             "gazebo_video_host", "gazebo_video_port",
-            "use_uwb", "uwb_serial_port",
+            "use_uwb", "uwb_serial_port", "arena_name",
         ) if k in top},
     )
 
@@ -495,12 +528,26 @@ def _validate(cfg: FinalsConfig, config_dir: str) -> None:
             raise ConfigError(
                 f"profile 'sitl' multi-drone mavsdk_grpc_port values must be "
                 f"DISTINCT (one mavsdk_server per drone) — got {ports}")
+        # Same EITHER/OR separation contract as bench/real below: distinct
+        # altitude bands (the swarm vertical-separation default, e.g. SIM-5's
+        # sitl3_vision.json 1.2/1.7/2.2) OR a sector_deg on EVERY drone (the
+        # NAV-8 TIME+SPACE model the ~1.1 m-ceiling LANDING mission flies — and
+        # rehearses in SITL via sitl3_landing.json — where altitude bands are
+        # illegal). A multi-drone SITL flight declaring NEITHER is refused
+        # (silent no-separation is the bug class this guard prevents).
         bands = [d.altitude_band_m for d in cfg.drones]
-        if None in bands or len(set(bands)) != len(bands):
+        sectors_all = all(d.sector_deg is not None for d in cfg.drones)
+        bands_distinct = None not in bands and len(set(bands)) == len(bands)
+        if not bands_distinct and not sectors_all:
+            missing_sectors = [d.id for d in cfg.drones
+                               if d.sector_deg is None]
             raise ConfigError(
-                f"profile 'sitl' with {len(cfg.drones)} drones requires a "
-                f"DISTINCT altitude_band_m per drone (vertical separation is "
-                f"the primary collision guarantee) — got {bands}")
+                f"profile 'sitl' with {len(cfg.drones)} drones needs a "
+                f"multi-drone SEPARATION mechanism: EITHER a DISTINCT "
+                f"altitude_band_m per drone (vertical separation; got bands "
+                f"{bands}) OR a sector_deg on EVERY drone (the NAV-8 TIME+SPACE "
+                f"model for the landing mission, where altitude bands are "
+                f"illegal) — missing sector_deg on: {missing_sectors}")
 
     if cfg.profile in ("bench", "real"):
         missing = [d.id for d in cfg.drones if d.plane_id is None]
@@ -509,13 +556,31 @@ def _validate(cfg: FinalsConfig, config_dir: str) -> None:
                 f"profile {cfg.profile!r} needs plane_id (Dola discovery key) "
                 f"for every drone — missing on: {missing}"
             )
-        bands = [d.altitude_band_m for d in cfg.drones]
-        if len(cfg.drones) > 1 and (None in bands or len(set(bands)) != len(bands)):
-            raise ConfigError(
-                f"profile {cfg.profile!r} with {len(cfg.drones)} drones requires "
-                f"a DISTINCT altitude_band_m per drone (vertical separation is "
-                f"the primary collision guarantee) — got {bands}"
-            )
+        # Multi-drone separation. The DEFAULT collision guarantee is the swarm
+        # altitude band (distinct per drone). BUT Challenge-2A flies under a
+        # ~1.1 m ceiling with a no-overfly rule, which KILLS altitude bands —
+        # so the LANDING mission separates by TIME (the SafetyController launch
+        # + landing corridor slots, NAV-8) + SPACE (per-drone advisory
+        # sectors). A config opts into that model by declaring sector_deg on
+        # EVERY drone; then bands are NOT required (and need not be distinct).
+        # Either mechanism is accepted; a config that declares NEITHER on a
+        # multi-drone flight is refused (silent no-separation is the bug class
+        # this guard exists to prevent).
+        if len(cfg.drones) > 1:
+            bands = [d.altitude_band_m for d in cfg.drones]
+            sectors_all = all(d.sector_deg is not None for d in cfg.drones)
+            bands_distinct = None not in bands and len(set(bands)) == len(bands)
+            if not bands_distinct and not sectors_all:
+                missing_sectors = [d.id for d in cfg.drones
+                                   if d.sector_deg is None]
+                raise ConfigError(
+                    f"profile {cfg.profile!r} with {len(cfg.drones)} drones "
+                    f"needs a multi-drone SEPARATION mechanism: EITHER a "
+                    f"DISTINCT altitude_band_m per drone (the swarm vertical "
+                    f"separation; got bands {bands}) OR a sector_deg on EVERY "
+                    f"drone (the NAV-8 TIME+SPACE model for the ~1.1 m-ceiling "
+                    f"landing mission, where altitude bands are illegal) — "
+                    f"missing sector_deg on: {missing_sectors}")
 
     for name, value in (("tick_hz", cfg.tick_hz),
                         ("mission_budget_s", cfg.mission_budget_s),
@@ -577,6 +642,137 @@ def _validate(cfg: FinalsConfig, config_dir: str) -> None:
 
     _validate_detector(cfg.detector, config_dir)
     _validate_guards(cfg)
+    _resolve_arena(cfg, config_dir)
+    # AFTER the arena is resolved (cfg.arena populated): cross-drone landing-pad
+    # target guard (NAV-8). When a drone's navigate phase names a pad_id, that
+    # pad is its scored landing target. Two drones on ONE pad, a drone aimed at a
+    # RED (valid=false) decoy, or more pad-navigating drones than the arena has
+    # VALID pads are all guaranteed mission/score failures the per-drone build
+    # (Navigate.from_config) is structurally blind to — it sees one drone + the
+    # global cfg and only checks the pad EXISTS. We cross-check the whole drone
+    # list HERE, on the ground, loudly (the weights-guard philosophy). Drones
+    # whose goal is an explicit goal_ne_m coord (NOT a pad_id) are EXEMPT from the
+    # distinct/valid checks (a coord cannot be matched against a pad) but still
+    # count toward the (c) drone-vs-valid-pads tally.
+    _validate_pad_targets(cfg)
+
+
+def _navigate_pad_id(drone: "DroneConfig") -> Optional[str]:
+    """The pad_id a drone's navigate phase targets, or None when the drone has
+    no navigate phase OR its navigate goal is an explicit goal_ne_m coord (not a
+    pad). Only a present navigate phase + a present pad_id counts (the guard
+    enforces ONLY when both are actually there — no silent skip otherwise)."""
+    if "navigate" not in drone.phases:
+        return None
+    nav = drone.zone.get("navigate")
+    if not isinstance(nav, dict):
+        return None
+    pad_id = nav.get("pad_id")
+    # A non-string pad_id (or a missing one) is not a pad target HERE — the
+    # per-phase Navigate.from_config validates the pad_id's shape/existence; this
+    # cross-drone guard only reasons about real pad-id strings.
+    return pad_id if isinstance(pad_id, str) and pad_id else None
+
+
+def _validate_pad_targets(cfg: FinalsConfig) -> None:
+    """Cross-drone landing-pad target guard (NAV-8). Refuses LOUD when:
+      (a) two drones target the SAME pad_id (they cannot both score one pad);
+      (b) a drone's navigate pad_id names a pad with valid==False (a red pad is
+          never a scored landing target — land_on_pad would never acquire it);
+      (c) the arena has FEWER valid pads than the number of drones navigating to
+          a pad (distinct valid targets cannot be satisfied).
+    Drones whose navigate goal is goal_ne_m (a coord, not a pad_id) are EXEMPT
+    from (a)/(b) but still counted toward (c)'s navigating-drone tally. Enforced
+    only when the arena is present (no arena -> navigate refuses at phase-build,
+    a separate guard)."""
+    arena = cfg.arena
+    if arena is None:
+        return
+    # Drones whose navigate goal is a pad_id (the ones (a)/(b) apply to)...
+    pad_targets = [(d.id, _navigate_pad_id(d)) for d in cfg.drones]
+    pad_targets = [(did, pid) for did, pid in pad_targets if pid is not None]
+    # ...and the full count of drones that navigate to ANY goal (pad OR coord),
+    # for the (c) capacity check. A coord-goal drone still consumes a slot.
+    navigating = [d for d in cfg.drones
+                  if "navigate" in d.phases
+                  and isinstance(d.zone.get("navigate"), dict)]
+
+    pads_by_id = {p.id: p for p in arena.pads}
+    valid_pad_ids = {p.id for p in arena.pads if p.valid}
+
+    # (b) red-pad target — a drone aimed at a known invalid (red) pad.
+    for did, pid in pad_targets:
+        pad = pads_by_id.get(pid)
+        if pad is not None and not pad.valid:
+            raise ConfigError(
+                f"navigate pad target invalid: drone {did!r} targets pad "
+                f"{pid!r} but that pad is RED (valid=false) in arena "
+                f"{cfg.arena_name!r} — a red pad is never a scored landing "
+                f"target, so land_on_pad would never acquire it. CHECK: drone "
+                f"{did!r} zone[\"navigate\"][\"pad_id\"] (point it at a GREEN/"
+                f"valid pad: {sorted(valid_pad_ids)}).")
+
+    # (a) duplicate pad target — two drones cannot both land on one pad.
+    seen: Dict[str, str] = {}
+    for did, pid in pad_targets:
+        if pid in seen:
+            raise ConfigError(
+                f"duplicate navigate pad target: drones {seen[pid]!r} and "
+                f"{did!r} both target pad {pid!r} — two drones cannot score one "
+                f"physical pad (they would fight for it / one scores zero). "
+                f"CHECK: give each drone a DISTINCT zone[\"navigate\"]"
+                f"[\"pad_id\"] (valid pads in arena {cfg.arena_name!r}: "
+                f"{sorted(valid_pad_ids)}).")
+        seen[pid] = did
+
+    # (c) capacity — the arena must hold >= one valid pad per navigating drone.
+    if len(valid_pad_ids) < len(navigating):
+        raise ConfigError(
+            f"too few valid landing pads: arena {cfg.arena_name!r} has only "
+            f"{len(valid_pad_ids)} VALID (green) pad(s) {sorted(valid_pad_ids)} "
+            f"but {len(navigating)} drone(s) "
+            f"{[d.id for d in navigating]} navigate to a pad — distinct valid "
+            f"targets cannot be satisfied (some drone would have no green pad to "
+            f"land on). CHECK: add valid pads to the arena or drop a navigate "
+            f"phase.")
+
+
+def _resolve_arena(cfg: FinalsConfig, config_dir: str) -> None:
+    """Load cfg.arena_name -> cfg.arena from a JSON map file (S11/NAV-0). No
+    arena_name -> arena stays None (the convoy configs don't navigate). Resolves
+    <name>.json under the config file's dir (so a profile + its arena travel
+    together), then the repo-root finals/configs/arenas/. Dies HERE on a missing
+    or malformed file — the weights-guard philosophy. NAV-2 hardens the SEMANTIC
+    arena validation (bounds ordering, pads within bounds, unique ids)."""
+    if cfg.arena_name is None:
+        return
+    name = cfg.arena_name
+    if not isinstance(name, str) or not name:
+        raise ConfigError(
+            f"arena_name must be a non-empty string (a map basename under "
+            f"finals/configs/arenas/), got {name!r}")
+    filename = name if name.endswith(".json") else f"{name}.json"
+    candidates = [
+        os.path.join(config_dir, "arenas", filename),
+        os.path.join(config_dir, filename),
+        os.path.join("finals", "configs", "arenas", filename),
+    ]
+    resolved = next((p for p in candidates if os.path.isfile(p)), None)
+    if resolved is None:
+        raise ConfigError(
+            f"arena_name {name!r}: map file not found (tried "
+            f"{[os.path.abspath(c) for c in candidates]}) — add "
+            f"finals/configs/arenas/{filename} (NAV-2 ships a sample)")
+    try:
+        with open(resolved, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except json.JSONDecodeError as e:
+        raise ConfigError(f"{resolved}: invalid JSON — {e}") from e
+    except OSError as e:
+        raise ConfigError(
+            f"arena_name {name!r}: cannot read map file {resolved} — {e}; "
+            f"check the file exists, is readable, and is not locked") from e
+    cfg.arena = ArenaMap.from_dict(raw, name=name)
 
 
 def _validate_guards(cfg: FinalsConfig) -> None:
@@ -649,3 +845,4 @@ def _validate_guards(cfg: FinalsConfig) -> None:
             f"land_retry_period_s ({g.land_retry_period_s}) — the landing "
             f"ladder would never retry")
     _num("slot_wait_s", g.slot_wait_s)
+    _num("launch_slot_wait_s", g.launch_slot_wait_s)

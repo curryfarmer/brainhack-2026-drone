@@ -1,0 +1,39 @@
+{
+  "_comment": "NAV-9 gate L1 + the watchable viewtest: ONE PX4 SITL camera-drone flying the full Challenge-2A landing pipeline [takeoff -> navigate -> land_on_pad] in the landing world. = the transport wiring of configs/sitl3_vision.json (mavsdk_sitl + gazebo frames via a gz->TCP bridge + ArUco) but with the LANDING phases + arena of configs/landing_real.json. ONE drone => ONE onboard camera renders comfortably under llvmpipe (RTF ~1.0, SIM-4), so this is the clean end-to-end proof AND the 2-camera footage run (sim/run_landing.sh viewtest adds the landing_view overview cam => 2 cams total). alpha targets pad_101 (gz 0,4) which sits directly behind the crate, so the visibility-graph planner MUST detour around the inflated keep-out => the obstacle-avoidance + visual-landing money shot. arena_name sitl_landing mirrors sim/worlds/landing_px4.sdf (north=gz+Y, east=gz+X). valid_marker_ids [101] = the ArUco the gz pad_101 renders. Budgets are WALL seconds (time.monotonic) sized generously for 1 transit + 1 landing at RTF~1.0; the orchestrator exits on all-DONE so they are a MAX, not a target.",
+  "profile": "sitl",
+  "flight_backend": "mavsdk_sitl",
+  "frame_backend": "gazebo",
+  "sitl_address": "udpin://0.0.0.0:14540",
+  "command_timeout_s": 120,
+  "mission_budget_s": 600,
+  "camera_hfov_deg": 99.69,
+  "marker_backend": "aruco",
+  "arena_name": "sitl_landing",
+  "gazebo_video_host": "127.0.0.1",
+  "gazebo_video_port": 5600,
+  "detector": { "backend": "none" },
+  "guards": {
+    "launch_slot_wait_s": 240,
+    "slot_wait_s": 240,
+    "landing_reserve_s": 60,
+    "geofence_radius_m": 10.0
+  },
+  "drones": [
+    {
+      "_comment": "alpha i0 -> udpin 14540, gRPC 50051, bridge 5600. takeoff 110 cm (~brief height) -> navigate to pad_101 (detour around the crate) -> visual land on ArUco 101.",
+      "id": "alpha", "plane_id": 1, "led_rgb": [255, 0, 0],
+      "phases": ["takeoff", "navigate", "land_on_pad"],
+      "sitl_address": "udpin://0.0.0.0:14540", "mavsdk_grpc_port": 50051,
+      "gazebo_video_port": 5600,
+      "sector_deg": [0.0, 30.0],
+      "zone": {
+        "takeoff": { "height_cm": 110 },
+        "navigate": { "pad_id": "pad_101", "inflation_m": 0.5, "max_leg_cm": 100, "total_budget_s": 180 },
+        "land_on_pad": {
+          "valid_marker_ids": [101],
+          "commit_alt_m": 0.5, "total_budget_s": 150, "acquire_timeout_s": 30
+        }
+      }
+    }
+  ]
+}

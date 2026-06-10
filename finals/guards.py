@@ -106,6 +106,7 @@ import threading
 import time
 import traceback
 from abc import ABC, abstractmethod
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Callable, Dict, List, Optional, Sequence,
                     TextIO)
@@ -486,6 +487,79 @@ class GeofenceLite(Guard):
             f"the mission pattern")
 
 
+class SectorGuard(Guard):
+    """ADVISORY-ONLY per-drone sector keep-in (NAV-8 deconfliction, SPACE
+    half). Each drone is assigned a wedge of the arena (a heading range from
+    C2); this guard trips ADVISORY when the drone's DEAD-RECKONED position
+    estimate leaves that wedge.
+
+    WHY advisory, never a hard cut (binding — same status as GeofenceLite,
+    reconciliation 9): the only position this guard can see is DEAD_RECKONING
+    (finals/flight/dead_reckon.py) — it drifts and is NEVER closed-loop
+    trustworthy. Acting on it (forcing a land, steering back) could fly a
+    drone INTO the neighbour it imagines it is avoiding. Sectors are a soft
+    keep-in HINT for the operator + the forensic log, NOT a control input.
+    Deconfliction safety comes from the TIME slots (the launch + landing
+    corridors in SafetyController) and the open-loop per-drone routes in the
+    config; the sector is the advisory cross-check on top.
+
+    Uses finals.mission.planning.frame.in_sector over Telemetry.position_m
+    (north_m, east_m) — the per-drone DR estimate. Edge-triggered: one trip
+    per excursion episode, re-arms when the estimate returns inside the wedge.
+    Skips silently when there is no position estimate (position_m None) —
+    never guesses.
+    """
+
+    def __init__(self, c2_origin_m: Tuple[float, float],
+                 sector_center_deg: float, sector_half_width_deg: float):
+        # in_sector validates center/half-width (ConfigError on a bad wedge);
+        # call it once here at construction with a probe point so a misconfig
+        # dies at wiring time, not on the first trip. c2_origin_m must be a
+        # finite pair.
+        if (not isinstance(c2_origin_m, (list, tuple))
+                or len(c2_origin_m) != 2
+                or any(not isinstance(c, (int, float)) or isinstance(c, bool)
+                       or not math.isfinite(c) for c in c2_origin_m)):
+            raise ValueError(
+                f"SectorGuard: c2_origin_m must be a finite (north_m, east_m) "
+                f"pair, got {c2_origin_m!r} — check arena.c2_origin_m / the "
+                f"main.py wiring")
+        self._c2_origin_m = (float(c2_origin_m[0]), float(c2_origin_m[1]))
+        # in_sector does the center/half-width validation (raises ConfigError);
+        # exercise it now so a bad wedge fails at construction.
+        from finals.mission.planning.frame import in_sector
+        in_sector(self._c2_origin_m, self._c2_origin_m,
+                  sector_center_deg, sector_half_width_deg)
+        self._center_deg = float(sector_center_deg)
+        self._half_width_deg = float(sector_half_width_deg)
+        self._outside = False                    # edge latch
+
+    def check(self, gctx: GuardContext) -> Optional[Trip]:
+        from finals.mission.planning.frame import bearing_from_c2_deg, in_sector
+        t = gctx.telemetry
+        if t is None or t.position_m is None:
+            return None                          # no estimate -> skip, no guess
+        north_m, east_m, _alt_m = t.position_m
+        point_m = (north_m, east_m)
+        if in_sector(point_m, self._c2_origin_m,
+                     self._center_deg, self._half_width_deg):
+            self._outside = False                # back inside re-arms
+            return None
+        if self._outside:
+            return None                          # one advisory per excursion
+        self._outside = True
+        bearing = bearing_from_c2_deg(point_m, self._c2_origin_m)
+        return self._trip(
+            TripAction.ADVISORY,
+            f"{gctx.drone_id}: dead-reckoned position bearing {bearing:.0f} deg "
+            f"from C2 is OUTSIDE its assigned sector (centre "
+            f"{self._center_deg:.0f} deg +/- {self._half_width_deg:.0f} deg) "
+            f"— ADVISORY ONLY: the estimate drifts and is never acted on (the "
+            f"TIME slots + open-loop routes are the real separation); the "
+            f"drone may have drifted toward a neighbour's space — check it "
+            f"visually / the route tuning")
+
+
 class PhaseTimeout(Guard):
     """A phase running past its budget -> LAND_THIS (a wedged phase on a
     real aircraft burns battery going nowhere; land it cleanly)."""
@@ -520,13 +594,33 @@ def _consume_task_exception(task: asyncio.Task) -> None:
 
 
 class SafetyController:
-    """Serialized NORMAL landings + bounded retry ladder + idempotent trips.
+    """Serialized NORMAL landings + bounded retry ladder + idempotent trips
+    + the staggered LAUNCH corridor slot (NAV-8 deconfliction).
 
     One instance per mission, shared by every agent, used inside ONE
-    asyncio.run (the slot semaphore is created lazily so one controller
-    serves exactly one running mission loop; asyncio binds it at first
+    asyncio.run (the slot semaphores are created lazily so one controller
+    serves exactly one running mission loop; asyncio binds them at first
     await).
 
+    DECONFLICTION (NAV-8 — WHY two slots, not altitude bands): Challenge-2A
+    flies under a ~1.1 m ceiling with a no-overfly rule, which KILLS the swarm
+    altitude-band separation (you cannot stack 3 drones vertically in 1.1 m,
+    and you may not fly over another drone). Separation must therefore be
+    TIME + SPACE: the C2 launch/landing corridor — the one patch of airspace
+    every drone shares — is occupied by AT MOST ONE drone at a time, and each
+    drone keeps to its own advisory sector once clear of it. This class owns
+    the two TIME slots; the per-drone advisory sector is SectorGuard.
+
+    - acquire_launch_slot(): the LAUNCH corridor slot — at most ONE drone in
+      the shared C2 takeoff zone at a time (BOUNDED wait, actionable timeout).
+      Acquired around the Takeoff command and RELEASED the instant takeoff
+      completes (the drone is now airborne and climbs out / flies its sector,
+      vacating the corridor for the next). Mirrors the landing slot exactly,
+      but is a SEPARATE semaphore: a drone landing and a drone launching are
+      in DIFFERENT corridors-in-time and never block each other — and since
+      each agent holds at most one slot at a time and releases it in a
+      `finally`, the two slots can NEVER deadlock (no drone ever waits on slot
+      B while holding slot A). emergency_land NEVER touches either slot.
     - land(): acquire the landing slot (BOUNDED wait, actionable timeout),
       then attempt adapter.land() — each attempt individually bounded by
       timeout_s + grace — until success, or until EITHER the attempt count
@@ -560,13 +654,15 @@ class SafetyController:
                  command_timeout_s: float = 15.0,
                  command_grace_s: float = 2.0,
                  slot_wait_s: float = 120.0,
+                 launch_slot_wait_s: float = 120.0,
                  clock: Callable[[], float] = time.monotonic):
         for name, value, zero_ok in (
                 ("land_retry_period_s", land_retry_period_s, False),
                 ("land_retry_window_s", land_retry_window_s, False),
                 ("command_timeout_s", command_timeout_s, False),
                 ("command_grace_s", command_grace_s, True),
-                ("slot_wait_s", slot_wait_s, False)):
+                ("slot_wait_s", slot_wait_s, False),
+                ("launch_slot_wait_s", launch_slot_wait_s, False)):
             _check_threshold("SafetyController", name, value, zero_ok=zero_ok)
         if land_retry_window_s < land_retry_period_s:
             raise ValueError(
@@ -580,9 +676,11 @@ class SafetyController:
         self._command_timeout_s = float(command_timeout_s)
         self._command_grace_s = float(command_grace_s)
         self._slot_wait_s = float(slot_wait_s)
+        self._launch_slot_wait_s = float(launch_slot_wait_s)
         self._clock = clock
         self._attempts = max(1, math.ceil(self._window_s / self._period_s))
         self._slot: Optional[asyncio.Semaphore] = None   # lazy: loop-bound
+        self._launch_slot: Optional[asyncio.Semaphore] = None  # lazy: loop-bound
         self._tripped: Dict[str, str] = {}               # drone -> first reason
         self._trip_tasks: Dict[str, asyncio.Task] = {}   # drone -> landing task
         self._escalations: Dict[str, str] = {}           # drone -> alarm text
@@ -601,6 +699,13 @@ class SafetyController:
         outer = self._command_timeout_s + self._command_grace_s
         return self._slot_wait_s + self._window_s + outer + self._period_s
 
+    @property
+    def launch_slot_wait_s(self) -> float:
+        """The bounded wait for the LAUNCH corridor slot (NAV-8). The agent
+        logs the takeoff's outer deadline as launch_slot_wait_s + the normal
+        command outer, since the slot wait precedes the Takeoff command."""
+        return self._launch_slot_wait_s
+
     # -------- helpers --------
     def _try_log(self, drone_id: str, event: str, **data) -> None:
         try:
@@ -616,6 +721,51 @@ class SafetyController:
             # asyncio binds the semaphore to a loop at its first await.
             self._slot = asyncio.Semaphore(1)
         return self._slot
+
+    def _launch_slot_sem(self) -> asyncio.Semaphore:
+        if self._launch_slot is None:
+            # SEPARATE from the landing slot (lazy, same loop-binding reason):
+            # a launching drone and a landing drone are in different
+            # corridors-in-time and must not block each other.
+            self._launch_slot = asyncio.Semaphore(1)
+        return self._launch_slot
+
+    # -------- the staggered launch corridor (NAV-8) --------
+    @asynccontextmanager
+    async def launch_slot(self, drone_id: str):
+        """Async context manager: hold the C2 launch-corridor slot for the
+        WHOLE `async with` body (the agent wraps its Takeoff command in it).
+        At most ONE drone occupies the shared takeoff zone at a time; the slot
+        is RELEASED in finally the instant the body exits (takeoff done -> the
+        drone has climbed out / is flying its sector), so the next drone may
+        launch. Deadline-bounded: the acquire waits at most launch_slot_wait_s
+        and raises FlightTimeout (the caller safes down via its own latch) —
+        never an infinite wait (convention 3). Deadlock-free: a drone holding
+        this slot never waits on the LANDING slot (takeoff precedes any
+        landing in the agent's sequential life), so the two slots cannot form
+        a cycle.
+        """
+        sem = self._launch_slot_sem()
+        try:
+            # asyncio.timeout, NOT wait_for: 3.11's wait_for can swallow an
+            # external cancellation racing the acquire (same reason as land()).
+            async with asyncio.timeout(self._launch_slot_wait_s):
+                await sem.acquire()
+        except TimeoutError:
+            raise FlightTimeout(
+                f"{drone_id}: C2 launch corridor still held by another drone "
+                f"after {self._launch_slot_wait_s:.1f} s — staggered launch "
+                f"could not start (only one drone may occupy the shared "
+                f"takeoff zone at a time; the ~1.1 m ceiling forbids altitude "
+                f"separation) — check heartbeat.json for which drone's takeoff "
+                f"is stuck") from None
+        try:
+            self._try_log(drone_id, "launch_slot_acquired",
+                          wait_bound_s=self._launch_slot_wait_s)
+            yield
+        finally:
+            sem.release()
+            self._try_log(drone_id, "launch_slot_released")
 
     # -------- the landing paths --------
     async def land(self, adapter: "FlightAdapter", drone_id: str) -> None:

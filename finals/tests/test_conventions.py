@@ -149,7 +149,8 @@ def test_phase_registry_names():
     from finals.mission.phases import PHASE_REGISTRY, resolve_phase
 
     assert set(PHASE_REGISTRY) == {
-        "takeoff_demo", "sentry_scan", "lawnmower", "track_convoy", "land_on_pad",
+        "takeoff_demo", "takeoff", "sentry_scan", "lawnmower", "track_convoy",
+        "land_on_pad", "navigate",
     }
     with pytest.raises(ConfigError, match="takeoff_demo"):  # lists available names
         resolve_phase("no_such_phase")

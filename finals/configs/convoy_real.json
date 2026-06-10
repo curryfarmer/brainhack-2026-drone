@@ -1,0 +1,35 @@
+{
+  "_comment": "Convoy SEARCH mission (NAV-8), profile 'real' (3 HULA drones via pyhulax). The proven SIM-5 convoy mission carried over to the real profile: each drone takeoff (HOLD airborne) -> sentry_scan (stationary rotating observer over the route — zero translational drift, stable hover frames best for ArUco; the convoy re-crosses the footprint). frame_backend 'pyhulax' streams each drone's onboard camera over its OWN shared DroneAPI link (S10); marker_backend 'aruco' is the primary detector (convoy robots carry ArUco markers to detect + READ); detector 'none' (no YOLO). SEPARATION here is the swarm ALTITUDE BAND (1.2/1.7/2.2 m, distinct per drone — the proven SIM-5 model): unlike the Challenge-2A LANDING mission, the search task is NOT under the 1.1 m ceiling and the rotating observers hold STATIONARY footprints, so vertical band separation is the lowest-risk collision guarantee and the band IS each drone's takeoff height (takeoff.from_config / sentry_scan: band*100 cm). The SafetyController launch + landing slots still serialize the shared C2 corridor (takeoff/land), bounded. command_timeout_s 30 / mission_budget_s 500 sized as SIM-5 (3 serialized takeoffs + >=1 convoy-lap of sentry rotation + landing); budget is a MAX (orchestrator exits on all-DONE). To add bearing-pursuit tracking onsite, append \"track_convoy\" to a drone's phases (it is built + registry-resolvable; left commented OUT here — sentry_scan is the proven default).",
+  "profile": "real",
+  "flight_backend": "pyhulax",
+  "frame_backend": "pyhulax",
+  "command_timeout_s": 30,
+  "mission_budget_s": 500,
+  "camera_hfov_deg": 99.69,
+  "marker_backend": "aruco",
+  "detector": { "backend": "none" },
+  "guards": {
+    "_comment": "launch_slot_wait_s / slot_wait_s: bounded staggered-launch + serialized-landing corridor waits (finite, never a hang). landing_reserve_s 60: MissionClockGuard lands all 60 s before the budget.",
+    "launch_slot_wait_s": 150,
+    "slot_wait_s": 150,
+    "landing_reserve_s": 60
+  },
+  "drones": [
+    {
+      "_comment": "alpha — lowest band 1.2 m. phases takeoff -> sentry_scan; revolutions 2 ~ >1 convoy lap. To track instead of just observe: \"phases\": [\"takeoff\", \"sentry_scan\", \"track_convoy\"].",
+      "id": "alpha", "plane_id": 1, "led_rgb": [255, 0, 0],
+      "phases": ["takeoff", "sentry_scan"], "altitude_band_m": 1.2,
+      "zone": { "sentry_scan": { "revolutions": 2 } }
+    },
+    {
+      "id": "bravo", "plane_id": 2, "led_rgb": [0, 255, 0],
+      "phases": ["takeoff", "sentry_scan"], "altitude_band_m": 1.7,
+      "zone": { "sentry_scan": { "revolutions": 2 } }
+    },
+    {
+      "id": "charlie", "plane_id": 3, "led_rgb": [0, 0, 255],
+      "phases": ["takeoff", "sentry_scan"], "altitude_band_m": 2.2,
+      "zone": { "sentry_scan": { "revolutions": 2 } }
+    }
+  ]
+}

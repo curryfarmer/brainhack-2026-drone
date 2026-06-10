@@ -1,0 +1,131 @@
+<?xml version="1.0"?>
+<!-- NAV-9 LANDING world, PX4-FLYABLE (Challenge-2A rehearsal).
+
+     Forked from sim/worlds/convoy_px4.sdf (SIM-4/5, the proven PX4-flyable
+     camera world): SAME flight-sensor system plugins + ENU spherical_coordinates
+     so PX4 SITL flies, SAME llvmpipe-rendered onboard camera path. What CHANGED
+     for the landing mission:
+       - the 5 driving convoy robots are GONE (landing has no convoy);
+       - 3 STATIC ArUco landing pads (100/101/102) replace the 2 route markers,
+         laid out NORTH of the C2 launch area as the 3 landing targets;
+       - one CRATE obstacle (1.0 x 1.0 x 1.5 m, taller than the ~1.1 m flight
+         height => a genuine no-overfly 2-D keep-out) sits between C2 and pad_101
+         so the visibility-graph planner MUST route around it (the obstacle-
+         avoidance demo the user asked for).
+
+     FRAME MAPPING (binding — the arena JSON mirrors this):
+       gz is ENU: pose is "x(EAST) y(NORTH) z(UP) r p yaw". The finals arena
+       frame is (north_m, east_m). So a gz pose (x=E, y=N) is arena
+       (north=y, east=x). c2_origin_m in finals/configs/arenas/sitl_landing.json
+       is gz (0,0); the pads + crate below convert one-to-one (see each pose).
+
+     World NAME is "landing_px4" -> camera + clock topics are
+     /world/landing_px4/...; sim/run_landing.sh and the bridge use that name.
+
+     Run (PX4 OWNS the gz server for lockstep; llvmpipe so the camera renders;
+     ogre2 renders BLANK under hardware GL on the VM but works under llvmpipe):
+       LIBGL_ALWAYS_SOFTWARE=1 HEADLESS=1 PX4_SYS_AUTOSTART=4001 \
+         PX4_SIM_MODEL=gz_x500_mono_cam_640 PX4_GZ_WORLD=landing_px4 \
+         PX4_GZ_MODEL_POSE="0,0,0.2,0,0,0" \
+         GZ_SIM_RESOURCE_PATH=<repo>/sim/models:<px4>/Tools/simulation/gz/models \
+         ./build/px4_sitl_default/bin/px4 -i 0
+     Copy this file to ~/PX4-Autopilot/Tools/simulation/gz/worlds/ first
+     (sim/run_landing.sh does it). -->
+<sdf version="1.9">
+  <world name="landing_px4">
+
+    <!-- Camera render (SIM-3) + the flight-sensor systems PX4 needs. Without the
+         Imu/AirPressure/Magnetometer/NavSat systems the matching x500 sensors
+         never publish and PX4 preflight fails "sensor missing". -->
+    <plugin filename="gz-sim-physics-system"           name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system"     name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system"           name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-imu-system"               name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-air-pressure-system"      name="gz::sim::systems::AirPressure"/>
+    <plugin filename="gz-sim-air-speed-system"         name="gz::sim::systems::AirSpeed"/>
+    <plugin filename="gz-sim-altimeter-system"         name="gz::sim::systems::Altimeter"/>
+    <plugin filename="gz-sim-magnetometer-system"      name="gz::sim::systems::Magnetometer"/>
+    <plugin filename="gz-sim-navsat-system"            name="gz::sim::systems::NavSat"/>
+    <plugin filename="gz-sim-forcetorque-system"       name="gz::sim::systems::ForceTorque"/>
+    <plugin filename="gz-sim-contact-system"           name="gz::sim::systems::Contact"/>
+
+    <!-- GPS/NavSat origin (PX4 needs a global origin to fuse position). -->
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>47.397971057728974</latitude_deg>
+      <longitude_deg>8.546163739800146</longitude_deg>
+      <elevation>0</elevation>
+    </spherical_coordinates>
+
+    <scene>
+      <ambient>0.5 0.5 0.5 1</ambient>
+      <background>0.7 0.7 0.75 1</background>
+      <grid>false</grid>
+    </scene>
+
+    <light type="directional" name="sun">
+      <cast_shadows>false</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>1 1 1 1</diffuse>
+      <specular>0.3 0.3 0.3 1</specular>
+      <direction>0.2 0.2 -1.0</direction>
+    </light>
+
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="col">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+        </collision>
+        <visual name="vis">
+          <geometry><plane><normal>0 0 1</normal><size>100 100</size></plane></geometry>
+          <material><diffuse>0.5 0.5 0.5 1</diffuse><specular>0.1 0.1 0.1 1</specular></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- CRATE obstacle: gz (E=0, N=2) = arena (north=2, east=0). 1.0x1.0 footprint
+         x 1.5 m tall (z centre 0.75) => taller than the ~1.1 m flight height, a
+         real no-overfly obstacle. It blocks the straight C2->pad_101 line (both at
+         east 0), so alpha's planner must detour around the inflated keep-out. The
+         arena keep_out polygon mirrors this footprint (north 1.5..2.5, east
+         -0.5..0.5). Orange so it reads clearly in the overview footage. -->
+    <model name="crate">
+      <static>true</static>
+      <pose>0 2 0.75 0 0 0</pose>
+      <link name="link">
+        <collision name="col">
+          <geometry><box><size>1.0 1.0 1.5</size></box></geometry>
+        </collision>
+        <visual name="vis">
+          <geometry><box><size>1.0 1.0 1.5</size></box></geometry>
+          <material>
+            <ambient>0.55 0.27 0.07 1</ambient>
+            <diffuse>0.72 0.40 0.12 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 3 STATIC ArUco landing pads, NORTH of the C2 launch area. gz pose (E,N) ->
+         arena (north=N, east=E); valid_marker_ids in the config match these ids.
+           pad_101 gz(0, 4.0)   = arena (north 4.0, east  0.0)  <- alpha (behind crate)
+           pad_100 gz(-1.5,3.5) = arena (north 3.5, east -1.5)  <- bravo
+           pad_102 gz(1.5, 3.5) = arena (north 3.5, east  1.5)  <- charlie -->
+    <include><uri>model://pad_101</uri><name>pad_101</name><pose>0 4.0 0 0 0 0</pose></include>
+    <include><uri>model://pad_100</uri><name>pad_100</name><pose>-1.5 3.5 0 0 0 0</pose></include>
+    <include><uri>model://pad_102</uri><name>pad_102</name><pose>1.5 3.5 0 0 0 0</pose></include>
+
+    <!-- NO static tower cameras and NO spectator camera here: each drone flies its
+         OWN onboard mono_cam_640. On the 4-vCPU VM the single-threaded gz render
+         thread is the lockstep bottleneck (SIM-3/5) -> extra cameras starve the
+         flights. The third-person OVERVIEW footage uses landing_view.sdf (this
+         world + ONE low-rate overhead camera), run 1-drone so total = 2 cams. -->
+
+  </world>
+</sdf>

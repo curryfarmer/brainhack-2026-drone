@@ -75,6 +75,17 @@ Surface (S4, implemented):
   and the ladder's total bound instead. emergency_land NEVER routes
   through the controller: the latched safe-down calls the adapter directly
   and can never wait on the landing slot.
+- Staggered launch (S11/NAV-8): when safety is wired, the Takeoff command
+  is wrapped in the SafetyController LAUNCH corridor slot (at most one drone
+  in the shared C2 takeoff zone at a time — the ~1.1 m ceiling forbids
+  altitude-band separation, so deconfliction is TIME + SPACE). The slot is a
+  bounded async-context acquire (FlightTimeout on timeout -> the agent's
+  latched safe-down) RELEASED the instant takeoff completes; the takeoff
+  command itself keeps its normal outer wait_for INSIDE the slot.
+  action_start carries route="launch_slot" + the slot-wait-inclusive
+  deadline. The launch slot and the landing slot are SEPARATE semaphores and
+  an agent holds at most one at a time (takeoff precedes any landing in its
+  sequential life), so the two can never deadlock.
 
 Event vocabulary written to EventLog (the run's forensic story, and the
 replay-plot input — simulation.md Tier 0): agent_connect, origin (initial
@@ -522,14 +533,36 @@ class DroneAgent:
             # log THAT so the forensic record cites the deadline that binds.
             outer = self._safety.land_bound_s
             route_fields["route"] = "safety"
-
-        self._log("action_start", action=name, timeout_s=t,
-                  outer_deadline_s=outer, **route_fields, **fields)
+        if isinstance(action, Takeoff) and self._safety is not None:
+            # NAV-8 staggered launch: the takeoff routes through the launch
+            # corridor slot. The binding deadline is the bounded slot wait
+            # PLUS the takeoff command's own outer — log THAT (the slot wait
+            # precedes the command, so the wait_for below stays the command
+            # bound while the slot context bounds the queue ahead of it).
+            outer_log = outer + self._safety.launch_slot_wait_s
+            route_fields["route"] = "launch_slot"
+            self._log("action_start", action=name, timeout_s=t,
+                      outer_deadline_s=outer_log, **route_fields, **fields)
+        else:
+            self._log("action_start", action=name, timeout_s=t,
+                      outer_deadline_s=outer, **route_fields, **fields)
         t0 = self._clock()
         try:
             if isinstance(action, Takeoff):
-                await asyncio.wait_for(
-                    a.takeoff(height_cm=action.height_cm, timeout_s=t), outer)
+                if self._safety is not None:
+                    # Hold the C2 launch corridor for the takeoff only; it is
+                    # released the instant takeoff completes (the drone has
+                    # climbed out and vacates the shared zone). The slot
+                    # acquire is internally deadline-bounded (FlightTimeout on
+                    # timeout); the command itself keeps its outer wait_for.
+                    async with self._safety.launch_slot(self.drone_id):
+                        await asyncio.wait_for(
+                            a.takeoff(height_cm=action.height_cm, timeout_s=t),
+                            outer)
+                else:
+                    await asyncio.wait_for(
+                        a.takeoff(height_cm=action.height_cm, timeout_s=t),
+                        outer)
             elif isinstance(action, Move):
                 await asyncio.wait_for(
                     a.move(action.direction, action.distance_cm, timeout_s=t),
