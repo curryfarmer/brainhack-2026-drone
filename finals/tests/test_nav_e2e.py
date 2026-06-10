@@ -115,11 +115,15 @@ class _PadInRangeBus(SightingBus):
 # ============================================================
 def _write_controlled_config(tmp_path, *, pad_ne=(0.0, 4.0), marker_id=7,
                              keep_out=None, nav_budget_s=120.0,
-                             goal_override=None, land_zone_extra=None):
+                             goal_override=None, land_zone_extra=None,
+                             gates=None, nav_inflation_m=0.5):
     """Write a temp arena + landing config (profile mock) and return its path.
     pad 'pad_t' sits at pad_ne; C2 origin at (0,0) facing north so DR == arena.
     A crate may be injected via keep_out to force a detour. goal_override
-    replaces the navigate goal (e.g. an unreachable coord)."""
+    replaces the navigate goal (e.g. an unreachable coord). gates injects
+    NAV-ARCH arch openings (the arena loader validates them against keep_out).
+    nav_inflation_m sizes the planner safety margin (gate fit = clearance >=
+    2*inflation)."""
     arena = {
         "bounds_m": [-10.0, -10.0, 10.0, 10.0],
         "c2_origin_m": [0.0, 0.0],
@@ -128,6 +132,7 @@ def _write_controlled_config(tmp_path, *, pad_ne=(0.0, 4.0), marker_id=7,
         "pads": [{"id": "pad_t", "center_m": list(pad_ne), "radius_m": 0.3,
                   "valid": True}],
         "lanes": [],
+        "gates": list(gates or []),
     }
     arenas_dir = tmp_path / "arenas"
     arenas_dir.mkdir(exist_ok=True)
@@ -135,7 +140,7 @@ def _write_controlled_config(tmp_path, *, pad_ne=(0.0, 4.0), marker_id=7,
 
     nav_zone = dict(goal_override) if goal_override is not None \
         else {"pad_id": "pad_t"}
-    nav_zone.update({"inflation_m": 0.5, "max_leg_cm": 100.0,
+    nav_zone.update({"inflation_m": nav_inflation_m, "max_leg_cm": 100.0,
                      "heading_tol_deg": 1.0, "max_step_deg": 180.0,
                      "total_budget_s": nav_budget_s})
     land_zone = {"valid_marker_ids": [marker_id], "commit_alt_m": 0.5,
@@ -278,6 +283,54 @@ def test_full_landing_mission_descends_in_steps_then_commits(tmp_path):
     assert down_moves, "expected real Move(DOWN) descent steps"
     assert "land" in _names(adapter.calls)
     assert not adapter.is_flying
+
+
+# ============================================================
+# 1b. NAV-ARCH E2E — the FULL landing mission FLIES THROUGH AN ARCH GATE.
+#     Loads an arena JSON WITH a gate via the real load_config (so the
+#     from_dict gate validation + the planner gate exemption both run on the
+#     mission path) and chains [takeoff, navigate, land_on_pad] to a landing.
+# ============================================================
+def test_full_mission_through_an_arch_gate_lands_on_the_pad(tmp_path):
+    """The arch is a SOLID block (north 1..3, east -2..2) the drone canNOT
+    overfly; a Gate carves the doorway (east -0.5..0.5). The pad sits BEYOND the
+    arch at (4, 0). The mission must takeoff, navigate THROUGH the gate to the
+    pad vicinity (a straight north shot the gate reopens; without it the block
+    would force a detour), then land. Proves the whole from_dict-validated,
+    gate-aware planner -> phase -> mock-flight chain closes into a landing."""
+    arch = {"id": "arch_solid",
+            "polygon_m": [[1.0, -2.0], [1.0, 2.0], [3.0, 2.0], [3.0, -2.0]]}
+    gate = {"id": "arch1", "span_m": [[2.0, -0.5], [2.0, 0.5]],
+            "clearance_m": 1.0}
+    cfg_path = _write_controlled_config(
+        tmp_path, pad_ne=(4.0, 0.0), marker_id=7, keep_out=[arch],
+        gates=[gate], nav_inflation_m=0.2)
+    cfg = load_config(cfg_path)
+    assert [g.id for g in cfg.arena.gates] == ["arch1"]   # gate survived load
+    phases = _build_phases(cfg.drones[0], cfg)
+
+    # navigate threaded the gate: a straight north shot (all legs share heading),
+    # NOT a detour — the gate exemption opened the block on the mission path.
+    nav = phases[1]
+    assert len({round(l.heading_deg, 6) for l in nav._legs}) == 1
+
+    adapter = MockAdapter("alpha")
+    bus = _PadInRangeBus(marker_by_drone={"alpha": 7},
+                         adapter_by_drone={"alpha": adapter},
+                         pad_ne_by_drone={"alpha": (4.0, 0.0)}, near_m=0.8)
+    with EventLog(str(tmp_path)) as events:
+        agent = DroneAgent("alpha", adapter, phases, events, bus=bus,
+                           safety=_build_safety(cfg, events))
+        _run_agent_to_completion(agent, budget_s=60.0)
+
+    assert agent.state is AgentState.DONE
+    assert not adapter.is_flying
+    # navigate closed the transit to the pad BEYOND the arch (DR == arena here).
+    assert adapter.dr.pose.north_m == pytest.approx(4.0, abs=0.2)
+    assert adapter.dr.pose.east_m == pytest.approx(0.0, abs=0.2)
+    names = _names(adapter.calls)
+    assert names.index("takeoff") < names.index("land")
+    assert adapter.telemetry().position_quality <= PositionQuality.DEAD_RECKONING
 
 
 # ============================================================

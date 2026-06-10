@@ -20,6 +20,21 @@ the leg's ABSOLUTE heading_deg computed from the trusted compass yaw
 leg starting from a drifted yaw still ends pointing at the true world heading —
 the per-leg re-orient RE-ZEROES accumulated yaw creep instead of compounding it.
 
+GATE ALTITUDE RULE (NAV-ARCH — load-bearing for the arch course): an arch is a
+black/yellow frame the drone flies THROUGH the GAP of and CANNOT overfly (the
+~1.1 m operating ceiling sits below the crossbar; the LANDING mission runs with
+NO altitude bands — see guards.py NAV-8 / configs/landing_real.json). So the
+planner's gate handling is purely HORIZONTAL (north/east): visibility_graph
+routes a Leg through the gate's span, and this phase flies that Leg at the drone's
+single fixed transit altitude — the height a prior `takeoff` phase established and
+HOLDS for the whole transit (navigate never issues a vertical Move). There is no
+per-gate height because there is no climb-over option and no band to pick: the
+operator sets ONE transit altitude clear under every arch crossbar at gate D, and
+every drone flies the arch course at that one height. This is consistent with
+(not a contradiction of) the no-altitude-bands ceiling: bands separate drones
+vertically (illegal here); the gate height is the COMMON arch-clearance altitude
+all drones share, with TIME+SPACE (sector) deconfliction doing the separation.
+
 GEOFENCE: the advisory sector geofence is NOT implemented here — that is
 guards.py GeofenceLite / the NAV-8 orchestrator's territory. This phase stays
 pure and focused on transit (a deliberate scope decision).
