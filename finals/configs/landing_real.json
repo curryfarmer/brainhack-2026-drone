@@ -1,5 +1,5 @@
 {
-  "_comment": "Challenge-2A LANDING mission (NAV-8), profile 'real' (3 HULA drones via pyhulax). Each drone: takeoff (HOLD airborne) -> navigate to its OWN valid pad avoiding the inflated crates -> land_on_pad (visual servo onto the green/valid ArUco pad). DECONFLICTION = TIME + SPACE, NEVER altitude bands: the ~1.1 m ceiling + no-overfly rule make altitude-band separation ILLEGAL. (1) TIME: the SafetyController launch-corridor slot serializes takeoff (one drone in the C2 zone at a time) and the landing slot serializes descent (one drone over the pads at a time) — both bounded waits (launch_slot_wait_s / slot_wait_s), never infinite. (2) SPACE: each drone gets a distinct advisory sector_deg wedge from C2 toward its pad (ADVISORY-only SectorGuard over the dead-reckoned estimate; never a control input). Bands are deliberately ABSENT — the bench/real multi-drone separation guard accepts sector_deg on every drone INSTEAD of distinct bands (config.py). arena_name 'sample' supplies the keep-outs + the C2 launch frame the planner needs; it is the SAMPLE map (test/dry-run geometry) — re-measure + overwrite finals/configs/arenas/sample.json at gate F (tune config, not code). valid_marker_ids per drone are PLACEHOLDER ArUco ids — set them to the briefing's real green-pad markers onsite (gate F). command_timeout_s 30 / mission_budget_s 600 are sized for 3 SERIALIZED takeoffs + transits + SERIALIZED visual landings under real-link latency; the budget is a MAX (the orchestrator exits on all-DONE).",
+  "_comment": "Challenge-2A LANDING mission (NAV-8), profile 'real' (3 HULA drones via pyhulax). Each drone: takeoff (HOLD airborne) -> navigate to its OWN valid pad avoiding the inflated crates -> land_on_pad (visual servo onto the green/valid ArUco pad). DECONFLICTION = TIME + SPACE, NEVER altitude bands: the ~1.1 m ceiling + no-overfly rule make altitude-band separation ILLEGAL. (1) TIME: the SafetyController launch-corridor slot serializes takeoff (one drone in the C2 zone at a time) and the landing slot serializes descent (one drone over the pads at a time) — both bounded waits (launch_slot_wait_s / slot_wait_s), never infinite. (2) SPACE: each drone gets a distinct advisory sector_deg wedge from C2 toward its pad (ADVISORY-only SectorGuard over the dead-reckoned estimate; never a control input). Bands are deliberately ABSENT — the bench/real multi-drone separation guard accepts sector_deg on every drone INSTEAD of distinct bands (config.py). arena_name 'sample' supplies the keep-outs + the C2 launch frame the planner needs; it is the SAMPLE map (test/dry-run geometry) — re-measure + overwrite finals/configs/arenas/sample.json at gate F (tune config, not code). valid_marker_ids per drone are PLACEHOLDER ArUco ids — set them to the briefing's real green-pad markers onsite (gate F). command_timeout_s 30 / mission_budget_s 600 are sized for 3 SERIALIZED takeoffs + transits + SERIALIZED visual landings under real-link latency; the budget is a MAX (the orchestrator exits on all-DONE). PAD MODEL (task #9): pipeline.py trains a landing-pad YOLO detector -> models/pad_v1.pt (single class 'landing_pad', val mAP50 0.984 over 121 train / 30 val frames) — a GITIGNORED data artifact (regenerate onsite with pipeline.py if the C2 laptop lacks it; test_pad_weights_e2e.py decode-checks it through make_ultralytics_detector). This config ships in MARKER servo mode (servo_on default) so the green-suite landing e2e proves beacon-based landing WITHOUT the artifact; to servo onto the VISUAL pad blob instead, apply each zone's _comment_pad and launch with --weights models/pad_v1.pt (forces detector.backend=ultralytics).",
   "profile": "real",
   "flight_backend": "pyhulax",
   "frame_backend": "pyhulax",
@@ -26,6 +26,7 @@
         "navigate": { "pad_id": "pad_north", "inflation_m": 0.5, "total_budget_s": 120 },
         "land_on_pad": {
           "_comment_marker": "PLACEHOLDER green-pad ArUco id for pad_north — set to the real briefing marker at gate F.",
+          "_comment_pad": "PAD-SERVO option (PAD-DETECT): to centre/descend on the YOLO pad BLOB instead of the beacon marker, add \"servo_on\": \"pad\", \"pad_classes\": [\"landing_pad\"] here AND launch with --weights models/pad_v1.pt. Validity still comes from navigating to THIS pad's beacon region; the beacon ArUco (valid_marker_ids) stays the gate-F safe-code gate. Marker mode (current default) is the e2e-proven fallback.",
           "valid_marker_ids": [10],
           "commit_alt_m": 0.5, "total_budget_s": 90, "acquire_timeout_s": 20
         }
@@ -41,6 +42,7 @@
         "navigate": { "pad_id": "pad_se", "inflation_m": 0.5, "total_budget_s": 120 },
         "land_on_pad": {
           "_comment_marker": "PLACEHOLDER green-pad ArUco id for pad_se — set at gate F.",
+          "_comment_pad": "PAD-SERVO option: add \"servo_on\": \"pad\", \"pad_classes\": [\"landing_pad\"] here + launch with --weights models/pad_v1.pt to servo on the YOLO pad blob. See top-level _comment / pad_north zone.",
           "valid_marker_ids": [11],
           "commit_alt_m": 0.5, "total_budget_s": 90, "acquire_timeout_s": 20
         }
@@ -56,6 +58,7 @@
         "navigate": { "pad_id": "pad_mid", "inflation_m": 0.5, "total_budget_s": 120 },
         "land_on_pad": {
           "_comment_marker": "PLACEHOLDER green-pad ArUco id for pad_mid — set at gate F.",
+          "_comment_pad": "PAD-SERVO option: add \"servo_on\": \"pad\", \"pad_classes\": [\"landing_pad\"] here + launch with --weights models/pad_v1.pt to servo on the YOLO pad blob. See top-level _comment / pad_north zone.",
           "valid_marker_ids": [12],
           "commit_alt_m": 0.5, "total_budget_s": 90, "acquire_timeout_s": 20
         }

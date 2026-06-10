@@ -27,6 +27,7 @@ data/data.yaml
 data/validation_report.json
 data/import.log
 models/yolo_*/
+models/*.pt
 # keep models/latest_path.txt and model_config.json so newcomers see the schema
 
 # Logs
