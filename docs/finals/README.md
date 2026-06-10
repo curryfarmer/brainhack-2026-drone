@@ -11,12 +11,65 @@ From the briefing images in [`reference_images/`](reference_images/):
 - **3 × Highgreat HULA drones** per team, operated from a **participants' C2 terminal** (ground station controls the swarm — see `hula_connection.py`).
 - **Targets**: a **convoy of 5 RoboMaster ground robots** driving a route through the arena — i.e. *moving* targets, unlike the static qualifier barrels. The convoy route passes threat markers (red icons on the briefing map).
 - **Landing zones**: the arena has marked **valid vs invalid landing zones** (H-pads) — where you land matters; plan end-of-mission landings onto valid pads.
+- **Arena/cage size** (user onsite estimate, 2026-06-10): roughly **5.3 m × 11.3 m** (17.5 × 37 "footlengths" ≈ 0.305 m each — i.e. feet — with a **huge stated margin of error**). Narrow and elongated (~1:2). Treat as order-of-magnitude only and tape-measure at gate D; it is *smaller and longer* than the `configs/arenas/sample.json` 12×10 placeholder. Comfortably inside the 50 m HULA Wi-Fi comm range (§2.0).
+- **Field ArUco markers** (user, 2026-06-10): dictionary **`cv2.aruco.DICT_7X7_1000`** (not the `DICT_6X6_250` our detector currently hardcodes — **must change or we read nothing**); **5 markers, ids 11/45/51/67/101 at FIXED known (x,y) m**: 11=(1.35,4.40), 45=(1.30,7.85), 51=(4.40,4.40), 67=(1.95,8.70), 101=(4.40,7.85). STATIC (not the moving convoy) and **not the landing pads** (role still TBD). Monocular only — no depth. Known coords ⇒ absolute position fixes for our position-blind nav + ground-truth for the guessed bounds. Full analysis + optimisation levers: [`../../finals/docs/field_markers.md`](../../finals/docs/field_markers.md).
 
 <!-- TODO from briefing text: rounds, arena dimensions, time limit, exact scoring table, what the threat/explosion icons mean, whether detection or tracking of the convoy is scored. -->
 
 Hints from the example code: `potential_detection_targets.py` demos **ArUco markers (DICT_6X6_250)** and mentions QR codes as likely targets — expect fiducial detection alongside object classes (RoboMaster robots are car-like; note the example `class_names = ["person", "car", "bicycle"]`).
 
 ## 2. Hardware stack (from example code)
+
+### 2.0 HULA airframe — official manufacturer spec (swarm challenge)
+
+Datamined 2026-06-10 from the **official HULA manual**
+(<https://ds-api.hg-fly.net/manuals/Hula_EN.html>). This is the consumer/EDU
+HULA spec; we drive it via the **pyhulax SDK** (not the Scratch/APP path the
+manual documents), so treat the *programming* sections as N/A and the
+*physical/sensor envelope* as load-bearing. Confirm anything starred onsite
+(gate F).
+
+| Domain | Spec (exact manual values) |
+|---|---|
+| Airframe | weight **100 g (±3 g)**; **189.3×184.6×50 mm**; axle distance 128 mm; prop 75 mm / 3"; motor "L8.5 20"; **max tilt 20°** |
+| Battery | **1200 mAh, 3.8 V** Li-ion, 31 g; **flight time 9–10 min**; charge ≈1 h (box) / ≈1 h 40 (USB) |
+| Camera | photo **1920×1080 (JPG)**; video **720p/30fps (MP4)**, auto-drops to 360p/30 in line-patrol mode; **field of view 71°** |
+| Positioning | **optical flow ±20 cm H / ±10 cm V**; **QR-code floor ±5 cm H / ±10 cm V**; "support expansion UWB positioning" |
+| Obstacle avoidance | four-direction infrared, effective **30–50 cm**, knob-adjustable |
+| Laser | 640 nm, max lighting power 1.5 W |
+| Comms | PCB antenna; **2.412–2.462 GHz + 5.745–5.825 GHz**; ≤14 dBm EIRP; **range 50 m**; default Wi-Fi password `12345678` |
+| Connectivity | **direct** (device joins aircraft Wi-Fi) or **networking** (both device + aircraft on a router — *required for multi-drone*) |
+| Flight envelope | max height **10 m**; max horizontal speed **1.5 m/s (APP) / 3 m/s (optical-flow mode)**; climb **1.2 m/s**; descent **1.0 m/s**; wind < Class 3; temp 0–40 °C |
+| Built-in modes | Scratch / Program Lab programming, "AI recognition", "line patrol", flight stunts — all **bypassed**; we command via pyhulax |
+| Expansion | serial expansion port (UWB module etc.) |
+
+**What this changes for our code** (each is an onsite-verifiable config value,
+not a rewrite):
+
+1. **Battery is the hard mission clock.** 9–10 min/charge means our
+   `mission_budget_s` of 500–600 s ≈ one *whole* pack. Budget margin, and plan
+   a fresh battery per scored run (sim already drains 3 packs per 3-drone run).
+2. **Real video is 720p (1280×720), not the 640×480 sim camera.** ArUco decode
+   standoff is *better* than our 640 px range math (≈2× px/marker), so the
+   sentry-altitude floor in `simulation.md` Tier 2 is conservative — good news;
+   re-derive at 1280 px at gate F.
+3. **`camera_hfov_deg` now has a starting figure: 71°** (was `null` →
+   `bearing_deg` null). Caveat: the manual doesn't say H vs diagonal — if 71° is
+   diagonal, 16:9 HFOV ≈ 64°. Seed the config, still bench-confirm gate F.
+4. **Onboard positioning EXISTS** (optical flow ±20 cm, QR-floor ±5 cm). Our
+   landing-nav is built **position-blind** (open-loop compass dead-reckon,
+   assumes `PositionQuality.NONE`). The real question is what *pyhulax* exposes
+   at the arena: no QR floor mat ⇒ optical-flow-only or NONE. Keep open-loop DR
+   as the floor; treat any usable `PositionQuality` (and the 3 m/s optical-flow
+   speed unlock) as a bonus, not a dependency.
+5. **Multi-drone needs networking mode** (all 3 on a router) — matches the
+   `dola` discovery + `pyhulax` connect path we already use.
+6. **4-direction IR avoidance (30–50 cm)** is a hardware backstop near crates,
+   but too short-range to plan with — keep the visibility-graph keep-out
+   inflation as the real obstacle margin.
+7. **50 m comm range** bounds how far a drone can fly from the C2 laptop.
+
+### 2.1 Onboard stack (mapping-challenge reference only)
 
 | Component | What | Evidence |
 |---|---|---|

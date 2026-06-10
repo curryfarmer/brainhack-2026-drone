@@ -125,6 +125,14 @@ close our drones must fly), and whether an emergency abort key is allowed
 mid-run. Each has a safe default already coded; the answers mostly become
 config values in [`configs/`](configs/).
 
+*The camera itself is now spec'd:* the official HULA manual (datamined
+2026-06-10) gives a **720p video stream and a 71° field of view** — sharper
+than the 640×480 we simulated, so markers read from a little farther than our
+sim math assumed. The manual also says the drone has **its own rough
+position sense** (optical flow, ~±20 cm); we still fly position-blind by
+default and treat anything better as a bonus. Full spec table:
+[`docs/finals/README.md`](../docs/finals/README.md) §2.0.
+
 ## Try it
 
 ```bash

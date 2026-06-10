@@ -1,7 +1,7 @@
 {
   "_comment": "Challenge-2A SAMPLE arena (NAV-2). A realistic-shaped map for the test suite + a SITL dry-run, NOT the real briefing geometry. EVERY number here is briefing/onsite-tunable: re-measure the arena rectangle, crate footprints, pad centres, taped lanes, and the C2 launch pose at gate F and overwrite this file (tune config, not code). Frame: (north_m, east_m), +north/+east; headings deg CCW-positive (0 = +north), the pyhulax/dead_reckon yaw sign.",
 
-  "_comment_bounds": "bounds_m = [north_min, east_min, north_max, east_max], the keep-in geofence rectangle. ~12 m (north) x 10 m (east) placeholder; widen/shrink to the taped arena edges onsite. Validator: north_min < north_max and east_min < east_max (strict).",
+  "_comment_bounds": "bounds_m = [north_min, east_min, north_max, east_max], the keep-in geofence rectangle. ~12 m (north) x 10 m (east) placeholder; widen/shrink to the taped arena edges onsite. Validator: north_min < north_max and east_min < east_max (strict). REAL CAGE estimate (user, 2026-06-10): ~5.3 m x 11.3 m (17.5 x 37 'footlengths' ~ 0.305 m each = feet; HUGE stated margin) — narrow + elongated (~1:2), i.e. SMALLER and longer than this square-ish placeholder. Reshape bounds AND re-place pads/keep-outs to the elongated cage at gate D; do NOT just scale this file blindly.",
   "bounds_m": [0.0, 0.0, 12.0, 10.0],
 
   "_comment_c2": "C2 launch pose: c2_origin_m = where the swarm boots (must be INSIDE bounds_m); c2_heading_deg = the common compass heading every drone boots aligned to (deg, CCW+). 90 deg here = the fleet boots facing WEST (-east); onsite this is whichever way the team lines the airframes up at gate D. Re-measure both.",

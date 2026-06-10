@@ -8,6 +8,102 @@ scripts live here. The fail-loud bar still applies (recap §6).
 > `sim/sitl_smoke.py` is sanctioned for **SIM-0 environment validation only**. From
 > SIM-1 on, every flight goes through `python -m finals.main --profile sitl` (recap §5).
 
+## Quickstart — run the sims on ANY Ubuntu 22.04 VM (portable)
+
+Self-contained: copy-paste these onto a fresh box (someone else's VM, a cloud
+instance — anywhere). The repo is **public**, so the clone needs no credentials.
+
+**No ssh needed — run everything INSIDE the VM.** Open a terminal on the VM's own
+desktop (VMware / VirtualBox console window, or its GUI). Every command below runs
+locally on the box; nothing is driven from a laptop. (The `ssh bhvm` flow in the
+sections further down is the *other* path — laptop-driven — and is optional. This
+Quickstart replaces it entirely.) Bonus: sitting at the VM's graphical desktop
+means you already have a live `:0` display, so the camera sensor renders with no
+extra setup and `land1-gui` shows up right there in the same desktop.
+
+**Box must be:** Ubuntu 22.04, ≥4 vCPU / ≥8 GiB RAM / ≥15 GB free disk, with a
+**graphical desktop session** (that gives the `:0` display the camera-sensor render
+needs). A truly headless server VM works too but needs a virtual framebuffer — see
+the headless note at the end.
+
+### Step 0 — PX4-Autopilot built (skip if `~/PX4-Autopilot/build/px4_sitl_default/bin/px4` already exists)
+
+Standard PX4 upstream setup (pulls **Gazebo Harmonic**; first build is slow). Our
+rig is pinned to Gazebo Harmonic 8.11 — verify against the PX4 docs if it drifts:
+
+```bash
+git clone https://github.com/PX4/PX4-Autopilot.git --recursive ~/PX4-Autopilot
+cd ~/PX4-Autopilot
+bash ./Tools/setup/ubuntu.sh          # installs the toolchain + sim deps; log out/in after
+make px4_sitl gz_x500                  # builds the SITL binary + fetches Gazebo Harmonic
+```
+
+### Step 1 — pull the repo
+
+```bash
+git clone https://github.com/curryfarmer/brainhack-2026-drone.git ~/brainhack-2026-drone
+cd ~/brainhack-2026-drone
+git checkout main                      # NAV landing is on main (bcdfc51); or a feature branch
+# later, to refresh:  git -C ~/brainhack-2026-drone pull
+```
+
+ZIP fallback if git/creds break:
+`wget https://github.com/curryfarmer/brainhack-2026-drone/archive/refs/heads/main.zip -O latest.zip && unzip -o latest.zip`
+
+### Step 2 — Python 3.11 venv + deps (system 3.10 cannot run `finals/`)
+
+`finals/guards.py` needs `asyncio.timeout()` (3.11+). Install 3.11 from deadsnakes,
+build the venv, install the lean set:
+
+```bash
+sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt update
+sudo apt install -y python3.11 python3.11-venv
+cd ~/brainhack-2026-drone
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip wheel
+pip install pytest hypothesis mavsdk "numpy<2" opencv-contrib-python matplotlib scipy PyYAML Pillow pymavlink
+python -m pytest finals/tests -q       # GATE: green here = clean import, env good
+```
+
+`opencv-contrib-python` (not plain `opencv-python`) — it carries `cv2.aruco`, which
+both the detector AND `run_landing.sh install` (marker-texture generation) need.
+`torch`/`ultralytics` are deliberately NOT installed (the YOLO detector is config-off;
+`CannedDetector` needs no torch).
+
+### Step 3 — install the landing assets into PX4 (re-run after any model/world change)
+
+```bash
+bash sim/run_landing.sh install        # copies x500_mono_cam_640 + landing worlds into PX4; builds pad_102 texture
+```
+
+### Step 4 — run the Challenge-2A landing sim
+
+```bash
+source .venv/bin/activate              # if not already active
+bash sim/run_landing.sh land1    [secs]   # L1: 1 drone, full takeoff->navigate->land_on_pad (headless, default 300 s)
+bash sim/run_landing.sh viewtest [secs]   # ^ + records overview + onboard .mp4 (watchable footage)
+bash sim/run_landing.sh land1-gui [secs]  # ^ + live 3D view on the VM :0 desktop
+bash sim/run_landing.sh land3    [secs]   # L2: 3 drones, staggered launch + serialized landing (default 700 s)
+bash sim/run_landing.sh abort3   [secs]   # drill: 'q' lands all (orderly)
+bash sim/run_landing.sh kill3    [secs]   # drill: kill instance 2 mid-mission (isolation)
+bash sim/run_landing.sh stop              # tear everything down (run this if a run dies dirty)
+```
+
+Artifacts (events, sightings, replay PNG, footage `.mp4`) land under
+`~/brainhack-2026-drone/runs_finals/<latest>/` and `sim/run/`. The earlier sim
+ladders run the same way: `sim/run_vision.sh` (search/convoy V2) and
+`sim/run_convoy.sh` (gz-only marker render, SIM-3 below); raw env smoke is
+`sim/launch_sitl.sh` + `sitl_smoke.py` (SIM-0, below). **Always invoke as
+`bash sim/<script>.sh`** — exec bits don't survive Windows/ZIP transfers.
+
+**Headless box (no desktop on `:0`)?** The scripts export `DISPLAY=:0` because the
+gz camera sensor only renders under llvmpipe with a live X display. With no desktop,
+start a virtual framebuffer first — `sudo apt install -y xvfb` then
+`Xvfb :0 -screen 0 1280x720x24 &` (or wrap a command in `xvfb-run -a`). Confirm
+frames aren't blank: a blank-camera render is the ogre2 gotcha (SIM-3 below) — the
+scripts already force `LIBGL_ALWAYS_SOFTWARE=1` to avoid it.
+
 ## Code sync: clone/pull (primary), ZIP (fallback)
 
 ```bash
