@@ -22,6 +22,7 @@ from finals.errors import ConfigError, PlanningError
 from finals.flight.dead_reckon import DeadReckoner, DRPose
 from finals.mission.phase import AgentContext
 from finals.mission.phases import PHASE_REGISTRY
+from finals.mission.phases._servo import wrap180
 from finals.mission.phases.navigate import Navigate
 from finals.mission.planning.types import (ArenaMap, Gate, KeepOut, LandingPad,
                                           Leg)
@@ -31,10 +32,10 @@ from finals.types import (Abort, Direction, Done, Move, Rotate, Telemetry)
 
 # ---------------- arena fixtures (mirror test_visibility_graph.arena) --------
 def _arena(*keep_out, pads=(), bounds=(-100.0, -100.0, 100.0, 100.0),
-           c2=(0.0, 0.0), gates=()):
+           c2=(0.0, 0.0), gates=(), heading_offset_deg=0.0):
     return ArenaMap(bounds_m=bounds, keep_out=tuple(keep_out), pads=tuple(pads),
                     lanes=(), c2_origin_m=c2, c2_heading_deg=0.0,
-                    gates=tuple(gates))
+                    gates=tuple(gates), heading_offset_deg=heading_offset_deg)
 
 
 def _pad(pad_id, center, *, radius=0.5, valid=True):
@@ -614,3 +615,70 @@ def test_phase_legs_equal_direct_plan():
     direct = plan((0.0, 0.0), (4.0, 0.0), arena, 0.3, 120.0)
     assert [(l.heading_deg, l.distance_cm) for l in phase._legs] == \
         [(l.heading_deg, l.distance_cm) for l in direct]
+
+
+# ============================================================
+# ORIGIN-CAL heading offset (arena.heading_offset_deg)
+# ============================================================
+# navigate bakes arena.heading_offset_deg (Delta) into every leg's Rotate target
+# in from_config: leg.heading_deg -> wrap180(leg.heading_deg + Delta). Delta is
+# the onsite compass-yaw-vs-arena-north misalignment. Default 0.0 must be a
+# verbatim no-op; a non-zero Delta shifts the EXECUTED attitude by Delta.
+_BOX = KeepOut(id="crate", polygon_m=((1.0, -1.0), (1.0, 1.0),
+                                      (3.0, 1.0), (3.0, -1.0)))
+
+
+def _nav_to(goal, arena, **extra):
+    zone = {"navigate": {"goal_ne_m": list(goal), "inflation_m": 0.3,
+                         "max_leg_cm": 120.0, **extra}}
+    return Navigate.from_config(_drone(zone), _cfg(arena))
+
+
+def test_heading_offset_zero_is_verbatim_no_op():
+    # Delta=0 reproduces the no-offset plan EXACTLY (the non-breaking guarantee
+    # the whole feature rests on) — same headings AND distances, 2-leg detour.
+    base = _nav_to((4.0, 0.0), _arena(_BOX))
+    off0 = _nav_to((4.0, 0.0), _arena(_BOX, heading_offset_deg=0.0))
+    assert [(l.heading_deg, l.distance_cm) for l in off0._legs] == \
+        [(l.heading_deg, l.distance_cm) for l in base._legs]
+
+
+def test_heading_offset_shifts_every_leg_heading_by_delta():
+    # A 2-leg detour so the shift is checked on MORE than one heading. Delta adds
+    # to each leg heading (wrapped); distances untouched. KILLS the mutation that
+    # drops `+ offset` (shifted vs base headings would then be equal).
+    delta = 37.0
+    base = _nav_to((4.0, 0.0), _arena(_BOX))
+    shifted = _nav_to((4.0, 0.0), _arena(_BOX, heading_offset_deg=delta))
+    assert len(shifted._legs) == len(base._legs) >= 2
+    for b, s in zip(base._legs, shifted._legs):
+        assert s.distance_cm == b.distance_cm
+        assert s.heading_deg == pytest.approx(wrap180(b.heading_deg + delta))
+        assert wrap180(s.heading_deg - b.heading_deg) == pytest.approx(delta)
+
+
+def test_heading_offset_wraps_into_range():
+    # Heading near +180 + a positive Delta must WRAP into (-180, 180], not run off
+    # to 210 (kills a bake that forgets wrap180). Goal due SOUTH -> heading 180;
+    # Delta=+30 -> wrap180(210) = -150.
+    phase = _nav_to((-4.0, 0.0), _arena(heading_offset_deg=30.0),
+                    max_leg_cm=100000.0)
+    assert len(phase._legs) == 1
+    assert phase._legs[0].heading_deg == pytest.approx(-150.0)
+    assert -180.0 < phase._legs[0].heading_deg <= 180.0
+
+
+def test_heading_offset_reaches_executed_attitude():
+    # Behavioral end-to-end: with Delta=30 on a single straight NORTH leg, the
+    # REAL DeadReckoner that flies the commanded Rotate+Move ends pointing at
+    # heading 30 (the nose is re-aimed by Delta) and lands along heading 30 — NOT
+    # at the un-offset (4, 0). Proves the offset reaches the EXECUTED attitude,
+    # not merely the stored leg. FORWARD at yaw 30: (dN, dE) = 4*(cos30, -sin30).
+    phase = _nav_to((4.0, 0.0), _arena(heading_offset_deg=30.0),
+                    max_leg_cm=100000.0, heading_tol_deg=1.0, max_step_deg=180.0)
+    actions, done, dr = _drive_with_dr(phase)
+    assert dr.pose.yaw_deg == pytest.approx(30.0, abs=1.0)
+    assert dr.pose.north_m == pytest.approx(4.0 * math.cos(math.radians(30)),
+                                            abs=0.1)
+    assert dr.pose.east_m == pytest.approx(-4.0 * math.sin(math.radians(30)),
+                                           abs=0.1)

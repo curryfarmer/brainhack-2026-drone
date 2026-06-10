@@ -253,3 +253,40 @@ def test_load_config_propagates_semantically_malformed_arena(tmp_path):
     }), encoding="utf-8")
     with pytest.raises(ConfigError, match="OUTSIDE bounds"):
         load_config(str(cfg_path))
+
+
+# ---- ORIGIN-CAL heading_offset_deg ----------------------------------------
+# Optional finite field, default 0.0, DISTINCT from c2_heading_deg. navigate
+# bakes it into the Rotate target; a NaN/string/bool would silently mis-aim
+# every leg, so from_dict guards it like c2_heading_deg.
+def test_heading_offset_defaults_zero_when_absent():
+    # _VALID has no heading_offset_deg key -> default 0.0 (no behaviour change).
+    arena = ArenaMap.from_dict(_VALID, name="t")
+    assert arena.heading_offset_deg == 0.0
+
+
+def test_heading_offset_parsed_when_present():
+    # Present + finite -> kept (also pins the _arena_keys optional-key addition:
+    # without it this would raise "unknown key(s)").
+    arena = ArenaMap.from_dict(_mut(heading_offset_deg=37.5), name="t")
+    assert arena.heading_offset_deg == 37.5
+
+
+def test_heading_offset_negative_ok():
+    arena = ArenaMap.from_dict(_mut(heading_offset_deg=-90.0), name="t")
+    assert arena.heading_offset_deg == -90.0
+
+
+def test_heading_offset_nonfinite_raises():
+    with pytest.raises(ConfigError, match=r"heading_offset_deg.*finite"):
+        ArenaMap.from_dict(_mut(heading_offset_deg=float("nan")), name="t")
+    with pytest.raises(ConfigError, match=r"heading_offset_deg.*finite"):
+        ArenaMap.from_dict(_mut(heading_offset_deg=float("inf")), name="t")
+
+
+def test_heading_offset_wrong_type_raises():
+    with pytest.raises(ConfigError, match=r"heading_offset_deg.*finite"):
+        ArenaMap.from_dict(_mut(heading_offset_deg="north"), name="t")
+    # bool is not a number here (True/False sneaking in is a wiring bug).
+    with pytest.raises(ConfigError, match=r"heading_offset_deg.*finite"):
+        ArenaMap.from_dict(_mut(heading_offset_deg=True), name="t")

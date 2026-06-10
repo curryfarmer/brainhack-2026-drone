@@ -301,6 +301,15 @@ class ArenaMap:
     c2_heading_deg: float
     markers: Tuple[Marker, ...] = ()   # NAV-FIX: fixed-coord beacon anchors (Step 0)
     gates: Tuple[Gate, ...] = ()       # NAV-ARCH: traversable arch openings (Step 0)
+    #: ORIGIN-CAL onsite knob: Δ = the misalignment between the compass-yaw frame
+    #: the drones boot in and arena-north, measured at gate D
+    #: (Δ = boot_yaw_reading − arena_heading_aimed). navigate bakes Δ into every
+    #: leg's Rotate target so the open-loop transit points the nose along the
+    #: ARENA heading even when HULA yaw is relative-to-boot or magnetically
+    #: rotated. DISTINCT from c2_heading_deg (which rotates Discord coords in
+    #: frame.discord_to_ned — do NOT overload it). Default 0.0 = no offset
+    #: (today's behaviour verbatim).
+    heading_offset_deg: float = 0.0
 
     @classmethod
     def from_dict(cls, raw: Any, *, name: str,
@@ -320,7 +329,7 @@ class ArenaMap:
             raw,
             required=("bounds_m", "c2_origin_m", "c2_heading_deg"),
             optional=("keep_out", "pads", "lanes", "markers", "gates",
-                      "strict_marker_ids"),
+                      "strict_marker_ids", "heading_offset_deg"),
             where=where,
         )
         # Resolve the known-marker rule: explicit arg wins; else honour the
@@ -385,6 +394,18 @@ class ArenaMap:
                 f"{where}.c2_heading_deg must be a finite number (deg, CCW+), "
                 f"got {heading!r}")
         c2_origin = _point(data["c2_origin_m"], f"{where}.c2_origin_m")
+        # ORIGIN-CAL heading offset: optional, finite, default 0.0. Same guard
+        # shape as c2_heading_deg above, but a SEPARATE field (it offsets the
+        # navigate Rotate target; c2_heading_deg rotates Discord coords). A NaN/
+        # string here would silently mis-aim every leg, so fail loud at load.
+        heading_offset = data.get("heading_offset_deg", 0.0)
+        if (not isinstance(heading_offset, (int, float))
+                or isinstance(heading_offset, bool)
+                or not math.isfinite(heading_offset)):
+            raise ConfigError(
+                f"{where}.heading_offset_deg must be a finite number (deg, CCW+; "
+                f"the onsite compass-yaw-vs-arena-north misalignment Δ; omit or "
+                f"0.0 = no offset), got {heading_offset!r}")
 
         # ---- NAV-2 cross-cutting semantic rules -------------------------
         # IDs must be unique: NAV-1/NAV-5/NAV-6 address pads & keep-outs BY id;
@@ -443,6 +464,7 @@ class ArenaMap:
             c2_heading_deg=float(heading),
             markers=markers,
             gates=gates,
+            heading_offset_deg=float(heading_offset),
         )
 
 

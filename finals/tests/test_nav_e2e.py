@@ -69,6 +69,21 @@ def _centred_sighting(marker_id: int, *, drone_id: str, cx: float = 320.0,
         confidence=1.0, frame_shape=frame)
 
 
+def _centred_pad_sighting(*, drone_id: str, class_name: str = "landing_pad",
+                          cx: float = 320.0, cy: float = 240.0,
+                          half: float = 20.0, frame=(480, 640)) -> Sighting:
+    """A dead-centre YOLO PAD Sighting (source "yolo", class_name in pad_classes,
+    marker_id None) — the PAD-DETECT servo target landing_real.json's pad-servo
+    mode acquires on. Mirrors _centred_sighting but for the VISUAL pad blob the
+    real run's --weights detector would emit (here the bus injects it, so the
+    e2e proves the pad-acquire path with no weights)."""
+    return Sighting(
+        drone_id=drone_id, ts=time.monotonic(), source="yolo",
+        class_name=class_name, marker_id=None,
+        bbox_xyxy=(cx - half, cy - half, cx + half, cy + half),
+        confidence=1.0, frame_shape=frame)
+
+
 class _PadInRangeBus(SightingBus):
     """Surfaces ONE fresh CENTRED valid sighting per drain ONLY once the drone
     is within `near_m` (horizontal dead-reckon distance) of the pad — i.e. the
@@ -82,12 +97,17 @@ class _PadInRangeBus(SightingBus):
     """
 
     def __init__(self, *, marker_by_drone, adapter_by_drone, pad_ne_by_drone,
-                 near_m: float = 0.6, maxlen: int = 500):
+                 near_m: float = 0.6, maxlen: int = 500, pad_class=None):
         super().__init__(maxlen=maxlen)
         self._marker_by_drone = dict(marker_by_drone)
         self._adapter_by_drone = dict(adapter_by_drone)
         self._pad_ne_by_drone = dict(pad_ne_by_drone)
         self._near_m = float(near_m)
+        # None -> emit the ArUco beacon sighting (marker-servo tests). A class
+        # name -> emit a YOLO pad sighting of that class (pad-servo: the real
+        # landing_real.json mode). marker_by_drone still keys WHICH drones the
+        # bus serves either way.
+        self._pad_class = pad_class
 
     def _within_range(self, drone_id: str) -> bool:
         adapter = self._adapter_by_drone.get(drone_id)
@@ -103,6 +123,9 @@ class _PadInRangeBus(SightingBus):
             return seq + 1, []          # orchestrator-wide drain: log nothing
         if not self._within_range(drone_id):
             return seq + 1, []          # pad not yet in FOV — real scan runs
+        if self._pad_class is not None:
+            return seq + 1, [_centred_pad_sighting(
+                drone_id=drone_id, class_name=self._pad_class)]
         marker = self._marker_by_drone[drone_id]
         return seq + 1, [_centred_sighting(marker, drone_id=drone_id)]
 
@@ -461,13 +484,18 @@ def _build_landing_fleet(events, *, fail=None):
         center = pads_by_id[pad_id].center_m
         pad_ne_by_drone[d.id] = (center[0] - c2[0], center[1] - c2[1])
 
+    # landing_real.json ships PAD servo (servo_on:'pad'): land_on_pad acquires on
+    # YOLO 'landing_pad' sightings, NOT the beacon ArUco. The bus injects canned
+    # YOLO pad sightings so the e2e proves a TRUE pad acquire (the bus IS the
+    # detector here — no real weights needed).
     bus = _PadInRangeBus(marker_by_drone=marker_by_drone,
                          adapter_by_drone=adapters, pad_ne_by_drone=pad_ne_by_drone,
-                         near_m=0.8)
-    agents = [DroneAgent(d.id, adapters[d.id], _build_phases(d, cfg), events,
+                         near_m=0.8, pad_class="landing_pad")
+    phases_by_drone = {d.id: _build_phases(d, cfg) for d in cfg.drones}
+    agents = [DroneAgent(d.id, adapters[d.id], phases_by_drone[d.id], events,
                          bus=bus, guards=_build_guards(cfg, d), safety=safety)
               for d in cfg.drones]
-    return cfg, agents, adapters, bus
+    return cfg, agents, adapters, bus, phases_by_drone
 
 
 def test_three_drone_landing_all_reach_done_with_serialized_corridors(tmp_path):
@@ -480,7 +508,7 @@ def test_three_drone_landing_all_reach_done_with_serialized_corridors(tmp_path):
     Exit code 0 (all DONE)."""
     run_dir = str(tmp_path)
     with EventLog(run_dir) as events:
-        cfg, agents, adapters, bus = _build_landing_fleet(events)
+        cfg, agents, adapters, bus, phases_by_drone = _build_landing_fleet(events)
         orch = Orchestrator(agents, events, run_dir,
                             budget_s=cfg.mission_budget_s, bus=bus,
                             heartbeat_period_s=0.02,
@@ -492,6 +520,17 @@ def test_three_drone_landing_all_reach_done_with_serialized_corridors(tmp_path):
         assert "land" in _names(adapter.calls)
         assert not adapter.is_flying
     assert all(a.state is AgentState.DONE for a in agents)
+
+    # PAD servo (servo_on:'pad'): every drone TRULY ACQUIRED its YOLO pad and
+    # reached a VERIFIED landing (fallback_reason None) — not a blind-timeout
+    # fallback. This is the headline proof the pad-acquire path works end to end:
+    # a regression to blind fallback, or pad mode ignoring the injected sightings
+    # (e.g. reverting the bus to ArUco-only), goes RED right here.
+    for d_id, phs in phases_by_drone.items():
+        land = phs[2]
+        assert land.servo_on == "pad", f"{d_id} land_on_pad not in pad mode"
+        assert land._fallback_reason is None, \
+            f"{d_id} blind-fell-back instead of acquiring the YOLO pad"
 
     # -- Staggered launch: the launch-corridor slot is held by AT MOST one
     # drone at a time. Replay the acquire/release events in monotonic order
@@ -534,7 +573,7 @@ def test_one_drone_fails_mid_mission_others_land_run_exits_clean(tmp_path):
     (a drone failed). Failure isolation through the whole supervisor."""
     run_dir = str(tmp_path)
     with EventLog(run_dir) as events:
-        cfg, agents, adapters, bus = _build_landing_fleet(
+        cfg, agents, adapters, bus, _ = _build_landing_fleet(
             events, fail={"bravo": "move:2"})
         orch = Orchestrator(agents, events, run_dir,
                             budget_s=cfg.mission_budget_s, bus=bus,

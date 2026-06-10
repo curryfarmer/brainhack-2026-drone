@@ -1,0 +1,21 @@
+{
+  "_comment": "Challenge-2A LANDING real-cage arena (ORIGIN-CAL, 2026-06-10). Post-simplification: every pad is LANDABLE (no valid/invalid, no per-pad ArUco beacon) and WE pick which pad coords to land on (hardcoded below). Origin = a CAGE CORNER: (0,0) = the corner, +north along the LONG wall (~11.3 m), +east along the SHORT wall (~5.3 m). bounds / pad centres / launch are all MEASURED from that corner in metres. EVERY number here is a PLACEHOLDER until gate D — run finals/tools/calibrate_origin.py with the measured cage L x W + corner origin + launch spot + chosen pad coords to regenerate this file (it validates via the real ArenaMap.from_dict) and prints the per-drone heading+distance calibration card. See finals/docs/origin_calibration.md. Frame: (north_m, east_m), +north/+east; headings deg CCW-positive (0 = +north), the pyhulax/dead_reckon yaw sign.",
+
+  "_comment_bounds": "bounds_m = [north_min, east_min, north_max, east_max], the keep-in geofence rectangle. Cage estimate (user, 2026-06-10): ~11.3 m (north, LONG) x ~5.3 m (east, SHORT) — narrow + elongated (~2:1). Corner origin => mins are 0. Re-measure the taped edges and overwrite at gate D. Validator: north_min < north_max and east_min < east_max (strict).",
+  "bounds_m": [0.0, 0.0, 11.3, 5.3],
+
+  "_comment_c2": "C2 launch pose. c2_origin_m = where the swarm boots, MEASURED from the corner (must be INSIDE bounds_m). c2_heading_deg = the arena heading the fleet boots aligned to (deg, CCW+; 0 = +north, down the long axis); ADVISORY (rotates Discord coords in frame.discord_to_ned) — NOT the navigate offset. heading_offset_deg = ORIGIN-CAL Delta: the compass-yaw-vs-arena-north misalignment measured at gate D (Delta = boot_yaw_reading - arena_heading_aimed); 0.0 here = placeholder / aim-north + relative-yaw. navigate bakes Delta into every leg's Rotate target so the open-loop transit aims along ARENA north even if HULA yaw is relative-to-boot or magnetically rotated. Re-measure all three at gate D.",
+  "c2_origin_m": [1.0, 2.65],
+  "c2_heading_deg": 0.0,
+  "heading_offset_deg": 0.0,
+
+  "_comment_keep_out": "Obstacles / keep-outs are the DELIBERATE NEXT step (origin first). Empty for now; calibrate_origin.py accepts obstacles and re-emits this list once the crate footprints are surveyed at gate D.",
+  "keep_out": [],
+
+  "_comment_pads": "The CHOSEN hardcoded landing points (post-simplification: all valid, no beacon). center_m = [north_m, east_m] measured from the corner (must be INSIDE bounds_m); radius_m = hoop radius (m, > 0); valid stays true for ALL (the valid/invalid distinction is gone — kept only so the existing LandingPad schema loads; the strip-valid cleanup is a flagged follow-up). pad ids match the landing_real.json navigate zones (pad_north / pad_se / pad_mid). Re-measure the three centres at gate D; spread down the long axis. Validator: center within bounds, unique ids, radius > 0.",
+  "pads": [
+    { "_comment": "Far end of the long axis, centred east.", "id": "pad_north", "center_m": [10.0, 2.65], "radius_m": 0.3, "valid": true },
+    { "_comment": "Mid-cage, toward the east wall.", "id": "pad_se", "center_m": [5.5, 4.2], "radius_m": 0.3, "valid": true },
+    { "_comment": "Lower-mid, toward the west wall.", "id": "pad_mid", "center_m": [4.0, 1.2], "radius_m": 0.3, "valid": true }
+  ]
+}

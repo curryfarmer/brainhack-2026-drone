@@ -285,6 +285,25 @@ class Navigate(MissionPhase):
                 f"goal within rounding?) — a no-op transit is a wiring bug. "
                 f"Check the goal vs c2_origin_m, or drop the navigate phase.")
 
+        # ORIGIN-CAL heading offset: arena.heading_offset_deg = Δ, the onsite
+        # misalignment between the compass-yaw frame and arena-north
+        # (Δ = boot_yaw_reading − arena_heading_aimed). plan() emits each
+        # leg.heading_deg in the ARENA-north frame; the open-loop Rotate compares
+        # that target against the sensor yaw, so to physically aim the nose along
+        # the arena heading the Rotate TARGET must be leg.heading_deg + Δ (the yaw
+        # the compass reads when the nose is on that arena heading). Bake Δ into
+        # every leg ONCE here so the step() Rotate target AND the non-convergence
+        # residual report (both read leg.heading_deg) stay the SAME quantity — a
+        # single source of truth, no rotate-vs-diagnostic drift. wrap180 keeps the
+        # baked heading in the leg's [-180,180] convention. Δ defaults to 0.0 →
+        # legs unchanged (today's behaviour verbatim, same object identity).
+        offset = arena.heading_offset_deg
+        if offset:
+            legs = tuple(
+                dataclasses.replace(
+                    leg, heading_deg=wrap180(leg.heading_deg + offset))
+                for leg in legs)
+
         return cls(goal_m=goal_m, legs=tuple(legs),
                    heading_tol_deg=heading_tol_deg, max_step_deg=max_step_deg,
                    total_budget_s=total_budget_s, goal_desc=goal_desc)
