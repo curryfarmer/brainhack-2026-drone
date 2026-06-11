@@ -192,11 +192,17 @@ class PyhulaxVideoSource(VideoSource):
         raise SensorTimeout(
             f"{self._source_id}: no first video frame within {timeout_s:.1f} s "
             f"— stream stuck in the startup None-window; check the camera / "
-            f"drone link / decode. FIXES: raise the video timeout; turn the "
-            f"WINDOWS FIREWALL OFF for inbound UDP (blocked UDP looks exactly "
-            f"like this); POWER-CYCLE the drone to clear a stale bind_client; "
-            f"ONE stream per drone, no auto-reconnect (close the HulaGo app / "
-            f"any other client)")
+            f"drone link / decode. FIXES: raise the video timeout "
+            f"(config.video_start_timeout_s for preflight P6, --video-timeout for "
+            f"the tools); turn the WINDOWS FIREWALL OFF for inbound UDP — and over "
+            f"ETHERNET turn it off for ALL profiles ('netsh advfirewall set "
+            f"allprofiles state off'): a wired NIC shows as 'Public/Unidentified "
+            f"network', so a WiFi-only firewall-off does NOT cover it (control TCP "
+            f"connects, UDP video stays blocked = this exact symptom); use ONE "
+            f"active NIC on the drone subnet (disable WiFi if the ethernet is up — "
+            f"a second interface can steal the UDP return route); POWER-CYCLE the "
+            f"drone to clear a stale bind_client; ONE stream per drone, no "
+            f"auto-reconnect (close the HulaGo app / any other client)")
 
     def stop(self) -> None:
         """Idempotent; never raises (logs). Typed catches only (see module

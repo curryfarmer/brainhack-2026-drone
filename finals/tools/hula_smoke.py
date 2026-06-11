@@ -905,9 +905,14 @@ def capture_fleet(log, summary, fleet: List[_Drone], outdir, args) -> None:
 #: Operator fixes for the P6 "no first video frame" failure — embedded in the
 #: --video-only output AND offered as the clearer pyhulax_video.py message delta.
 _P6_VIDEO_HINTS = (
-    "raise --video-timeout (real cam can need >10s for the first frame); "
-    "turn the WINDOWS FIREWALL OFF for inbound UDP (the video frames arrive over "
-    "UDP and a blocked inbound rule looks exactly like a stuck startup window); "
+    "raise --video-timeout (real cam can need >10s for the first frame; ethernet "
+    "is slower than WiFi); turn the WINDOWS FIREWALL OFF for inbound UDP (the "
+    "video frames arrive over UDP and a blocked inbound rule looks exactly like a "
+    "stuck startup window) — over ETHERNET kill ALL profiles ('netsh advfirewall "
+    "set allprofiles state off'): a wired NIC is 'Public/Unidentified network', so "
+    "a WiFi-only firewall-off misses it (control TCP connects, UDP video stays "
+    "blocked); use ONE active NIC on the drone subnet (disable WiFi if ethernet is "
+    "up — a second interface can steal the UDP return route); "
     "POWER-CYCLE the drone to clear a stale bind_client (a prior crashed client "
     "still holds the stream); ONE stream per drone, NO auto-reconnect (close the "
     "HulaGo phone app / any other client); confirm the ordering matches "

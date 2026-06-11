@@ -63,6 +63,12 @@ FINALS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # start, per-frame decode/inference) plus the never-raise teardown (stream stop +
 # disconnect). Five sites, each logging a full traceback via log.exc(); it issues
 # NO flight command.
+# flight-bench widening (reviewed): tools/flight_monitor.py — the props-off
+# instrumented runner. THREE sanctioned sites: the flight WORKER thread (must not
+# die silently — logs the full traceback), the camera-tilt PROBE (an open SDK
+# error set on an optional method), and the never-raise emergency_land safe-down
+# in run_phases' finally. Unlike hula_smoke/live_view it DOES issue flight
+# commands, but only props-off behind the --props-off-confirmed gate.
 EXCEPT_EXCEPTION_WHITELIST = {
     os.path.join("finals", "guards.py"),
     os.path.join("finals", "mission", "orchestrator.py"),
@@ -71,6 +77,7 @@ EXCEPT_EXCEPTION_WHITELIST = {
     os.path.join("finals", "flight", "pyhulax_adapter.py"),
     os.path.join("finals", "tools", "hula_smoke.py"),
     os.path.join("finals", "tools", "live_view.py"),
+    os.path.join("finals", "tools", "flight_monitor.py"),
 }
 
 # Modules that may import SDK/heavy-I/O packages at module top level.

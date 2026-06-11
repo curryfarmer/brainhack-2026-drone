@@ -142,7 +142,7 @@ def test_config_bad_aruco_params_is_loud(write_config, minimal_mock_config):
 
 
 def test_config_bad_depth_backend_is_loud(write_config, minimal_mock_config):
-    minimal_mock_config["depth_backend"] = "realsense"   # not yet wired
+    minimal_mock_config["depth_backend"] = "lidar"   # genuinely unwired backend
     with pytest.raises(ConfigError, match="depth_backend"):
         load_config(write_config(minimal_mock_config))
     assert "none" in VALID_DEPTH_BACKENDS

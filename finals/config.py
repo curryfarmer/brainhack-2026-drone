@@ -90,7 +90,7 @@ VALID_ARUCO_PARAM_KEYS = frozenset((
 # dependency-free FakeDepthSource (SITL/test rig; exercises the seam without an
 # SDK). A real "realsense" backend stays OUT (the example_code RealSense is the
 # MAPPING drone, not this swarm) — added only the day the swarm carries depth.
-VALID_DEPTH_BACKENDS = ("none", "fake")
+VALID_DEPTH_BACKENDS = ("none", "fake", "realsense")
 
 # Each profile pins its flight backend — both appear in the JSON so a human
 # reading the file sees the whole story, and the loader cross-checks them so a
@@ -188,6 +188,13 @@ class DroneConfig:
     # needs a DISTINCT port per drone. A single-drone gazebo config may omit it
     # and falls back to the top-level gazebo_video_port (resolve_gazebo_video_port).
     gazebo_video_port: Optional[int] = None     # e.g. 5601
+    # STATIC IP (pyhulax only) — the solo direct-WiFi fallback-to-the-fallback.
+    # When set, preflight P3 SKIPS Dola UDP-broadcast discovery and connects the
+    # PyhulaxAdapter straight to this address (one drone on its own WiFi AP,
+    # ~192.168.100.1, when the shared router is gone). ALL-OR-NOTHING across the
+    # fleet (config._validate): every drone has one, or none do — a mixed fleet
+    # would half-skip discovery. Shape-validated as a dotted-quad in _validate.
+    ip: Optional[str] = None                    # e.g. "192.168.100.1"
 
 
 @dataclass
@@ -202,6 +209,8 @@ class FinalsConfig:
     mission_budget_s: float = 600.0
     command_timeout_s: float = 15.0
     discovery_timeout_s: float = 10.0           # preflight P3 Dola listen window (bench/real)
+    video_start_timeout_s: float = 15.0         # preflight P6 first-frame window; raise for
+    #                                             ethernet/slow links (config not code onsite)
     min_battery_pct: float = 20.0
     # DEGRADED-FLEET FALLBACK (bench/real). OFF by default = the strict
     # all-or-nothing preflight: a single drone that fails to discover/connect/
@@ -357,7 +366,7 @@ def _build_drone(raw: Dict[str, Any], index: int) -> DroneConfig:
         required=("id", "phases"),
         optional=("plane_id", "led_rgb", "altitude_band_m", "zone",
                   "sitl_address", "mavsdk_grpc_port", "gazebo_video_port",
-                  "sector_deg"),
+                  "sector_deg", "ip"),
         where=where,
     )
     phases = data["phases"]
@@ -419,6 +428,7 @@ def _build_drone(raw: Dict[str, Any], index: int) -> DroneConfig:
         mavsdk_grpc_port=grpc_port,
         gazebo_video_port=gz_port,
         sector_deg=sector,
+        ip=data.get("ip"),   # shape + all-or-nothing checked fleet-wide in _validate
     )
 
 
@@ -428,7 +438,8 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
 
     overrides: CLI-level tweaks applied before validation. Recognized keys:
       weights (str), budget_s (float), phases (list[str], replaces every
-      drone's list), no_detector (bool), display (bool).
+      drone's list), no_detector (bool), display (bool), ip (str — the solo
+      direct-WiFi static IP; single-drone configs only).
     """
     if not os.path.isfile(path):
         raise ConfigError(f"config file not found: {path!r} (CWD: {os.getcwd()})")
@@ -443,7 +454,7 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
         required=("profile", "flight_backend", "frame_backend", "detector", "drones"),
         optional=(
             "run_dir", "tick_hz", "mission_budget_s", "command_timeout_s",
-            "discovery_timeout_s",
+            "discovery_timeout_s", "video_start_timeout_s",
             "min_battery_pct", "allow_partial_fleet", "min_drones",
             "video_channel_order", "camera_hfov_deg",
             "sitl_address", "marker_backend", "save_marker_frames",
@@ -492,7 +503,7 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
         guards=guards,
         **{k: top[k] for k in (
             "run_dir", "tick_hz", "mission_budget_s", "command_timeout_s",
-            "discovery_timeout_s",
+            "discovery_timeout_s", "video_start_timeout_s",
             "min_battery_pct", "allow_partial_fleet", "min_drones",
             "video_channel_order", "camera_hfov_deg",
             "sitl_address", "marker_backend", "save_marker_frames",
@@ -520,6 +531,20 @@ def load_config(path: str, overrides: Optional[Dict[str, Any]] = None) -> Finals
             d.phases = list(forced)
     if ov.pop("display", False):
         cfg.detector.display = True
+    if "ip" in ov:
+        # --ip: the solo direct-WiFi fallback. A SINGLE-drone-only override —
+        # it sets that drone's static IP so the operator can aim any 1-drone
+        # config at a drone on its own AP without editing JSON. Multi-drone is
+        # refused (which drone?). Shape + all-or-nothing are checked in _validate
+        # below (the override runs before validation, like every other key).
+        ip_val = ov.pop("ip")
+        if len(cfg.drones) != 1:
+            raise ConfigError(
+                f"--ip is a SINGLE-drone override (the solo direct-WiFi "
+                f"fallback) but this config has {len(cfg.drones)} drones — use "
+                f"a 1-drone config (e.g. solo_landing_real.json) or set per-drone "
+                f'"ip" in the JSON')
+        cfg.drones[0].ip = ip_val
     if ov:
         raise ConfigError(f"unrecognized override key(s): {sorted(ov)}")
 
@@ -784,6 +809,14 @@ def _validate(cfg: FinalsConfig, config_dir: str) -> None:
         raise ConfigError(
             f"discovery_timeout_s must be finite and > 0 (the preflight P3 "
             f"Dola listen window), got {cfg.discovery_timeout_s!r}")
+    if (not isinstance(cfg.video_start_timeout_s, (int, float))
+            or isinstance(cfg.video_start_timeout_s, bool)
+            or not math.isfinite(cfg.video_start_timeout_s)
+            or cfg.video_start_timeout_s <= 0):
+        # inf would make preflight P6's first-frame None-window never close.
+        raise ConfigError(
+            f"video_start_timeout_s must be finite and > 0 (the preflight P6 "
+            f"first-frame window), got {cfg.video_start_timeout_s!r}")
     if (not isinstance(cfg.replay_fps, (int, float))
             or isinstance(cfg.replay_fps, bool)
             or not math.isfinite(cfg.replay_fps) or cfg.replay_fps <= 0):
@@ -841,6 +874,33 @@ def _validate(cfg: FinalsConfig, config_dir: str) -> None:
             f"allow_partial_fleet is a bench/real preflight feature (it degrades "
             f"the P3-P6 hardware gate); profile {cfg.profile!r} has no preflight "
             f"to degrade")
+    # STATIC IP (solo direct-WiFi fallback-to-the-fallback). A drone's `ip`, when
+    # set, makes preflight P3 connect DIRECTLY (skipping Dola UDP-broadcast
+    # discovery — see preflight._apply_static_ips) so one drone can fly on its own
+    # WiFi AP (~192.168.100.1) with the shared router gone. To keep the proven
+    # multi-drone discovery path byte-identical, `ip` is ALL-OR-NOTHING: every
+    # drone has one (discovery skipped) or none do (discovery runs as before). A
+    # mixed fleet would half-skip discovery and is never a real topology -> refused.
+    ip_drones = [d for d in cfg.drones if d.ip is not None]
+    for d in ip_drones:
+        octets = d.ip.split(".") if isinstance(d.ip, str) else []
+        if (not isinstance(d.ip, str) or len(octets) != 4
+                or not all(o.isdigit() and 0 <= int(o) <= 255 for o in octets)):
+            raise ConfigError(
+                f"drone {d.id!r} ip must be a dotted-quad IPv4 like "
+                f'"192.168.100.1" (its solo-AP address; skips Dola discovery) — '
+                f"got {d.ip!r}")
+    if ip_drones and len(ip_drones) != len(cfg.drones):
+        with_ip = [d.id for d in ip_drones]
+        without = [d.id for d in cfg.drones if d.ip is None]
+        raise ConfigError(
+            f"static `ip` must be set on EVERY drone or NONE (a mixed fleet "
+            f"would half-skip Dola discovery): have ip {with_ip}, missing {without}")
+    if ip_drones and cfg.flight_backend != "pyhulax":
+        raise ConfigError(
+            f"static drone `ip` is a pyhulax feature (it sets the PyhulaxAdapter "
+            f"target and skips discovery); flight_backend {cfg.flight_backend!r} "
+            f"does not use it")
     if cfg.video_channel_order not in ("rgb", "bgr"):
         raise ConfigError(f'video_channel_order must be "rgb" or "bgr", got {cfg.video_channel_order!r}')
     if cfg.use_uwb and not cfg.uwb_serial_port:

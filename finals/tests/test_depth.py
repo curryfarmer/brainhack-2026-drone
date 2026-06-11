@@ -189,7 +189,7 @@ def test_resolve_depth_fake_is_fakedepthsource():
 def test_resolve_depth_unknown_is_loud():
     from finals.main import resolve_depth_source_cls
     with pytest.raises(ConfigError, match="depth_backend"):
-        resolve_depth_source_cls("realsense")    # reference-only, not wired
+        resolve_depth_source_cls("lidar")        # genuinely unwired backend
 
 
 def test_build_depth_none_is_a_clean_noop(write_config):
@@ -243,6 +243,6 @@ def test_config_depth_unknown_is_loud(write_config):
     with pytest.raises(ConfigError, match="depth_backend"):
         load_config(write_config({
             "profile": "mock", "flight_backend": "mock", "frame_backend": "none",
-            "detector": {"backend": "none"}, "depth_backend": "realsense",
+            "detector": {"backend": "none"}, "depth_backend": "lidar",
             "drones": [{"id": "alpha", "phases": ["takeoff_demo"]}],
         }))

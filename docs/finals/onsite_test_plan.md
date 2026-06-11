@@ -258,8 +258,12 @@ post-processing.
 
 The same tool carries three dev-bench modes: **`--video-only`** is the FIRST thing
 to run if preflight P6 trips (`no first video frame`) — it reports time-to-first-
-frame + fps/healthy/retries and prints the fixes (firewall OFF for inbound UDP,
-power-cycle to clear a stale `bind_client`, raise `--video-timeout`, one stream per
+frame + fps/healthy/retries and prints the fixes (firewall OFF for inbound UDP —
+over **ethernet** kill ALL profiles, `netsh advfirewall set allprofiles state off`,
+since a wired NIC is a separate "Public/Unidentified" profile the WiFi-only off
+misses; one active NIC on the drone subnet; power-cycle to clear a stale
+`bind_client`; raise the timeout — preflight P6 now reads `config.video_start_timeout_s`
+(default 15 s, set 25 for ethernet), the tools take `--video-timeout`; one stream per
 drone); **`--capture`** is the retraining photographer (raw frames of pad → hand →
 background into `<id>/capture/` for labelling + `pipeline.py`); **`--dedup-report`**
 writes `dedup_report.json` (per-id stability + dominant-vs-ghost; with `--all-dicts`
@@ -271,6 +275,14 @@ propless flight plumbing, [`bench_flight.py`](../../finals/tools/bench_flight.py
 `--props-off-confirmed` (`--mock` for CI) scripts takeoff/hover/rotate/land and logs
 each command + PRE/POST telemetry to a JSONL that `replay_plot.py` draws unchanged —
 it proves command acceptance + yaw response (props OFF, so altitude won't climb).
+For the SAME plumbing under a LIVE monitor, [`flight_monitor.py`](../../finals/tools/flight_monitor.py)
+`--test takeoff_land` (basic) or `scan_land` (lawnmower → ArUco **broadcast** →
+`land_on_pad` servo) runs the flight on a worker thread while the main thread shows
+the HULA cam window + a 2 Hz `alt/yaw/is_flying` readback + a forward **depth** poll
+("OBJECT AHEAD <m>", a separate RealSense USB sensor — the HULA cam is monocular) and
+can tilt the camera (the HULA cam pitches 0-90° via `set_camera_angle`; `--camera-tilt-deg N`, N>0 = look down — useful for pad acquisition). Same
+`--props-off-confirmed` gate (`--mock` for dev); `q` aborts → safe-down. Props OFF, so
+it proves the perception→broadcast→landing-decision chain, NOT motion or touchdown.
 
 ---
 
@@ -287,6 +299,8 @@ fleet; the `sitl*`/`mock*`/`replay` configs are VM rehearsals + dev fixtures.
 | [`landing_real.json`](../../finals/configs/landing_real.json) | real | the scored 2A LANDING flight (`--profile real`) |
 | [`flight_test_real.json`](../../finals/configs/flight_test_real.json) | real | the single-drone ascend→scan→land flight test ([`flight_test.py`](../../finals/tools/flight_test.py) default) |
 | [`flight_test_3x_real.json`](../../finals/configs/flight_test_3x_real.json) | real | the 3-drone ascend→in-place-scan→land flight test (`flight_test.py --drones 3`); TIME-slot + placement deconfliction |
+| [`solo_landing_real.json`](../../finals/configs/solo_landing_real.json) | real | fallback-to-the-fallback: ONE drone on its OWN WiFi AP (static `ip`, no discovery), `[takeoff, land_on_pad]` — when the shared router / 3-drone setup is gone |
+| [`solo_convoy_real.json`](../../finals/configs/solo_convoy_real.json) | real | fallback-to-the-fallback: ONE drone on its OWN WiFi AP (static `ip`, no discovery), `[takeoff, sentry_scan]` convoy-search variant |
 | [`bench.json`](../../finals/configs/bench.json) | bench | the props-OFF B1–B8 bench tool (`--profile bench --preflight-only`) |
 | [`sitl1_landing.json`](../../finals/configs/sitl1_landing.json) | sitl | gate L1 / viewtest 1-drone landing rehearsal |
 | [`sitl3_landing.json`](../../finals/configs/sitl3_landing.json) | sitl | gate L2 3-drone staggered+serialized landing |

@@ -6,6 +6,7 @@
   "marker_backend": "aruco",
   "camera_hfov_deg": 71.0,
   "command_timeout_s": 30,
+  "video_start_timeout_s": 25,
   "mission_budget_s": 240,
   "min_battery_pct": 20,
   "detector": { "backend": "none" },

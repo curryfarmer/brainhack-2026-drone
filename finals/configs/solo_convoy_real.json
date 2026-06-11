@@ -1,0 +1,25 @@
+{
+  "_comment": "SOLO CONVOY-SEARCH — the fallback-to-the-fallback (ONE drone, real HULA over pyhulax on a DIRECT 1-on-1 WiFi link). When the shared router / 3-drone setup is gone, fly ONE drone on its OWN WiFi AP. The drone carries a static `ip` (192.168.100.1) so preflight P3 SKIPS Dola UDP-broadcast discovery and connects DIRECTLY — ZERO dependency on a broadcast arriving over the solo AP (finals/preflight.py _apply_static_ips). Phase chain [takeoff, sentry_scan]: a stationary rotating ArUco observer over the route (zero translational drift, stable hover frames best for ArUco; the convoy re-crosses the footprint). Scores convoy sightings. marker_backend 'aruco' decodes DICT_7X7_1000; detector 'none' (no YOLO). Single drone => NO band/sector separation is required (the multi-drone guard is skipped for a 1-drone fleet); altitude_band_m 1.5 here is reused ONLY as the takeoff/scan HEIGHT knob (150 cm — band*100, the shared _height_from_band rule). ONSITE LAUNCH: python -m finals.main --profile real --config finals/configs/solo_convoy_real.json --i-know-this-arms-real-drones   (aim a different drone with --ip 192.168.100.1).",
+  "profile": "real",
+  "flight_backend": "pyhulax",
+  "frame_backend": "pyhulax",
+  "command_timeout_s": 30,
+  "mission_budget_s": 300,
+  "camera_hfov_deg": 99.69,
+  "marker_backend": "aruco",
+  "detector": { "backend": "none" },
+  "guards": {
+    "_comment": "launch_slot_wait_s / slot_wait_s: bounded staggered-launch + serialized-landing corridor waits (trivial for one drone, finite, never a hang). landing_reserve_s 60: MissionClockGuard lands 60 s before the budget.",
+    "launch_slot_wait_s": 150,
+    "slot_wait_s": 150,
+    "landing_reserve_s": 60
+  },
+  "drones": [
+    {
+      "_comment": "The one observer on its own AP. ip 192.168.100.1 = the solo-AP address (skips Dola discovery; --ip overrides). altitude_band_m 1.5 = the scan HEIGHT (150 cm), NOT a separation mechanism (1-drone fleet). revolutions 2 ~ >1 convoy lap. led_rgb red = identity.",
+      "id": "solo", "plane_id": 1, "ip": "192.168.100.1", "led_rgb": [255, 0, 0],
+      "phases": ["takeoff", "sentry_scan"], "altitude_band_m": 1.5,
+      "zone": { "sentry_scan": { "revolutions": 2 } }
+    }
+  ]
+}

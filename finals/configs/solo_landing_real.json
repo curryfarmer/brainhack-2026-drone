@@ -1,0 +1,40 @@
+{
+  "_comment": "SOLO LANDING — the fallback-to-the-fallback (Challenge-2A LANDING, ONE drone, real HULA over pyhulax on a DIRECT 1-on-1 WiFi link). When the shared router / 3-drone setup is gone, fly ONE drone on its OWN WiFi AP. The drone carries a static `ip` (192.168.100.1) so preflight P3 SKIPS Dola UDP-broadcast discovery and connects DIRECTLY — ZERO dependency on a broadcast arriving over the solo AP (finals/preflight.py _apply_static_ips). Phase chain [takeoff, land_on_pad] ONLY — NO navigate, so NO surveyed arena/sector is needed: land_on_pad is a position-blind VISUAL pad servo and its PAD_ACQUIRE stage is a bounded rotate-scan of the FOV. SETUP: place the valid landing pad WITHIN the launch point's camera footprint (rotating in place cannot translate to a pad parked metres away). Scores ONE pad. Single drone => NO altitude band / sector is required (the multi-drone separation guard is skipped for a 1-drone fleet). PAD MODEL: detector.backend 'ultralytics' + the COMMITTED models/pad_v1.pt (no --weights flag needed); land_on_pad servo_on 'pad' centres on the YOLO pad blob (same as landing_real). ONSITE LAUNCH: python -m finals.main --profile real --config finals/configs/solo_landing_real.json --i-know-this-arms-real-drones   (the config IP is baked; aim a different drone with --ip 192.168.100.1).",
+  "profile": "real",
+  "flight_backend": "pyhulax",
+  "frame_backend": "pyhulax",
+  "marker_backend": "aruco",
+  "camera_hfov_deg": 71.0,
+  "command_timeout_s": 30,
+  "mission_budget_s": 240,
+  "min_battery_pct": 20,
+  "detector": { "backend": "ultralytics", "weights": "models/pad_v1.pt" },
+  "guards": {
+    "_comment": "landing_reserve_s 30: MissionClockGuard lands the drone 30 s before the budget. battery_warn_pct 30 advisory before the 20 % floor. No geofence (no surveyed arena here).",
+    "landing_reserve_s": 30,
+    "battery_warn_pct": 30
+  },
+  "drones": [
+    {
+      "_comment": "The one airframe on its own AP. ip 192.168.100.1 = the solo-AP address (skips Dola discovery; --ip overrides). plane_id 1 is a PLACEHOLDER (only a log key in static-IP mode). valid_marker_ids below is LEGACY/UNUSED in pad-servo mode. led_rgb red = identity.",
+      "id": "solo",
+      "plane_id": 1,
+      "ip": "192.168.100.1",
+      "led_rgb": [255, 0, 0],
+      "phases": ["takeoff", "land_on_pad"],
+      "zone": {
+        "takeoff": { "height_cm": 100 },
+        "land_on_pad": {
+          "_comment": "PAD-SERVO (ACTIVE): servo_on 'pad' + pad_classes ['landing_pad'] centre/descend on the YOLO pad BLOB from the COMMITTED models/pad_v1.pt. valid_marker_ids [0] is a PLACEHOLDER (set to the field pad's DICT_7X7_1000 id only if reverting to MARKER servo by deleting servo_on + pad_classes). acquire_timeout_s 40 over total_budget_s 120 = a deliberate rotate-scan sweep (30 deg steps, 0.8 s dwell) before any blind-land fallback. commit_alt_m 0.5 ONSITE-CALIBRATED (gate F).",
+          "servo_on": "pad", "pad_classes": ["landing_pad"],
+          "valid_marker_ids": [0],
+          "commit_alt_m": 0.5,
+          "acquire_timeout_s": 40,
+          "total_budget_s": 120,
+          "acquire_scan_step_deg": 30,
+          "scan_dwell_s": 0.8
+        }
+      }
+    }
+  ]
+}

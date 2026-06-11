@@ -104,6 +104,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    choices=("mock", "sitl", "replay", "bench", "real"),
                    help="execution profile; selects finals/configs/<profile>.json")
     p.add_argument("--config", help="explicit config path (overrides the profile default)")
+    p.add_argument("--ip", help="static IP for a SINGLE-drone real run on its own "
+                   "WiFi AP (e.g. 192.168.100.1) — skips Dola discovery (the "
+                   "solo direct-WiFi fallback-to-the-fallback)")
     p.add_argument("--weights", help="detector weights override (forces backend=ultralytics)")
     p.add_argument("--phases", help="comma-separated phase names forced onto ALL drones")
     p.add_argument("--budget", type=float, help="mission wall-clock budget override (s)")
@@ -231,6 +234,8 @@ def run(argv: Optional[List[str]] = None) -> int:
         overrides["no_detector"] = True
     if args.display:
         overrides["display"] = True
+    if args.ip:
+        overrides["ip"] = args.ip
 
     cfg = load_config(config_path, overrides)
     if cfg.profile != args.profile:
@@ -759,17 +764,20 @@ def resolve_depth_source_cls(backend: str) -> Optional[Type]:
     """depth_backend name -> DepthSource class (None for 'none'). ConfigError on
     unknown. The OPTIONAL SENSE-IR seam: 'none' (the default monocular swarm
     path) wires NO depth at all; 'fake' wires the dependency-free
-    FakeDepthSource. A real 'realsense' backend is out of scope (reference only
-    — see finals/vision/depth.py)."""
+    FakeDepthSource; 'realsense' wires the real RealSenseDepthSource (opt-in, for
+    a rig that physically carries an Intel RealSense — pyrealsense2 lazy-imported
+    inside the backend; see finals/vision/depth.py)."""
     if backend == "none":
         return None
     if backend == "fake":
         from finals.vision.depth import FakeDepthSource
         return FakeDepthSource
+    if backend == "realsense":
+        from finals.vision.depth import RealSenseDepthSource
+        return RealSenseDepthSource
     raise ConfigError(
-        f"unknown depth_backend {backend!r} — one of: none, fake "
-        f"(realsense is reference-only, not wired — the swarm path is "
-        f"monocular; see finals/vision/depth.py)")
+        f"unknown depth_backend {backend!r} — one of: none, fake, realsense "
+        f"(the default swarm path is monocular; see finals/vision/depth.py)")
 
 
 def _build_depth(cfg: FinalsConfig, drone_id: str):
@@ -782,7 +790,10 @@ def _build_depth(cfg: FinalsConfig, drone_id: str):
     depth_cls = resolve_depth_source_cls(cfg.depth_backend)
     if depth_cls is None:
         return None
-    # Only "fake" reaches here today (resolve_depth_source_cls guards the rest).
+    # "fake" or "realsense" reach here; both take source_id as the sole required
+    # arg (resolve_depth_source_cls guards unknown names). RealSenseDepthSource
+    # defaults its stream/grid params; flight_monitor constructs it directly when
+    # it needs non-defaults.
     return depth_cls(drone_id)
 
 

@@ -1,13 +1,17 @@
 """Degraded-fleet fallback (cfg.allow_partial_fleet) — the "default to fewer
 drones if the full swarm can't be brought up" path.
 
-Three layers:
+Layers:
 1. config — the new knobs validate (min_drones floor, profile gate).
 2. preflight partial gates — a failing drone is DROPPED (not a swarm abort);
    the gate fails critically ONLY when survivors fall below min_drones.
-3. end-to-end via main(--profile real --config landing_real.json) — one drone
-   never discovered -> the OTHER TWO fly the mission to DONE, exit 0, and the
-   casualty is logged (drone_dropped / fleet_degraded / flying_degraded_fleet).
+3. end-to-end via main(--profile real) — a failing drone is dropped and the
+   SURVIVORS fly the mission to DONE, exit 0, with the casualty logged
+   (drone_dropped / fleet_degraded / flying_degraded_fleet). Proven for a drop
+   at DISCOVERY (P3), at CONNECT (P4), at VIDEO (P6), and two drops at once.
+4. STATIC-IP solo direct-WiFi — the fallback-to-the-fallback: a 1-drone config
+   with a static `ip` SKIPS Dola discovery (P3) entirely and flies to DONE on a
+   direct link; the all-or-nothing + shape validation; the --ip override.
 
 Deterministic: faked pyhulax/Dola/cv2/torch seams, injected operator GO, no
 wall-clock races. Mirrors the seam style of test_real_wiring_e2e.
@@ -390,3 +394,211 @@ def test_strict_config_still_aborts_on_a_missing_drone(tmp_path, monkeypatch):
     evs = _mission_events(_only_run_dir(tmp_path))
     kinds = {e["event"] for e in evs}
     assert "drone_dropped" not in kinds and "fleet_degraded" not in kinds
+
+
+# ============================================================
+# 3b. End-to-end drops at CONNECT (P4) and VIDEO (P6)
+# ============================================================
+def _wire_fleet_with_failures(monkeypatch, failures):
+    """Like _wire_common but a chosen drone FAILS a hardware gate. `failures` =
+    {drone_index: 'connect'|'video'}: index's FakeDroneAPI fails BOTH connect +
+    robust_connect (P4 drop), or its video stream is pre-ERRORED so the source's
+    start() raises SensorTimeout at once (P6 drop). EVERY drone answers discovery
+    (the partial-P3 seam returns all), so the drop is at P4/P6, never P3. Returns
+    the captured apis list (cfg.drones order — _make_shared_pyhulax_api is called
+    once per drone in that order, so len(apis) at call time IS the drone index)."""
+    import finals.main as fmain
+    import finals.preflight as pf
+    import finals.vision.aruco as aruco
+    from finals.flight.pyhulax_adapter import (FakeDroneAPI, DroneConnectionError,
+                                               NotReady)
+    from finals.vision.pyhulax_video import FakeVideoStream
+
+    apis = []
+
+    def _fake_api(cfg):
+        mode = failures.get(len(apis))
+        if mode == "connect":
+            api = FakeDroneAPI(
+                fail_on={"connect": DroneConnectionError,
+                         "robust_connect": NotReady},
+                video_stream=FakeVideoStream())
+        elif mode == "video":
+            vs = FakeVideoStream()
+            vs.go_error(stuck=True)        # P6 start() sees ERROR -> SensorTimeout
+            api = FakeDroneAPI(video_stream=vs)
+        else:
+            api = FakeDroneAPI(video_stream=FakeVideoStream())
+        apis.append(api)
+        return api
+
+    monkeypatch.setattr(fmain, "_make_shared_pyhulax_api", _fake_api)
+    monkeypatch.setattr(fmain, "_build_detector",
+                        lambda cfg, bus, slog, run_dir, csv_health=None: None)
+    monkeypatch.setattr(
+        pf, "_default_discover_partial",
+        lambda plane_ids, timeout_s, min_count: {
+            p: f"10.0.0.{p}" for p in plane_ids})
+    monkeypatch.setattr(pf, "_stdin_go_reader", lambda: "GO")
+    monkeypatch.setattr(aruco, "make_marker_detector",
+                        lambda backend, **kw: (lambda frame, source_id: []))
+    return apis
+
+
+def _run_landing_degraded(tmp_path, monkeypatch):
+    import finals.main as fmain
+    monkeypatch.chdir(tmp_path)
+    return fmain.main(["--profile", "real", "--config", _LANDING_REAL,
+                       "--i-know-this-arms-real-drones", "--no-detector",
+                       "--phases", "takeoff_demo", "--budget", "120"])
+
+
+def _assert_survivors_done_and_dropped(tmp_path, survivors, dropped_ids):
+    rd = _only_run_dir(tmp_path)
+    hb = _heartbeat(rd)
+    assert set(hb["drones"]) == set(survivors)
+    assert all(d["state"] == "DONE" for d in hb["drones"].values())
+    for d in dropped_ids:
+        assert d not in hb["drones"]            # the casualty never flew
+    evs = _mission_events(rd)
+    dropped = sorted(e["data"]["drone"] for e in evs
+                     if e["event"] == "drone_dropped")
+    assert dropped == sorted(dropped_ids)
+    assert any(e["event"] == "fleet_degraded" for e in evs)
+    flying = [e for e in evs if e["event"] == "flying_degraded_fleet"]
+    assert flying and all(d in flying[-1]["data"]["dropped"] for d in dropped_ids)
+
+
+def test_one_drone_connect_fails_flies_the_other_two(tmp_path, monkeypatch):
+    """A drone ANSWERS discovery but fails BOTH connect + robust_connect at P4 ->
+    dropped; the other two fly to DONE (exit 0), casualty logged. The connect
+    drop, proven end-to-end (it was only gate-unit-tested before)."""
+    pytest.importorskip("cv2")
+    cfg = load_config(_LANDING_REAL)
+    alpha, bravo, charlie = (d.id for d in cfg.drones)
+    _wire_fleet_with_failures(monkeypatch, {2: "connect"})   # charlie's connect dies
+    assert _run_landing_degraded(tmp_path, monkeypatch) == 0
+    _assert_survivors_done_and_dropped(tmp_path, [alpha, bravo], [charlie])
+
+
+def test_one_drone_video_fails_flies_the_other_two(tmp_path, monkeypatch):
+    """A drone connects fine but its video stream is ERRORED before the first
+    frame -> P6 drops it; the other two fly to DONE (exit 0). The video drop,
+    proven end-to-end."""
+    pytest.importorskip("cv2")
+    cfg = load_config(_LANDING_REAL)
+    alpha, bravo, charlie = (d.id for d in cfg.drones)
+    _wire_fleet_with_failures(monkeypatch, {1: "video"})     # bravo's video errors
+    assert _run_landing_degraded(tmp_path, monkeypatch) == 0
+    _assert_survivors_done_and_dropped(tmp_path, [alpha, charlie], [bravo])
+
+
+def test_two_drones_drop_at_different_gates_one_flies(tmp_path, monkeypatch):
+    """Defence in depth: bravo fails VIDEO (P6) AND charlie fails CONNECT (P4),
+    so alpha ALONE clears every gate and flies to DONE (exit 0) — the
+    min_drones=1 floor met by a single survivor across TWO different drop gates."""
+    pytest.importorskip("cv2")
+    cfg = load_config(_LANDING_REAL)
+    alpha, bravo, charlie = (d.id for d in cfg.drones)
+    _wire_fleet_with_failures(monkeypatch, {1: "video", 2: "connect"})
+    assert _run_landing_degraded(tmp_path, monkeypatch) == 0
+    _assert_survivors_done_and_dropped(tmp_path, [alpha], [bravo, charlie])
+
+
+# ============================================================
+# 4. STATIC-IP solo direct-WiFi (the fallback-to-the-fallback)
+# ============================================================
+_SOLO_LANDING = os.path.join(_CONFIG_DIR, "solo_landing_real.json")
+_SOLO_CONVOY = os.path.join(_CONFIG_DIR, "solo_convoy_real.json")
+
+
+def test_solo_configs_carry_static_ip():
+    for name in (_SOLO_LANDING, _SOLO_CONVOY):
+        cfg = load_config(name)
+        assert len(cfg.drones) == 1
+        assert cfg.drones[0].ip == "192.168.100.1"
+        assert cfg.flight_backend == "pyhulax"
+
+
+def test_mixed_static_ip_fleet_rejected(tmp_path):
+    """`ip` is all-or-nothing: one drone with an ip among three is refused (it
+    would half-skip discovery)."""
+    base = json.load(open(_LANDING_REAL, encoding="utf-8"))
+    base["drones"][0]["ip"] = "192.168.100.1"     # only one of three
+    p = tmp_path / "mixed.json"
+    p.write_text(json.dumps(base), encoding="utf-8")
+    with pytest.raises(ConfigError, match="EVERY drone or NONE"):
+        load_config(str(p))
+
+
+def test_static_ip_bad_shape_rejected(tmp_path):
+    base = json.load(open(_SOLO_LANDING, encoding="utf-8"))
+    base["drones"][0]["ip"] = "999.1.1"           # not a dotted-quad
+    p = tmp_path / "badip.json"
+    p.write_text(json.dumps(base), encoding="utf-8")
+    with pytest.raises(ConfigError, match="dotted-quad"):
+        load_config(str(p))
+
+
+def test_static_ip_on_non_pyhulax_rejected(tmp_path):
+    """`ip` is a pyhulax (real HULA) feature — refused on a mock/sitl backend."""
+    base = json.load(open(os.path.join(_CONFIG_DIR, "mock.json"), encoding="utf-8"))
+    base["drones"][0]["ip"] = "192.168.100.1"
+    p = tmp_path / "mock_ip.json"
+    p.write_text(json.dumps(base), encoding="utf-8")
+    with pytest.raises(ConfigError, match="pyhulax"):
+        load_config(str(p))
+
+
+def test_ip_override_sets_single_drone():
+    cfg = load_config(_SOLO_CONVOY, {"ip": "192.168.1.77"})
+    assert cfg.drones[0].ip == "192.168.1.77"     # --ip aims the lone drone
+
+
+def test_ip_override_rejects_multi_drone():
+    with pytest.raises(ConfigError, match="SINGLE-drone"):
+        load_config(_LANDING_REAL, {"ip": "192.168.1.77"})
+
+
+def test_p3_static_ip_skips_discovery():
+    """The core mechanism: an all-static fleet NEVER calls discovery — P3 applies
+    each config `ip` straight to the adapter (set_target_ip)."""
+    from finals.preflight import _p3_discovery
+    from finals.flight.pyhulax_adapter import FakeDroneAPI, PyhulaxAdapter
+    cfg = load_config(_SOLO_LANDING)
+    adapter = PyhulaxAdapter("solo", api=FakeDroneAPI())
+    agents = [_StubAgent("solo", adapter)]
+
+    def _spy(plane_ids, timeout_s):
+        raise AssertionError("discovery must be SKIPPED for an all-static fleet")
+
+    ok, _detail, data = asyncio.run(_p3_discovery(cfg, agents, _spy))
+    assert ok is True
+    assert data.get("static") is True
+    assert adapter._ip == "192.168.100.1"         # applied via set_target_ip
+
+
+def test_solo_static_ip_flies_to_done_without_discovery(tmp_path, monkeypatch):
+    """The fallback-to-the-fallback END-TO-END: a 1-drone solo config with a
+    static ip flies to DONE (exit 0) while BOTH discovery seams are booby-trapped
+    to explode — proving P3 skips Dola entirely (a real broadcast listen would
+    hang/fail on this Windows box)."""
+    pytest.importorskip("cv2")
+    import finals.main as fmain
+    import finals.preflight as pf
+
+    _wire_common(monkeypatch)
+
+    def _boom(*a, **k):
+        raise AssertionError("discovery reached for an all-static solo config")
+    monkeypatch.setattr(pf, "_default_discover", _boom)
+    monkeypatch.setattr(pf, "_default_discover_partial", _boom)
+
+    monkeypatch.chdir(tmp_path)
+    code = fmain.main(["--profile", "real", "--config", _SOLO_LANDING,
+                       "--i-know-this-arms-real-drones", "--no-detector",
+                       "--phases", "takeoff_demo", "--budget", "120"])
+    assert code == 0
+    hb = _heartbeat(_only_run_dir(tmp_path))
+    assert set(hb["drones"]) == {"solo"}
+    assert hb["drones"]["solo"]["state"] == "DONE"

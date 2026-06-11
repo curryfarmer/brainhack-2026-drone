@@ -57,8 +57,10 @@ from finals.errors import (ConfigError, FlightError, PreflightError,
                            SensorError, SensorTimeout)
 from finals.events import EventLogError
 
-#: Wall-clock window for the video stream's None startup gap (P6); the pyhulax
-#: stream takes ~1-2 s to deliver the first frame.
+#: Fallback wall-clock window for the video stream's None startup gap (P6); the
+#: pyhulax stream takes ~1-2 s for the first frame on WiFi, longer over ethernet.
+#: Production passes cfg.video_start_timeout_s (default 15.0) — raise that in the
+#: config (not code) onsite when a slow link trips P6.
 _VIDEO_START_TIMEOUT_S = 10.0
 #: On-ground altitude tolerance (P5): a drone that already thinks it is up is a
 #: telemetry/zeroing fault to catch on the bench, not in the air.
@@ -107,6 +109,25 @@ def _pyhulax_leaf(adapter) -> object:
     """The PyhulaxAdapter under a BenchAdapter wrap (set_target_ip lives on the
     leaf), or the adapter itself on the real profile."""
     return getattr(adapter, "inner", adapter)
+
+
+def _apply_static_ips(cfg, agents) -> Dict[int, str]:
+    """Solo direct-WiFi path: apply each drone's config `ip` to its adapter,
+    SKIPPING Dola discovery entirely (no UDP bind, no broadcast wait). The
+    fallback-to-the-fallback — one drone on its own WiFi AP (~192.168.100.1) when
+    the shared router is gone — must not depend on a broadcast arriving.
+
+    Caller guarantees every drone has an `ip` (config._validate enforces the
+    all-or-nothing rule). Mirrors P3's post-discovery apply exactly: same
+    drone/agent order check, same set_target_ip — only the IP SOURCE differs
+    (config, not the wire). Returns {plane_id: ip} for the gate detail."""
+    for drone, agent in zip(cfg.drones, agents):
+        if agent.drone_id != drone.id:
+            raise PreflightError(
+                f"preflight wiring: agent {agent.drone_id!r} != config drone "
+                f"{drone.id!r} (order mismatch in main)")
+        _pyhulax_leaf(_adapter_of(agent)).set_target_ip(drone.ip)
+    return {d.plane_id: d.ip for d in cfg.drones}
 
 
 # ============================================================
@@ -178,7 +199,8 @@ async def run_preflight(
         await _gate("P4", "connect", True, lambda: _p4_connect(cfg, agents))
         await _gate("P5", "telemetry sane", True, lambda: _p5_telemetry(cfg, agents))
         await _gate("P6", "video fresh", True,
-                    lambda: _p6_video(sources, started_sources))
+                    lambda: _p6_video(sources, started_sources,
+                                      timeout_s=cfg.video_start_timeout_s))
         await _gate("P7", "detect + tick load", False,
                     lambda: _p7_detect(cfg, sources, state))
         await _gate("P8", "uwb serial", True, lambda: _p8_uwb(cfg))
@@ -197,7 +219,8 @@ async def run_preflight(
                                                   min_drones, events))
         await _gate("P6", "video fresh", True,
                     lambda: _p6_video_partial(sources, started_sources, agents,
-                                              dropped, min_drones, events))
+                                              dropped, min_drones, events,
+                                              timeout_s=cfg.video_start_timeout_s))
         await _gate("P7", "detect + tick load", False,
                     lambda: _p7_detect(cfg, _alive_sources(sources, dropped), state))
         await _gate("P8", "uwb serial", True, lambda: _p8_uwb(cfg))
@@ -301,6 +324,12 @@ async def _p2_perception(cfg, state: dict) -> Tuple[bool, str, dict]:
 
 
 async def _p3_discovery(cfg, agents, discover_fn) -> Tuple[bool, str, dict]:
+    # STATIC-IP solo-AP path: every drone carries a config `ip` -> skip Dola
+    # discovery entirely and apply each IP directly (config._validate guarantees
+    # all-or-nothing, so an all() check is enough). The fallback-to-the-fallback.
+    if cfg.drones and all(d.ip is not None for d in cfg.drones):
+        ips = _apply_static_ips(cfg, agents)
+        return True, f"static IP, no discovery: {ips}", {"ips": ips, "static": True}
     df = discover_fn or _default_discover
     plane_ids = [d.plane_id for d in cfg.drones]
     ips = df(plane_ids, cfg.discovery_timeout_s)   # PreflightError names the gap
@@ -350,11 +379,13 @@ async def _p5_telemetry(cfg, agents) -> Tuple[bool, str, dict]:
     return True, "battery/freshness/on-ground OK for all drones", data
 
 
-async def _p6_video(sources, started_sources: List) -> Tuple[bool, str, dict]:
+async def _p6_video(sources, started_sources: List, *,
+                    timeout_s: float = _VIDEO_START_TIMEOUT_S
+                    ) -> Tuple[bool, str, dict]:
     if not sources:
         return True, "no video sources wired (skipped)", {}
     for source in sources:
-        source.start(timeout_s=_VIDEO_START_TIMEOUT_S)   # SensorTimeout/Error
+        source.start(timeout_s=timeout_s)                # SensorTimeout/Error
         started_sources.append(source)                   # so teardown stops it
         if not source.healthy:
             return False, (f"{source.source_id} started but is not healthy "
@@ -470,6 +501,16 @@ async def _drop_drone(drone_id: str, agents, sources, dropped: set, events,
 
 async def _p3_discovery_partial(cfg, agents, sources, discover_fn, dropped,
                                 min_drones, events) -> Tuple[bool, str, dict]:
+    # STATIC-IP solo-AP path (same as strict _p3_discovery): all drones carry a
+    # config `ip` -> skip discovery, apply directly. Nobody is dropped at P3
+    # (the IPs are known); P4-P6 still gate/degrade per the survivor floor.
+    if cfg.drones and all(d.ip is not None for d in cfg.drones):
+        ips = _apply_static_ips(cfg, agents)
+        alive = _alive_ids(agents, dropped)
+        return (len(alive) >= min_drones,
+                f"static IP, no discovery: {ips}; flying {alive}",
+                {"ips": ips, "static": True, "dropped": sorted(dropped),
+                 "flying": alive})
     plane_ids = [d.plane_id for d in cfg.drones]
     if discover_fn is not None:
         ips = discover_fn(plane_ids, cfg.discovery_timeout_s)   # may return a subset
@@ -551,7 +592,9 @@ async def _p5_telemetry_partial(cfg, agents, sources, dropped, min_drones,
 
 
 async def _p6_video_partial(sources, started_sources, agents, dropped,
-                            min_drones, events) -> Tuple[bool, str, dict]:
+                            min_drones, events, *,
+                            timeout_s: float = _VIDEO_START_TIMEOUT_S
+                            ) -> Tuple[bool, str, dict]:
     if not sources:
         alive = _alive_ids(agents, dropped)
         return len(alive) >= min_drones, "no video sources wired (skipped)", {}
@@ -559,7 +602,7 @@ async def _p6_video_partial(sources, started_sources, agents, dropped,
         if source.source_id in dropped:
             continue
         try:
-            source.start(timeout_s=_VIDEO_START_TIMEOUT_S)
+            source.start(timeout_s=timeout_s)
             started_sources.append(source)
             if not source.healthy:
                 await _drop_drone(source.source_id, agents, sources, dropped,

@@ -30,10 +30,12 @@ cv2 / pyrealsense2 NOTE (deliberate): this module is PURE (NOT in
 tests/test_conventions.py SDK_ALLOWED) — main.py resolves every backend for
 --dry-run on SDK-less machines, and the bare suite stays green WITHOUT numpy.
 So numpy is type-only (TYPE_CHECKING) and any RealSense/cv2 contact in a real
-backend MUST be a method-local lazy import (the ReplaySource pattern). The real
-RealSense backend is NOT in scope here — its API is documented inline as a
-reference only (rs.pipeline / rs.align / depth_frame.get_distance), never
-imported.
+backend MUST be a method-local lazy import (the ReplaySource pattern).
+RealSenseDepthSource below IS that real (opt-in) backend — pyrealsense2 is
+lazy-imported inside _open(), never at module top — used only by a rig that
+physically carries an Intel RealSense (e.g. the props-off flight_monitor's
+forward obstacle poll). The default swarm path stays monocular: depth_backend
+"none" wires NO DepthSource at all.
 
 Session: SENSE-IR.
 """
@@ -264,31 +266,196 @@ class FakeDepthSource(DepthSource):
                 return
 
 
-# ============================================================
-# Real RealSense backend — REFERENCE ONLY (NOT in scope, NOT wired)
-# ============================================================
-# A real DepthSource over an Intel RealSense (the MAPPING-drone stack, kept
-# here only so the seam's intended shape is documented). It would be a new
-# `RealSenseDepthSource(DepthSource)` whose start() does, with cv2/pyrealsense2
-# imported LAZILY inside the method (this module stays pure):
-#
-#     import pyrealsense2 as rs              # method-local, gated
-#     pipeline = rs.pipeline(); config = rs.config()
-#     config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-#     config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-#     profile = pipeline.start(config)
-#     align = rs.align(rs.stream.color)      # register depth to the RGB frame
-#     depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
-#
-# and whose pacing thread reads:
-#
-#     frames = align.process(pipeline.wait_for_frames())
-#     depth_frame = frames.get_depth_frame()
-#     metres = depth_frame.get_distance(cx, cy)   # the distance_at() primitive
-#
-# (see docs/finals/example_code/getDepth.py — that is the mapping drone's
-# onboard code, audited not copied). It is OUT OF SCOPE for SENSE-IR: the
-# swarm path is monocular, so shipping it would add a real SDK dependency for a
-# sensor this challenge does not use. VALID_DEPTH_BACKENDS gains "realsense"
-# (and main._build_depth grows a branch) the day the swarm actually carries a
-# depth camera — not before.
+class RealSenseDepthSource(DepthSource):
+    """A real DepthSource over an Intel RealSense (D4xx) — the forward-facing
+    USB depth sensor the props-off flight_monitor polls for "object in front of
+    me?". OPT-IN ONLY (depth_backend "realsense" / flight_monitor
+    --depth-backend realsense): the HULA swarm path is monocular, so the default
+    backend stays "none" and the scored mission is byte-for-byte unchanged.
+
+    Lifecycle/threading mirror FakeDepthSource (start/stop/read/healthy +
+    pacing thread). pyrealsense2 is imported LAZILY inside _open() so this module
+    stays pure (no top-level SDK import → test_conventions + the bare venv stay
+    green). The pacing thread reads aligned frames and DOWNSAMPLES the HxW depth
+    image to a coarse `grid_h x grid_w` metres map (a few thousand get_distance()
+    calls/frame, not ~300k), published as a DepthFrame whose distance_at(cx, cy)
+    reads the true metres at that grid cell. depth_frame.get_distance() already
+    returns METRES, so no depth_scale arithmetic is needed.
+
+    The SDK contact is isolated in three overridable hooks — _open() / _read_grid
+    / _close() — so tests inject a fake pipeline and exercise the pacing /
+    staleness / grid logic WITHOUT hardware or pyrealsense2 (the importorskip is
+    only for a true on-camera run). See docs/finals/example_code/getDepth.py for
+    the audited reference (the mapping drone's onboard code, not copied).
+    """
+
+    def __init__(self, source_id: str, *, width: int = 640, height: int = 480,
+                 fps: int = 30, grid_w: int = 64, grid_h: int = 48,
+                 stale_s: float = 2.0, frame_timeout_ms: int = 2000,
+                 clock: Callable[[], float] = time.monotonic):
+        if not isinstance(source_id, str) or not source_id:
+            raise ValueError(
+                f"RealSenseDepthSource: source_id must be a non-empty str, got "
+                f"{source_id!r} — check the wiring")
+        for name, value in (("width", width), ("height", height), ("fps", fps),
+                            ("grid_w", grid_w), ("grid_h", grid_h),
+                            ("stale_s", stale_s),
+                            ("frame_timeout_ms", frame_timeout_ms)):
+            if (not isinstance(value, (int, float)) or isinstance(value, bool)
+                    or not math.isfinite(value) or value <= 0):
+                raise ValueError(
+                    f"RealSenseDepthSource({source_id!r}): {name} must be finite "
+                    f"and > 0, got {value!r}")
+        if grid_w > width or grid_h > height:
+            raise ValueError(
+                f"RealSenseDepthSource({source_id!r}): grid {grid_w}x{grid_h} "
+                f"must not exceed the sensor frame {width}x{height}")
+        self._source_id = source_id
+        self._width = int(width)
+        self._height = int(height)
+        self._fps = int(fps)
+        self._grid_w = int(grid_w)
+        self._grid_h = int(grid_h)
+        self._stale_s = float(stale_s)
+        self._frame_timeout_ms = int(frame_timeout_ms)
+        self._clock = clock
+
+        self._lock = threading.Lock()
+        self._latest: Optional[Tuple[Any, float]] = None   # (grid, ts)
+        self._stop_event = threading.Event()
+        self._first = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._started = False
+        self._stopped = False
+        self._error: Optional[str] = None
+
+    # ---------------- lifecycle ----------------
+    def start(self, timeout_s: float = 10.0) -> None:
+        if self._started or self._stopped:
+            raise RuntimeError(
+                f"RealSenseDepthSource({self._source_id!r}).start() called twice "
+                f"/ after stop() — one source, one thread; build a fresh instance")
+        self._started = True
+        self._thread = threading.Thread(
+            target=self._run, name=f"depth-rs-{self._source_id}", daemon=False)
+        self._thread.start()
+        if not self._first.wait(timeout_s):
+            self.stop()
+            detail = self._error or (
+                "no frame and no error — is the RealSense connected? check the "
+                "USB3 cable, or run with --depth-backend fake")
+            raise SensorTimeout(
+                f"{self._source_id}: no first RealSense depth frame within "
+                f"{timeout_s:.1f} s — {detail}")
+
+    def stop(self) -> None:
+        """Idempotent; never raises (logs instead)."""
+        self._stopped = True
+        self._stop_event.set()
+        t = self._thread
+        if t is not None and t.is_alive():
+            t.join(6.0)
+            if t.is_alive():
+                print(f"[RealSenseDepthSource:{self._source_id}] WARNING: pacing "
+                      f"thread still alive 6 s after stop()",
+                      file=sys.stderr, flush=True)
+
+    # ---------------- the contract ----------------
+    def read(self) -> Optional[DepthFrame]:
+        with self._lock:
+            if self._latest is None:
+                return None
+            data, ts = self._latest
+        copy = [list(row) for row in data]
+        height = len(copy)
+        width = len(copy[0]) if height else 0
+        return DepthFrame(copy, ts, self._source_id, width=width, height=height)
+
+    @property
+    def healthy(self) -> bool:
+        if not self._started or self._stopped:
+            return False
+        with self._lock:
+            latest = self._latest
+        if latest is None:
+            return False
+        return (self._clock() - latest[1]) <= self._stale_s
+
+    @property
+    def source_id(self) -> str:
+        return self._source_id
+
+    @property
+    def last_error(self) -> Optional[str]:
+        """The fatal error that ended the pacing thread, or None — surfaced so
+        the caller can report WHY depth went unhealthy instead of guessing."""
+        return self._error
+
+    # ---------------- SDK seam (overridden by tests with a fake pipeline) ------
+    def _open(self) -> Any:
+        """Build + start the RealSense pipeline; return an opaque ctx
+        (pipeline, align). pyrealsense2 is lazy-imported here so the module stays
+        pure. Raises on failure (recorded by _run as last_error)."""
+        import pyrealsense2 as rs   # lazy by design — keeps this module pure
+        pipeline = rs.pipeline()
+        config = rs.config()
+        config.enable_stream(rs.stream.depth, self._width, self._height,
+                             rs.format.z16, self._fps)
+        config.enable_stream(rs.stream.color, self._width, self._height,
+                             rs.format.bgr8, self._fps)
+        pipeline.start(config)
+        align = rs.align(rs.stream.color)
+        return (pipeline, align)
+
+    def _read_grid(self, ctx: Any) -> "Optional[List[List[float]]]":
+        """One coarse metres map (grid_h x grid_w) from the aligned depth frame,
+        or None if no depth arrived this cycle. get_distance() returns METRES."""
+        pipeline, align = ctx
+        frames = pipeline.wait_for_frames(self._frame_timeout_ms)
+        depth = align.process(frames).get_depth_frame()
+        if not depth:
+            return None
+        xs = [min(self._width - 1, int((i + 0.5) * self._width / self._grid_w))
+              for i in range(self._grid_w)]
+        ys = [min(self._height - 1, int((j + 0.5) * self._height / self._grid_h))
+              for j in range(self._grid_h)]
+        return [[float(depth.get_distance(x, y)) for x in xs] for y in ys]
+
+    def _close(self, ctx: Any) -> None:
+        if ctx is None:
+            return
+        pipeline = ctx[0]
+        try:
+            pipeline.stop()
+        except (RuntimeError, OSError) as e:   # teardown best-effort, never raise
+            print(f"[RealSenseDepthSource:{self._source_id}] pipeline.stop(): "
+                  f"{type(e).__name__}: {e}", file=sys.stderr, flush=True)
+
+    # ---------------- the pacing thread ----------------
+    def _run(self) -> None:
+        ctx = None
+        try:
+            ctx = self._open()
+        except (ImportError, RuntimeError, OSError, ValueError) as e:
+            # ImportError = pyrealsense2 absent; RuntimeError = no device / busy.
+            self._error = f"{type(e).__name__}: {e}"
+            return
+        try:
+            # Bounded (convention 3): the stop event ends the loop.
+            while not self._stop_event.is_set():
+                try:
+                    grid = self._read_grid(ctx)
+                except (RuntimeError, OSError) as e:
+                    # A persistent frame-wait timeout / cable yank ends the
+                    # thread loudly → healthy goes False, last_error explains it.
+                    self._error = f"frame read failed: {type(e).__name__}: {e}"
+                    return
+                if grid is None:
+                    if self._stop_event.wait(0.01):
+                        return
+                    continue
+                with self._lock:
+                    self._latest = (grid, self._clock())
+                self._first.set()
+        finally:
+            self._close(ctx)
